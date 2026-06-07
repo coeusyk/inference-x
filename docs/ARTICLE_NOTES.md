@@ -115,3 +115,30 @@ Capture reasoning, tradeoffs, benchmarks, and implementation details here so the
   - Enable file export: `INFERENCE_X_METRICS_FILE=/tmp/inferencex-metrics.jsonl ./scripts/dev.sh serve`
   - Record shape: `{"request_id": "...", "path": "/v1/chat/completions", "method": "POST", "status_code": 200, "latency_ms": 142.5, "model": "qwen2.5-0.5b", "prompt_tokens": 12, "completion_tokens": 38, "total_tokens": 50, "error": false}`
   - `MetricsService.summary()` returns: total_requests, error_count, avg_latency_ms, p95_latency_ms.
+
+---
+
+### 2026-06-07 — Phase 3 exit criteria verification (add-observability-pipeline)
+
+- **Change**: No code changes required for exit criteria. Added `test_content_length_recalculated_after_body_buffer` during verification. Expanded body-buffering pattern notes below.
+- **Why**: Confirm observability layer is non-blocking, contract-safe, and export-correct before Phase 4.
+- **Non-blocking write path**:
+  - `MetricsRecorder.record()` is synchronous on the request path — intentional for Phase 3 simplicity.
+  - `InMemoryStorage.append()`: lock + `deque.append` only — benchmarked ~0.14 µs/write (10k writes in 1.39 ms). No I/O.
+  - Default exporter is `NullExporter` (no-op) — zero file I/O on hot path.
+  - **Caveat**: when `INFERENCE_X_METRICS_FILE` is set, `JsonLineExporter` opens and appends synchronously per request. Acceptable for dev/low-QPS; background export deferred to Phase 5 if needed.
+- **BaseHTTPMiddleware body-buffering pattern** (non-obvious Starlette gotcha):
+  - Problem: `BaseHTTPMiddleware` exposes responses as a streaming `body_iterator`. Once consumed for token extraction, you cannot patch the iterator back — the client receives empty bytes (confirmed during Phase 3 implementation: `resp.content == b''`, JSONDecodeError).
+  - Wrong approach: `response.body_iterator = patched.body_iterator` — does not work; iterator is already exhausted.
+  - Correct pattern:
+    1. `async for chunk in response.body_iterator: body_bytes += chunk`
+    2. Parse JSON from `body_bytes` to extract token counts.
+    3. Return a **new** `Response(content=body_bytes, status_code=..., headers={... without content-length ...}, media_type=...)`.
+    4. Starlette recalculates `content-length` from `len(body_bytes)` automatically.
+  - Scope: only `POST /v1/chat/completions` with status 200. All other paths leave `body_iterator` untouched.
+- **Validation**:
+  - `uv run pytest tests/unit/ -v` → 94/94 passed (93 prior + 1 content-length test).
+  - `test_response_body_unchanged_after_middleware` passes — payload fields identical.
+  - `test_content_length_recalculated_after_body_buffer` passes — header matches `len(resp.content)`.
+  - Exporter: `build_exporter()` → `NullExporter` when env unset; `JsonLineExporter` writes valid NDJSON (3 lines, each `json.loads`-able).
+  - Phase 1+2 contracts unchanged — all prior route/schema/service tests pass.

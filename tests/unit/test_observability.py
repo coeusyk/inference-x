@@ -354,6 +354,15 @@ class TestObservabilityMiddleware:
         assert body["choices"][0]["message"]["content"] == "ok"
         assert body["usage"]["total_tokens"] == 8
 
+    def test_content_length_recalculated_after_body_buffer(self, obs_client):
+        """Starlette must set content-length to match the re-wrapped response body."""
+        client, _ = obs_client
+        resp = client.post("/v1/chat/completions", json=self._chat_payload)
+        assert resp.status_code == 200
+        content_length = resp.headers.get("content-length")
+        assert content_length is not None
+        assert int(content_length) == len(resp.content)
+
     def test_models_endpoint_is_recorded(self, obs_client):
         client, recorder = obs_client
         client.get("/v1/models")
