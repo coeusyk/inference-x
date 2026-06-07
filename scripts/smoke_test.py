@@ -80,8 +80,11 @@ def run(base_url: str) -> bool:
         print("      FAIL  connection refused (no server listening)")
         print(_CONNECTION_HINT)
         ok = False
-    elif status == 200 and body and body.get("status") in ("healthy", "degraded"):
+    elif status == 200 and body and body.get("status") == "healthy":
         print(f"      PASS  status={body['status']}")
+    elif status == 503:
+        print(f"      FAIL  http=503 engine unavailable body={body}")
+        ok = False
     else:
         print(f"      FAIL  http={status} body={body}")
         if body:

@@ -16,8 +16,11 @@ class ChatService:
         """Run a chat completion request and return a typed response.
 
         Raises:
+            ValueError: If the request asks for unsupported behavior (e.g. streaming).
             RuntimeError: Propagated from the engine on inference failure.
         """
+        if request.stream:
+            raise ValueError("Streaming is not supported in Phase 1")
         return await self._engine.generate(request)
 
     def engine_healthy(self) -> bool:

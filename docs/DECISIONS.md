@@ -62,3 +62,24 @@ Use this document to capture non-obvious design decisions as the project evolves
 - Context: `core/engine.py` and `core/schemas.py` contained implementation code in the wrong layer.
 - Decision: Migrate all engine logic to `engines/` and schema models to `schemas/` per the architecture spec. Legacy stub files left in place; remove in a cleanup change.
 - Consequences: Dependency flow API → Services → Interfaces → Implementations is now enforced by module layout.
+
+### DEC-008
+- Date: 2026-06-07
+- Status: accepted
+- Context: Phase 1 exit review found `/health` returned HTTP 200 with `status: degraded` when the engine health flag was false.
+- Decision: Return HTTP 503 when `is_healthy()` is false; return HTTP 500 when engine initialization raises `RuntimeError`; return HTTP 200 only when healthy.
+- Consequences: Load balancers and smoke tests can distinguish unavailable from ready. Body still includes `status` and `engine` fields.
+
+### DEC-009
+- Date: 2026-06-07
+- Status: accepted
+- Context: Phase 1 needs a health signal without running inference on every poll.
+- Decision: Set `_healthy = True` only after successful vLLM `LLM()` init; `is_healthy()` returns that flag with no live generation.
+- Consequences: Health reflects init-time readiness, not runtime degradation after load. Acceptable for Phase 1; runtime probes can be added in observability phase.
+
+### DEC-010
+- Date: 2026-06-07
+- Status: accepted
+- Context: Request schema accepts `stream: bool` but Phase 1 has no SSE implementation.
+- Decision: Reject `stream=true` in `ChatService.complete()` with `ValueError` → HTTP 400 and structured error body.
+- Consequences: Clients get an explicit error instead of a misleading non-streaming 200 response.

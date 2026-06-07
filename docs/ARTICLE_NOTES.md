@@ -26,27 +26,24 @@ Capture reasoning, tradeoffs, benchmarks, and implementation details here so the
 
 ### 2026-06-07 — Phase 1 core inference slice complete (add-core-vllm-engine)
 
-- **Change**: Implemented the first runnable vLLM-backed inference path end-to-end.
-- **Files added/written**:
-  - `src/inference_x/schemas/chat.py` — typed OpenAI-compatible request/response models (Pydantic v2)
-  - `src/inference_x/schemas/common.py` — shared `ErrorResponse` / `ErrorDetail` models
-  - `src/inference_x/engines/base.py` — `BaseEngine` abstract interface (`generate`, `is_healthy`)
-  - `src/inference_x/engines/vllm_engine.py` — vLLM adapter; import-guarded for GPU-less dev
-  - `src/inference_x/core/settings.py` — `AppSettings` env+yaml config loader; `get_settings()` cached singleton
-  - `src/inference_x/services/chat_service.py` — thin orchestration layer; wraps engine
-  - `src/inference_x/api/deps.py` — FastAPI dependency factories (engine + service singletons)
-  - `src/inference_x/api/errors.py` — exception handlers for `RuntimeError` / `ValueError`
-  - `src/inference_x/api/routes/chat_completions.py` — `POST /v1/chat/completions`
-  - `src/inference_x/api/routes/health.py` — `GET /health`
-  - `src/inference_x/api/main.py` — FastAPI app wiring with exception handlers
-  - `tests/unit/` — 28 unit/contract tests (schemas, engine interface, service, settings, routes)
-  - `scripts/smoke_test.py` — standalone HTTP smoke test (stdlib only)
-- **Why**: First runnable slice proves the architectural layers hold and gives a testable baseline before routing/observability work.
-- **Tradeoffs**:
-  - vllm stays in main `[project.dependencies]` — Phase 1 requires it; `uv sync` must install the full stack.
-  - Dev deps live in `[dependency-groups] dev` (uv includes them on sync by default).
-  - Run server and scripts with `uv run` — bare `uvicorn`/`python` from pyenv bypasses `.venv` and breaks vllm import.
-- **Validation**: `python -m pytest tests/unit/ -v` → **28/28 passed** (no GPU required; vLLM mocked via stub engine + FastAPI dependency override).
-- **Server start command**: `uvicorn inference_x.api.main:app --host 0.0.0.0 --port 8000`
-- **Model selection**: set `INFERENCE_X_DEFAULT_MODEL=<name>` where name is a key in `config/models.yaml` (default: `qwen2.5-0.5b`)
-- **Smoke test command**: `python scripts/smoke_test.py` (requires running server)
+- **Change**: First runnable vLLM-backed inference path — OpenAI-compatible `POST /v1/chat/completions` and `GET /health` through layered modules (schemas → engine → service → routes).
+- **Why**: Prove the architecture before routing, observability, or UI; establish a stable public contract for Phase 2+.
+- **Tradeoff**:
+  - Engine health is a boolean set at init success (`is_healthy()`); no live GPU ping on every `/health` poll — avoids latency and GPU churn.
+  - Engine loads lazily on first request via FastAPI `Depends` — server starts fast, first `/health` or chat call pays model-load cost (~2–4 min cold, faster with cached weights).
+  - `stream=true` rejected with HTTP 400 — Phase 1 is non-streaming only; silent ignore would break client expectations.
+  - vllm stays in main `[project.dependencies]`; dev deps in `[dependency-groups] dev`.
+  - Must run server with `uv run` or `./scripts/dev.sh serve` — bare pyenv `uvicorn`/`python` bypasses `.venv`.
+  - Only one vLLM server per GPU — second instance fails KV cache alloc (`Available KV cache memory: -0.04 GiB`).
+  - Legacy `core/engine.py` and `core/schemas.py` stubs remain; cleanup deferred.
+- **Validation**:
+  - `uv run python -m pytest tests/unit/ -v` → 32/32 passed (stub engine + dependency overrides; no GPU in unit tests).
+  - Live smoke on WSL2 + CUDA: `qwen2.5-0.5b`, first health ~90s, chat reply `'Hello.'`, 38 tokens.
+  - Commit: `fc1ee1d` on `develop`.
+- **Useful quote / command / number**:
+  - Start: `INFERENCE_X_DEFAULT_MODEL=qwen2.5-0.5b ./scripts/dev.sh serve`
+  - Smoke: `uv run python scripts/smoke_test.py`
+  - Sync: `uv sync`
+  - vLLM 0.22.1 on Python 3.13; WSL forces `spawn` multiprocessing and `pin_memory=False`.
+  - Health codes: 200 healthy, 503 engine flag false, 500 engine init/inference failure.
+  - Error shape: `{"error": {"message": "...", "type": "internal_error"|"invalid_request_error"}}`; validation errors use FastAPI 422 `detail` array.

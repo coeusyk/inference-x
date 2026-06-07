@@ -52,6 +52,17 @@ class TestChatService:
         assert resp.choices[0].message.content == "ok"
 
     @pytest.mark.asyncio
+    async def test_complete_rejects_streaming(self):
+        svc = ChatService(_StubEngine())
+        req = ChatCompletionRequest(
+            model="test",
+            messages=[ChatMessage(role="user", content="hello")],
+            stream=True,
+        )
+        with pytest.raises(ValueError, match="Streaming is not supported"):
+            await svc.complete(req)
+
+    @pytest.mark.asyncio
     async def test_complete_propagates_runtime_error(self):
         svc = ChatService(_StubEngine(raise_on_generate=True))
         with pytest.raises(RuntimeError, match="stub generation error"):

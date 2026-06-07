@@ -75,9 +75,23 @@ class TestHealthEndpoint:
 
     def test_health_returns_degraded_when_engine_unhealthy(self, unhealthy_client):
         resp = unhealthy_client.get("/health")
-        assert resp.status_code == 200
+        assert resp.status_code == 503
         body = resp.json()
         assert body["status"] == "degraded"
+        assert body["engine"] == "unavailable"
+
+    def test_health_returns_500_when_engine_fails_to_load(self):
+        def _fail_service() -> ChatService:
+            raise RuntimeError("vLLM initialization failed")
+
+        app.dependency_overrides[get_chat_service] = _fail_service
+        with TestClient(app) as client:
+            resp = client.get("/health")
+            assert resp.status_code == 500
+            body = resp.json()
+            assert body["error"]["type"] == "internal_error"
+            assert "vLLM initialization failed" in body["error"]["message"]
+        app.dependency_overrides.clear()
 
 
 class TestChatCompletionsEndpoint:
@@ -116,3 +130,28 @@ class TestChatCompletionsEndpoint:
         payload["temperature"] = 5.0
         resp = client.post("/v1/chat/completions", json=payload)
         assert resp.status_code == 422
+
+    def test_stream_true_returns_400(self, client):
+        payload = dict(self._payload)
+        payload["stream"] = True
+        resp = client.post("/v1/chat/completions", json=payload)
+        assert resp.status_code == 400
+        body = resp.json()
+        assert body["error"]["type"] == "invalid_request_error"
+        assert "Streaming" in body["error"]["message"]
+
+    def test_engine_failure_returns_structured_500(self, client):
+        class _FailingEngine(BaseEngine):
+            async def generate(self, request: ChatCompletionRequest) -> ChatCompletionResponse:
+                raise RuntimeError("inference exploded")
+
+            def is_healthy(self) -> bool:
+                return True
+
+        app.dependency_overrides[get_chat_service] = lambda: ChatService(_FailingEngine())
+        with TestClient(app) as c:
+            resp = c.post("/v1/chat/completions", json=self._payload)
+            assert resp.status_code == 500
+            body = resp.json()
+            assert body["error"]["type"] == "internal_error"
+        app.dependency_overrides.clear()
