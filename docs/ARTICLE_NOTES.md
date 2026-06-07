@@ -55,7 +55,7 @@ Capture reasoning, tradeoffs, benchmarks, and implementation details here so the
 - **Change**: Added `ModelRegistry`, `BaseRouter`, `TaskRouter`, `ExplicitModelPolicy`, `DefaultModelPolicy`, `GET /v1/models`. Wired routing into `ChatService`. All config-driven via `config/routing.yaml` + `config/models.yaml`.
 - **Why**: Phase 2 contract — platform should select models by policy, not hardcode one engine reference in the service layer.
 - **Tradeoff**:
-  - Still single-engine (one GPU). Router resolves a model name; if it doesn't match the loaded engine, HTTP 400 is returned with a restart instruction. Multi-engine fanout deferred to Phase 3+.
+  - Still single-engine (one GPU). Router resolves a model name; if it doesn't match the loaded engine, HTTP 400 is returned with a restart instruction. Simultaneous multi-engine loading is not implemented (DEC-011).
   - `DefaultModelPolicy` validates the default at construction time, not per-request — misconfiguration fails at startup, not mid-request.
   - `ExplicitModelPolicy` returns `None` for unregistered models (falls through to default) rather than rejecting — clients can pass any `model` field and still get a valid response via fallback.
   - `ModelRegistry.from_config()` owns YAML parsing and Pydantic validation; `AppSettings.get_model_config()` retained for backward compat only.
@@ -180,3 +180,9 @@ Capture reasoning, tradeoffs, benchmarks, and implementation details here so the
   - All 33 tests use mocked HTTP — no live server required.
   - `test_sample_prompts_file_parses` validates the actual JSON file loads without error.
   - Backend contracts: zero changes to any route, service, or schema.
+
+## Playground compare — single-GPU fix (2026-06-07)
+
+- **Problem**: `--compare` on one server hit HTTP 400 for every prompt on model B (`Routed to model 'X' but loaded model is 'Y'`) — DEC-011 one-model-per-server, not a backend bug.
+- **Fix**: `preflight_compare()` fails fast with setup instructions; `--sequential` runs model A, prompts server restart, waits for model B, then prints side-by-side results.
+- **Validation**: 39 playground unit tests (incl. preflight + sequential mocks); full suite 133/133.

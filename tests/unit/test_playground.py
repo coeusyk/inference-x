@@ -267,6 +267,102 @@ class TestChatCompletion:
 
 
 # ---------------------------------------------------------------------------
+# preflight_compare
+# ---------------------------------------------------------------------------
+
+class TestPreflightCompare:
+    def test_dual_url_skips_check(self):
+        assert pg.preflight_compare("a", "b", "http://x:8000", "http://x:8001") is None
+
+    def test_same_model_skips_check(self):
+        assert pg.preflight_compare("a", "a", "http://x:8000", "http://x:8000") is None
+
+    def test_single_server_mismatch_returns_helpful_error(self):
+        err_body = (
+            '{"error":{"message":"Routed to model \'tinyllama-chat\' but loaded model is '
+            '\'qwen2.5-0.5b\'. This server loads one model at a time (see DEC-011).",'
+            '"type":"invalid_request_error"}}'
+        )
+        import urllib.error
+
+        http_err = urllib.error.HTTPError("url", 400, "Bad Request", {}, None)
+        http_err.read = lambda: err_body.encode()
+
+        with mock.patch("urllib.request.urlopen", side_effect=http_err):
+            msg = pg.preflight_compare(
+                "qwen2.5-0.5b", "tinyllama-chat", "http://localhost:8000", "http://localhost:8000"
+            )
+        assert msg is not None
+        assert "single server" in msg.lower() or "Cannot compare" in msg
+        assert "8001" in msg
+        assert "--base-url-a" in msg
+        assert "--sequential" in msg
+
+    def test_main_exits_1_on_preflight_failure(self):
+        err_body = (
+            '{"error":{"message":"Routed to model \'b\' but loaded model is \'a\'.",'
+            '"type":"invalid_request_error"}}'
+        )
+        import urllib.error
+
+        http_err = urllib.error.HTTPError("url", 400, "Bad Request", {}, None)
+        http_err.read = lambda: err_body.encode()
+
+        stderr = StringIO()
+        with mock.patch("urllib.request.urlopen", side_effect=http_err):
+            with mock.patch("sys.stderr", stderr):
+                code = pg.main(["--compare", "a", "b", "hello"])
+        assert code == 1
+        assert "Cannot compare" in stderr.getvalue()
+
+
+class TestCompareSequential:
+    def test_runs_both_phases_and_prints_compare(self):
+        resp_a = _make_response("answer A", model="model-a")
+        resp_b = _make_response("answer B", model="model-b")
+        call_count = {"n": 0}
+
+        def fake_fetch(prompt, model, base_url, temperature, max_tokens):
+            call_count["n"] += 1
+            r = resp_a if model == "model-a" else resp_b
+            out = dict(r)
+            out["_latency_ms"] = 10.0
+            return out
+
+        buf = StringIO()
+        with mock.patch.object(pg, "fetch_completion", side_effect=fake_fetch):
+            with mock.patch.object(pg, "wait_for_loaded_model", return_value=True):
+                with mock.patch("sys.stdout", buf):
+                    code = pg.run_compare_sequential(
+                        [pg.Prompt(text="hello", label="test")],
+                        "model-a",
+                        "model-b",
+                        "http://localhost:8000",
+                        0.7,
+                        512,
+                    )
+        assert code == 0
+        out = buf.getvalue()
+        assert "model-a" in out
+        assert "model-b" in out
+        assert call_count["n"] == 2
+
+    def test_main_sequential_skips_preflight(self):
+        resp = _make_response("ok")
+        buf = StringIO()
+        with mock.patch.object(pg, "fetch_completion", return_value={**resp, "_latency_ms": 1.0}):
+            with mock.patch.object(pg, "wait_for_loaded_model", return_value=True):
+                with mock.patch("sys.stdout", buf):
+                    code = pg.main([
+                        "--compare", "model-a", "model-b",
+                        "--sequential",
+                        "hello",
+                    ])
+        assert code == 0
+        assert "model-a" in buf.getvalue()
+
+
+# ---------------------------------------------------------------------------
 # CLI argument parsing via main()
 # ---------------------------------------------------------------------------
 
@@ -314,7 +410,12 @@ class TestCLI:
         buf = StringIO()
         with mock.patch("urllib.request.urlopen", return_value=_mock_urlopen(resp_body)):
             with mock.patch("sys.stdout", buf):
-                code = pg.main(["--compare", "model-a", "model-b", "some prompt"])
+                code = pg.main([
+                    "--compare", "model-a", "model-b",
+                    "--base-url-a", "http://localhost:8000",
+                    "--base-url-b", "http://localhost:8001",
+                    "some prompt",
+                ])
         assert code == 0
         out = buf.getvalue()
         assert "model-a" in out

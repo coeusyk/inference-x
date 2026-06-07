@@ -42,8 +42,8 @@ class ChatService:
         if routed_model != self._loaded_model:
             raise ValueError(
                 f"Routed to model '{routed_model}' but loaded model is "
-                f"'{self._loaded_model}'. Multi-model serving is a Phase 3+ feature. "
-                f"Restart with INFERENCE_X_DEFAULT_MODEL={routed_model}."
+                f"'{self._loaded_model}'. This server loads one model at a time "
+                f"(see DEC-011). Restart with INFERENCE_X_DEFAULT_MODEL={routed_model}."
             )
 
         return await self._engine.generate(request)

@@ -26,15 +26,19 @@ python3 playground/client.py "What is the capital of France?"
 # Target a specific model
 python3 playground/client.py --model tinyllama-chat "Explain transformers in one sentence."
 
-# Compare two models side-by-side
+# Compare two models side-by-side (requires two server instances — one model per GPU)
+# Terminal 1:
+INFERENCE_X_DEFAULT_MODEL=qwen2.5-0.5b ./scripts/dev.sh serve
+# Terminal 2:
+INFERENCE_X_DEFAULT_MODEL=tinyllama-chat uv run uvicorn inference_x.api.main:app --host 0.0.0.0 --port 8001
+# Terminal 3:
 python3 playground/client.py --compare qwen2.5-0.5b tinyllama-chat \
+  --base-url-a http://localhost:8000 --base-url-b http://localhost:8001 \
   "Write a haiku about a GPU running out of memory."
-
-# Run all sample prompts against the default model
-python3 playground/client.py --prompts-file playground/prompts/sample_prompts.json
 
 # Compare all sample prompts across two models
 python3 playground/client.py --compare qwen2.5-0.5b tinyllama-chat \
+  --base-url-a http://localhost:8000 --base-url-b http://localhost:8001 \
   --prompts-file playground/prompts/sample_prompts.json
 
 # Check server health
@@ -52,9 +56,11 @@ python3 playground/client.py --list-models
 |---|---|---|
 | `prompt` (positional) | — | Inline prompt text |
 | `--model NAME` | `qwen2.5-0.5b` | Model to query |
-| `--compare A B` | — | Compare two models side-by-side |
+| `--compare A B` | — | Compare two models side-by-side (two servers if A≠B) |
 | `--prompts-file PATH` | — | JSON file of prompts (overrides inline) |
-| `--base-url URL` | `http://localhost:8000` | Server URL |
+| `--base-url URL` | `http://localhost:8000` | Server URL (single-model mode) |
+| `--base-url-a URL` | `--base-url` | Server URL for MODEL_A in compare mode |
+| `--base-url-b URL` | `--base-url` | Server URL for MODEL_B in compare mode |
 | `--temperature FLOAT` | `0.7` | Sampling temperature (0–2) |
 | `--max-tokens N` | `512` | Max tokens to generate |
 | `--list-models` | — | Print available models and exit |
@@ -62,7 +68,50 @@ python3 playground/client.py --list-models
 
 ---
 
-## Sample prompts
+## Compare mode (single GPU — recommended)
+
+On a single GPU only one model loads at a time. Use `--sequential` to compare without running two servers:
+
+```bash
+# Terminal 1 — start with model A
+INFERENCE_X_DEFAULT_MODEL=qwen2.5-0.5b ./scripts/dev.sh serve
+
+# Terminal 2 — run sequential compare
+python3 playground/client.py --compare qwen2.5-0.5b tinyllama-chat --sequential \
+  --prompts-file playground/prompts/sample_prompts.json
+```
+
+The client will:
+1. Run all prompts against `qwen2.5-0.5b`
+2. Tell you to restart the server with `tinyllama-chat`
+3. Wait until the new model is healthy
+4. Run all prompts against `tinyllama-chat` and print side-by-side results
+
+Without `--sequential`, compare on a single server fails fast with setup instructions.
+
+---
+
+## Compare mode (two GPUs / dual-server)
+
+InferenceX loads **one model per server process** (single GPU). To compare two different models you need two server instances on different ports:
+
+```bash
+# Terminal 1 — model A
+INFERENCE_X_DEFAULT_MODEL=qwen2.5-0.5b ./scripts/dev.sh serve
+
+# Terminal 2 — model B
+INFERENCE_X_DEFAULT_MODEL=tinyllama-chat \
+  uv run uvicorn inference_x.api.main:app --host 0.0.0.0 --port 8001
+
+# Terminal 3 — compare
+python3 playground/client.py --compare qwen2.5-0.5b tinyllama-chat \
+  --base-url-a http://localhost:8000 --base-url-b http://localhost:8001 \
+  "Your prompt here"
+```
+
+If you run `--compare` with two different models on the same `--base-url`, the client fails fast with setup instructions instead of repeating HTTP 400 errors for every prompt.
+
+---
 
 `playground/prompts/sample_prompts.json` contains 8 prompts designed for comparison:
 
