@@ -154,3 +154,14 @@ Use this document to capture non-obvious design decisions as the project evolves
 - Context: The middleware singleton recorder must be wired at app creation (`add_middleware`), before FastAPI's dependency injection is available.
 - Decision: `deps._build_recorder()` is an `lru_cache` function that builds the `InMemoryStorage` + configured exporter + `MetricsRecorder`. `deps.get_recorder()` is a plain function (not FastAPI Depends) that returns this singleton. `main.py` calls `deps.get_recorder()` at module load when registering the middleware. Integration tests clear `recorder.storage` in a per-test fixture rather than injecting a different recorder.
 - Consequences: The recorder is a true process singleton shared between middleware and any future `MetricsService` Depends usage. Test isolation is via `storage.clear()` before each test — simple and reliable.
+
+---
+
+## Phase 4 decisions
+
+### DEC-020
+- Date: 2026-06-07
+- Status: accepted
+- Context: Phase 4 requires a playground and comparison flow. Options: (a) React/Next.js SPA, (b) single HTML+JS file, (c) Python CLI script.
+- Decision: Python CLI script (`playground/client.py`) using stdlib only (`argparse`, `urllib.request`, `json`). No npm, no node_modules, no frontend build pipeline. The script talks directly to the existing API over HTTP.
+- Consequences: Runs immediately in WSL2 with `python3` — zero setup beyond a live server. Output is terminal text designed for paste/screenshot. Side-by-side compare uses columnar layout. Testable with `unittest.mock`. A future HTML client can be added without touching the Python script.

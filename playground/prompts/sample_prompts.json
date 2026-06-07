@@ -1,0 +1,39 @@
+[
+  {
+    "label": "basic-factual",
+    "text": "What is the capital of France?"
+  },
+  {
+    "label": "explain-concept",
+    "text": "Explain self-attention in one short paragraph, as if explaining to a software engineer who has not studied ML."
+  },
+  {
+    "label": "haiku-gpu",
+    "text": "Write a haiku about a GPU running out of memory.",
+    "system": "You are a creative writing assistant. Keep responses concise."
+  },
+  {
+    "label": "code-snippet",
+    "text": "Write a Python function that returns the nth Fibonacci number using memoization. Include a brief docstring.",
+    "system": "You are a helpful coding assistant. Provide working Python 3 code."
+  },
+  {
+    "label": "summarise-text",
+    "text": "Summarise the following in one sentence: 'Large language models are neural networks trained on vast corpora of text to predict the next token in a sequence. They learn statistical patterns across many languages and domains, enabling them to answer questions, generate code, and follow complex instructions.'",
+    "system": "You are a precise summarisation assistant."
+  },
+  {
+    "label": "compare-models",
+    "text": "What are three advantages of quantised LLM models over full-precision models for local inference?",
+    "system": "Answer in three numbered bullet points. Keep each point under 20 words."
+  },
+  {
+    "label": "creative-story",
+    "text": "Write the first two sentences of a science fiction story set inside a GPU during inference.",
+    "system": "You are a creative writing assistant."
+  },
+  {
+    "label": "reasoning",
+    "text": "A train travels 120 km in 2 hours, then 180 km in 3 hours. What is its average speed for the whole journey?"
+  }
+]

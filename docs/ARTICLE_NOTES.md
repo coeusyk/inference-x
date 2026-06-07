@@ -142,3 +142,41 @@ Capture reasoning, tradeoffs, benchmarks, and implementation details here so the
   - `test_content_length_recalculated_after_body_buffer` passes — header matches `len(resp.content)`.
   - Exporter: `build_exporter()` → `NullExporter` when env unset; `JsonLineExporter` writes valid NDJSON (3 lines, each `json.loads`-able).
   - Phase 1+2 contracts unchanged — all prior route/schema/service tests pass.
+
+---
+
+### 2026-06-07 — Phase 4 playground and evaluation (add-playground-eval)
+
+- **Change**: Added `playground/client.py` (stdlib-only Python CLI), `playground/prompts/sample_prompts.json` (8 prompts), `playground/README.md`. 33 new tests in `tests/unit/test_playground.py`. No backend changes.
+- **Why**: The platform needs to be demonstrable and article-ready, not only technically correct. The playground produces output that can be pasted into a post or screenshotted for a demo.
+- **Tradeoff**:
+  - Python CLI over HTML/JS — zero setup, runs immediately in WSL2, no build tooling. If a browser UI is needed later it can be added as a separate `playground/web/` artefact without touching `client.py`.
+  - All HTTP via `urllib.request` (stdlib) — no `requests` or `httpx` dependency. Acceptable for a playground script; latency is dominated by model inference, not the HTTP client.
+  - Compare mode is sequential (model A then model B) — simpler, avoids threading complexity. Latency numbers in the output reflect real wall time per model.
+  - Terminal columnar output (`─` separators, fixed 60-char columns) is designed to be paste-able into a Markdown article or screenshotted from a terminal.
+- **How to demo**:
+  ```bash
+  # Start server
+  INFERENCE_X_DEFAULT_MODEL=qwen2.5-0.5b ./scripts/dev.sh serve
+
+  # Health check
+  python3 playground/client.py --health
+
+  # List models
+  python3 playground/client.py --list-models
+
+  # Single prompt
+  python3 playground/client.py "What is self-attention?"
+
+  # Compare (requires two models loaded separately)
+  python3 playground/client.py --compare qwen2.5-0.5b tinyllama-chat \
+    "Write a haiku about a GPU running out of memory."
+
+  # Run all sample prompts
+  python3 playground/client.py --prompts-file playground/prompts/sample_prompts.json
+  ```
+- **Validation**:
+  - `uv run pytest tests/unit/ -v` → 127/127 passed (94 prior + 33 new playground tests).
+  - All 33 tests use mocked HTTP — no live server required.
+  - `test_sample_prompts_file_parses` validates the actual JSON file loads without error.
+  - Backend contracts: zero changes to any route, service, or schema.
