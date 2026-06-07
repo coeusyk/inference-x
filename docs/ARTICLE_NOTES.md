@@ -1,11 +1,25 @@
-### Day 1
+# Article Notes
 
-- Defined the architecture of the project
-- Found out that vLLM supports Linux only for now, so need to use WSL with CUDA installed in it.
-- Created a comprehensive, future-thinking, planned copilot-instructions.md for the project
+This file is maintained by the agent and by hand throughout the project.
+Capture reasoning, tradeoffs, benchmarks, and implementation details here so the project can be turned into a technical article without reconstructing history.
 
-### Day 2
+## How to use
 
-- Created models.yaml for one single model (llama3.1-8b)
-- Defined the server as 0.0.0.0 at port 8000
-- Created basic schemas for message and completion request
+- Add a note after every meaningful milestone, architectural decision, benchmark, or noteworthy WSL2/vLLM finding.
+- Keep notes short and factual. Use bullets, not polished prose.
+- Capture exact commands, config values, error messages, and numbers when useful.
+- Do not write final article language here — just raw observations.
+
+## Note format
+
+### [Date] — [Milestone or topic]
+- **Change**: what was done
+- **Why**: motivation
+- **Tradeoff**: what was accepted or rejected
+- **Validation**: how it was tested
+- **Useful quote / command / number**: anything worth citing in the article
+- **Screenshot / artifact**: optional
+
+---
+
+<!-- Add notes below this line -->

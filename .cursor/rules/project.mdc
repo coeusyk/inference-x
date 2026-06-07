@@ -35,3 +35,10 @@
 - New engine or routing logic should be covered by unit tests with mocks or fixtures.
 - Avoid dead code, placeholder TODOs, and commented-out implementations in committed changes.
 - Keep naming explicit and consistent with the architecture docs.
+
+## Article notes
+
+- After completing any phase milestone, architectural decision, benchmark, or noteworthy implementation detail, add a short note to `docs/ARTICLE_NOTES.md`.
+- Notes should be bullets only — not polished prose.
+- Capture: what changed, why, tradeoff accepted, validation run, and any numbers or commands worth quoting.
+- Do not skip this step; the article depends on these notes being written during the build.

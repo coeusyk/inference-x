@@ -17,6 +17,7 @@ Promising but incomplete
 - Keep `AGENTS.md` as the root behavior contract, `.cursor/rules/*` as focused Cursor guidance, `docs/ARCHITECTURE.md` as the system map, and OpenSpec as the change-level execution layer. [context-dependent]
 - Make Phase 1 a thin vertical slice: one engine, one API endpoint, one config path, one smoke test. [first-principles]
 - Add contract tests early so the project can grow without accidentally changing public behavior. [known-pattern]
+- Record meaningful findings in `docs/ARTICLE_NOTES.md` throughout the build, not only at the end. [context-dependent]
 
 ## Next action
 Validate the repo against the updated `AGENTS.md`, `docs/ARCHITECTURE.md`, and the first OpenSpec change plan, then check that only the Phase 1 backend slice is in scope. [context-dependent]

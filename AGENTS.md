@@ -35,7 +35,7 @@ This repository uses OpenSpec for spec-driven development.
 
 ## File boundaries
 
-- `docs/` contains architecture, phase, decision, review, and build docs only.
+- `docs/` contains architecture, phase, decision, review, build, and article notes docs only.
 - `openspec/` contains specs, proposals, designs, tasks, and change deltas only.
 - `config/` contains environment and runtime configuration only.
 - `src/inference_x/api/` contains FastAPI wiring, routes, dependencies, and error mapping.
@@ -77,6 +77,13 @@ Do not add these before the relevant phase:
 - Contract changes must update specs and docs in the same change.
 - Engine changes must be validated against the Phase 1 contract.
 - If a change cannot be validated, do not mark it complete.
+
+## Article notes
+
+- After completing any phase milestone, architectural decision, benchmark, or noteworthy implementation detail, add a note to `docs/ARTICLE_NOTES.md`.
+- Notes should be short, factual bullets — not polished prose.
+- Do not wait until the end of the project to write notes.
+- Capture: what changed, why, what tradeoff was accepted, validation run, and any useful numbers or commands.
 
 ## Phase discipline
 
