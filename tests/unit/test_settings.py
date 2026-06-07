@@ -72,3 +72,19 @@ class TestAppSettings:
         settings = AppSettings()
         settings.config_dir = str(tmp_path)
         assert settings.get_server_config() == {}
+
+    def test_loaded_models_defaults_to_default_model(self, monkeypatch):
+        monkeypatch.delenv("INFERENCE_X_LOADED_MODELS", raising=False)
+        monkeypatch.setenv("INFERENCE_X_DEFAULT_MODEL", "qwen2.5-0.5b")
+        settings = AppSettings()
+        assert settings.loaded_models == ["qwen2.5-0.5b"]
+
+    def test_loaded_models_from_env(self, monkeypatch):
+        monkeypatch.setenv("INFERENCE_X_LOADED_MODELS", "alpha,beta,gamma")
+        settings = AppSettings()
+        assert settings.loaded_models == ["alpha", "beta", "gamma"]
+
+    def test_loaded_models_strips_whitespace(self, monkeypatch):
+        monkeypatch.setenv("INFERENCE_X_LOADED_MODELS", " alpha , beta ")
+        settings = AppSettings()
+        assert settings.loaded_models == ["alpha", "beta"]

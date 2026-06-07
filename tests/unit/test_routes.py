@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from inference_x.api.deps import get_chat_service, get_registry
 from inference_x.api.main import app
 from inference_x.engines.base import BaseEngine
+from inference_x.engines.pool import EnginePool
 from inference_x.routing.task_router import TaskRouter
 from inference_x.schemas.chat import (
     ChatCompletionChoice,
@@ -58,12 +59,8 @@ def _make_stub_registry() -> ModelRegistry:
 def _make_stub_service(healthy: bool = True) -> ChatService:
     registry = _make_stub_registry()
     router = TaskRouter(registry, _TEST_MODEL)
-    return ChatService(
-        engine=_StubEngine(healthy=healthy),
-        registry=registry,
-        router=router,
-        loaded_model=_TEST_MODEL,
-    )
+    pool = EnginePool({_TEST_MODEL: _StubEngine(healthy=healthy)})
+    return ChatService(engine_pool=pool, registry=registry, router=router)
 
 
 def _stub_service_factory(healthy: bool = True):
@@ -105,6 +102,7 @@ class TestHealthEndpoint:
         body = resp.json()
         assert body["status"] == "healthy"
         assert body["engine"] == "ok"
+        assert _TEST_MODEL in body["loaded_models"]
 
     def test_health_returns_degraded_when_engine_unhealthy(self, unhealthy_client):
         resp = unhealthy_client.get("/health")
@@ -187,12 +185,8 @@ class TestChatCompletionsEndpoint:
 
         registry = _make_stub_registry()
         router = TaskRouter(registry, _TEST_MODEL)
-        failing_svc = ChatService(
-            engine=_FailingEngine(),
-            registry=registry,
-            router=router,
-            loaded_model=_TEST_MODEL,
-        )
+        pool = EnginePool({_TEST_MODEL: _FailingEngine()})
+        failing_svc = ChatService(engine_pool=pool, registry=registry, router=router)
         app.dependency_overrides[get_chat_service] = lambda: failing_svc
         with TestClient(app) as c:
             resp = c.post("/v1/chat/completions", json=self._payload)

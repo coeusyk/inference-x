@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
 from inference_x.engines.base import BaseEngine
+from inference_x.utils.cuda_env import ensure_vllm_runtime_env
+from inference_x.utils.vllm_pool_config import scale_model_config_for_pool
 from inference_x.schemas.chat import (
     ChatCompletionChoice,
     ChatCompletionMessage,
@@ -14,12 +17,21 @@ from inference_x.schemas.chat import (
 
 logger = logging.getLogger(__name__)
 
-try:
-    from vllm import LLM, SamplingParams  # type: ignore[import-untyped]
+_VLLM_AVAILABLE: bool | None = None
 
-    _VLLM_AVAILABLE = True
-except ImportError:
-    _VLLM_AVAILABLE = False
+
+def _load_vllm():
+    global _VLLM_AVAILABLE
+    if _VLLM_AVAILABLE is not None:
+        return
+    try:
+        from vllm import LLM, SamplingParams  # type: ignore[import-untyped]
+
+        globals()["LLM"] = LLM
+        globals()["SamplingParams"] = SamplingParams
+        _VLLM_AVAILABLE = True
+    except ImportError:
+        _VLLM_AVAILABLE = False
 
 
 class VLLMEngine(BaseEngine):
@@ -30,13 +42,25 @@ class VLLMEngine(BaseEngine):
     occupying the GPU unnecessarily on every /health poll.
     """
 
-    def __init__(self, model_config: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        model_config: dict[str, Any],
+        *,
+        pool_size: int = 1,
+        pool_models: list[str] | None = None,
+    ) -> None:
+        _load_vllm()
         if not _VLLM_AVAILABLE:
             raise RuntimeError(
                 "vllm is not installed. "
                 "Install it with: pip install vllm  (requires a CUDA-capable GPU)"
             )
 
+        model_config = scale_model_config_for_pool(
+            model_config,
+            pool_size=pool_size,
+            pool_models=pool_models,
+        )
         required = {"name", "model_path"}
         missing = required - model_config.keys()
         if missing:
@@ -57,11 +81,25 @@ class VLLMEngine(BaseEngine):
         if model_config.get("quantization"):
             kwargs["quantization"] = model_config["quantization"]
 
+        if pool_size > 1 and "gpu_memory_utilization" in model_config:
+            logger.info(
+                "Multi-model pool (%d engines): gpu_memory_utilization=%s for model=%s",
+                pool_size,
+                model_config["gpu_memory_utilization"],
+                model_config["name"],
+            )
+
         logger.info("Initializing vLLM engine for model=%s path=%s", self._model_name, self._model_path)
         logger.info(
             "Loading weights (first run downloads from HuggingFace with no progress "
             "log until complete — can take several minutes on slow links)"
         )
+        cuda_home = ensure_vllm_runtime_env(pool_size=pool_size)
+        if cuda_home is None and not os.environ.get("CUDA_HOME"):
+            logger.warning(
+                "CUDA_HOME not set and nvcc not found; FlashInfer JIT may fail on WSL2"
+            )
+        LLM = globals()["LLM"]
         try:
             self._llm: LLM = LLM(**kwargs)
             self._supports_chat = self._detect_chat_support()
@@ -78,9 +116,21 @@ class VLLMEngine(BaseEngine):
                     f"CUDA OOM loading {self._model_path}. "
                     "Reduce gpu_memory_utilization or use a smaller model."
                 ) from exc
+            if "cache blocks" in msg.lower() or "kv cache" in msg.lower():
+                raise RuntimeError(
+                    f"GPU memory insufficient for KV cache loading {self._model_name}. "
+                    "When running multiple models on one GPU, load fewer models or "
+                    "lower gpu_memory_utilization / max_model_len in config/models.yaml."
+                ) from exc
             if "not found" in msg.lower():
                 raise RuntimeError(
                     f"Model not found: {self._model_path}. Check model_path in config/models.yaml."
+                ) from exc
+            if "nvcc" in msg.lower() or "cuda_home" in msg.lower():
+                raise RuntimeError(
+                    "vLLM FlashInfer JIT requires nvcc. On WSL2 without a system CUDA "
+                    "toolkit, run via `uv run` so the bundled nvidia-cuda-nvcc wheel is "
+                    "used, or set CUDA_HOME to your CUDA toolkit root."
                 ) from exc
             raise RuntimeError(f"vLLM initialization failed: {msg}") from exc
 
@@ -109,6 +159,7 @@ class VLLMEngine(BaseEngine):
         return "\n".join(parts)
 
     async def generate(self, request: ChatCompletionRequest) -> ChatCompletionResponse:
+        SamplingParams = globals()["SamplingParams"]
         sampling = SamplingParams(
             temperature=request.temperature if request.temperature is not None else 0.7,
             max_tokens=request.max_tokens if request.max_tokens is not None else 512,

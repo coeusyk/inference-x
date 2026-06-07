@@ -25,6 +25,16 @@ class AppSettings:
         )
         self.config_dir: str = os.environ.get("INFERENCE_X_CONFIG_DIR", "config")
 
+        # Comma-separated list of models to load at startup.
+        # Falls back to default_model when not set.
+        # Example: INFERENCE_X_LOADED_MODELS=qwen2.5-0.5b,tinyllama-chat
+        _raw = os.environ.get("INFERENCE_X_LOADED_MODELS", "")
+        self.loaded_models: list[str] = (
+            [m.strip() for m in _raw.split(",") if m.strip()]
+            if _raw.strip()
+            else [self.default_model]
+        )
+
     def get_model_config(self, model_name: str | None = None) -> dict[str, Any]:
         """Return the config block for *model_name* from models.yaml.
 

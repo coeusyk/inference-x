@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from inference_x.api.deps import get_chat_service, get_recorder, get_registry
 from inference_x.api.main import app
 from inference_x.engines.base import BaseEngine
+from inference_x.engines.pool import EnginePool
 from inference_x.observability.exporters import JsonLineExporter, NullExporter, build_exporter
 from inference_x.observability.recorder import MetricsRecorder
 from inference_x.observability.storage import InMemoryStorage, RequestRecord
@@ -63,10 +64,9 @@ def _make_registry() -> ModelRegistry:
 def _make_service() -> ChatService:
     registry = _make_registry()
     return ChatService(
-        engine=_StubEngine(),
+        engine_pool=EnginePool({_TEST_MODEL: _StubEngine()}),
         registry=registry,
         router=TaskRouter(registry, _TEST_MODEL),
-        loaded_model=_TEST_MODEL,
     )
 
 
@@ -388,10 +388,9 @@ class TestObservabilityMiddleware:
         def _broken_service() -> ChatService:
             registry = _make_registry()
             return ChatService(
-                engine=_BrokenEngine(),
+                engine_pool=EnginePool({_TEST_MODEL: _BrokenEngine()}),
                 registry=registry,
                 router=TaskRouter(registry, _TEST_MODEL),
-                loaded_model=_TEST_MODEL,
             )
 
         app.dependency_overrides[get_chat_service] = _broken_service

@@ -3,6 +3,11 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from inference_x.utils.vllm_platform_patch import apply as apply_vllm_platform_patch
+
+# Patch vLLM platform defaults before any worker/subprocess imports vLLM.
+apply_vllm_platform_patch()
+
 from inference_x.api import deps
 from inference_x.api.errors import runtime_error_handler, value_error_handler
 from inference_x.api.routes.chat_completions import router as chat_router

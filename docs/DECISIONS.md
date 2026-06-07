@@ -155,6 +155,13 @@ Use this document to capture non-obvious design decisions as the project evolves
 - Decision: `deps._build_recorder()` is an `lru_cache` function that builds the `InMemoryStorage` + configured exporter + `MetricsRecorder`. `deps.get_recorder()` is a plain function (not FastAPI Depends) that returns this singleton. `main.py` calls `deps.get_recorder()` at module load when registering the middleware. Integration tests clear `recorder.storage` in a per-test fixture rather than injecting a different recorder.
 - Consequences: The recorder is a true process singleton shared between middleware and any future `MetricsService` Depends usage. Test isolation is via `storage.clear()` before each test — simple and reliable.
 
+### DEC-021
+- Date: 2026-06-07
+- Status: accepted
+- Context: Phase 4 compare flow worked (sequential / dual-server), but comparing two models on a single server always failed because the server loaded exactly one engine per process (DEC-011).
+- Decision: Replace the single-engine architecture with `EnginePool` (`engines/pool.py`) — a dict of `{model_name: BaseEngine}` instances. `ChatService` dispatches by routed model name instead of validating a single loaded model. `INFERENCE_X_LOADED_MODELS` (comma-separated env var) controls which models are loaded at startup; default is `INFERENCE_X_DEFAULT_MODEL` for backward compatibility. The error message when a model is not in the pool preserves the "loaded model is '…'" pattern so the playground preflight check still works.
+- Consequences: A single server can serve multiple models simultaneously (subject to GPU VRAM). Playground `--compare` on a single URL works when both models are listed in `INFERENCE_X_LOADED_MODELS`. Startup is slower when multiple large models are loaded. DEC-011 is superseded for code architecture; the operator constraint (one model fits in memory) remains a deployment concern.
+
 ---
 
 ## Phase 4 decisions

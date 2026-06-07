@@ -20,14 +20,14 @@ def _clear_caches():
     get_settings.cache_clear()
     _build_registry.cache_clear()
     _build_router.cache_clear()
-    from inference_x.api.deps import _build_engine
+    from inference_x.api.deps import _build_engine_pool
 
-    _build_engine.cache_clear()
+    _build_engine_pool.cache_clear()
     yield
     get_settings.cache_clear()
     _build_registry.cache_clear()
     _build_router.cache_clear()
-    _build_engine.cache_clear()
+    _build_engine_pool.cache_clear()
 
 
 def test_initialize_app_fails_on_missing_default_model(monkeypatch, tmp_path):
@@ -58,29 +58,69 @@ def test_initialize_app_builds_registry_and_router(monkeypatch, tmp_path):
     )
     monkeypatch.setenv("INFERENCE_X_CONFIG_DIR", str(config_dir))
     monkeypatch.setenv("INFERENCE_X_DEFAULT_MODEL", "alpha")
+    monkeypatch.delenv("INFERENCE_X_LOADED_MODELS", raising=False)
     get_settings.cache_clear()
 
-    def _fake_engine_build(config_dir: str, default_model: str):
-        from inference_x.engines.base import BaseEngine
-        from inference_x.schemas.chat import (
-            ChatCompletionRequest,
-            ChatCompletionResponse,
-        )
+    from inference_x.engines.base import BaseEngine
+    from inference_x.engines.pool import EnginePool
+    from inference_x.schemas.chat import ChatCompletionRequest, ChatCompletionResponse
 
-        class _Stub(BaseEngine):
-            async def generate(
-                self, request: ChatCompletionRequest
-            ) -> ChatCompletionResponse:
-                raise NotImplementedError
+    class _Stub(BaseEngine):
+        async def generate(self, request: ChatCompletionRequest) -> ChatCompletionResponse:
+            raise NotImplementedError
 
-            def is_healthy(self) -> bool:
-                return True
+        def is_healthy(self) -> bool:
+            return True
 
-        return _Stub()
+    def _fake_pool_build(config_dir: str, loaded_models: tuple) -> EnginePool:
+        return EnginePool({m: _Stub() for m in loaded_models})
 
-    monkeypatch.setattr("inference_x.api.deps._build_engine", _fake_engine_build)
+    monkeypatch.setattr("inference_x.api.deps._build_engine_pool", _fake_pool_build)
 
     initialize_app()
+
+
+def test_initialize_app_loads_multiple_models(monkeypatch, tmp_path):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "models.yaml").write_text(
+        "models:\n"
+        "  - name: alpha\n"
+        "    engine: vllm\n"
+        "    model_path: org/alpha\n"
+        "  - name: beta\n"
+        "    engine: vllm\n"
+        "    model_path: org/beta\n"
+    )
+    monkeypatch.setenv("INFERENCE_X_CONFIG_DIR", str(config_dir))
+    monkeypatch.setenv("INFERENCE_X_DEFAULT_MODEL", "alpha")
+    monkeypatch.setenv("INFERENCE_X_LOADED_MODELS", "alpha,beta")
+    get_settings.cache_clear()
+
+    from inference_x.engines.base import BaseEngine
+    from inference_x.engines.pool import EnginePool
+    from inference_x.schemas.chat import ChatCompletionRequest, ChatCompletionResponse
+
+    class _Stub(BaseEngine):
+        async def generate(self, request: ChatCompletionRequest) -> ChatCompletionResponse:
+            raise NotImplementedError
+
+        def is_healthy(self) -> bool:
+            return True
+
+    built: dict = {}
+
+    def _fake_pool_build(config_dir: str, loaded_models: tuple) -> EnginePool:
+        for m in loaded_models:
+            built[m] = _Stub()
+        return EnginePool(dict(built))
+
+    monkeypatch.setattr("inference_x.api.deps._build_engine_pool", _fake_pool_build)
+
+    initialize_app()
+
+    assert "alpha" in built
+    assert "beta" in built
 
 
 def test_lifespan_raises_on_startup_failure(monkeypatch):

@@ -193,3 +193,19 @@ Capture reasoning, tradeoffs, benchmarks, and implementation details here so the
 - **Cause**: First HuggingFace download (~2.2 GB) with no vLLM progress logging; download can stall on slow/unreliable network (`.incomplete` blob in HF cache). Orphaned `VLLM::EngineCore` from a prior server also holds GPU memory.
 - **Fix**: Kill stale engine processes; pre-download with `huggingface-cli download TinyLlama/TinyLlama-1.1B-Chat-v1.0`; ensure only one server on the GPU; retry serve.
 - **Code**: Added startup log in `vllm_engine.py` warning about silent first-time downloads.
+
+## FlashInfer nvcc on WSL2 (2026-06-07)
+
+- **Symptom**: vLLM loads weights then fails at KV-cache profiling with `Could not find nvcc and default cuda_home='/usr/local/cuda' doesn't exist`.
+- **Cause**: vLLM v1 defaults to FlashInfer for top-k/top-p sampling, which JIT-compiles CUDA kernels. WSL2 often has GPU drivers but no system CUDA toolkit at `/usr/local/cuda`. Even with bundled `nvidia-cuda-nvcc` in `.venv`, FlashInfer JIT can fail with header/version mismatches.
+- **Fix**: `ensure_vllm_runtime_env()` in `utils/cuda_env.py` sets `VLLM_USE_FLASHINFER_SAMPLER=0` on WSL (PyTorch-native sampler, no JIT) and sets `CUDA_HOME` from the bundled toolkit when needed. `scripts/dev.sh serve` exports the same default.
+- **Validation**: unit tests in `tests/unit/test_cuda_env.py`; re-run `./scripts/dev.sh serve` with TinyLlama after fix.
+
+## Multi-model engine pool — Phase 4 compare on single server (2026-06-07)
+
+- **Problem**: Phase 4 playground `--compare` required two separate server processes (DEC-011 one-engine-per-process). Useful for large models, but unnecessary friction for small models that fit together in VRAM.
+- **Solution**: `EnginePool` (`engines/pool.py`) holds `{model_name: BaseEngine}`. `ChatService` dispatches by routed model name. `INFERENCE_X_LOADED_MODELS=qwen2.5-0.5b,tinyllama-chat` loads both at startup.
+- **GPU sizing**: `scale_model_config_for_pool()` weight-splits `gpu_memory_utilization` so two engines on one 8 GiB GPU fit (qwen ~0.29, tinyllama ~0.46). `validate_pool_fits()` fails fast when the combo cannot fit.
+- **Usage**: `INFERENCE_X_LOADED_MODELS=qwen2.5-0.5b,tinyllama-chat ./scripts/dev.sh serve`, then `python playground/client.py --compare qwen2.5-0.5b tinyllama-chat "your prompt"`.
+- **WSL pin_memory**: `vllm_platform_patch.py` probes CUDA pinned memory and patches vLLM's WSL detection before import. Optional `./scripts/install_vllm_patch.sh` (one-time) propagates the patch to vLLM spawn workers via site-packages `.pth`.
+- **Validation**: dual-model init OK on 8 GiB WSL2 GPU; 158+ unit tests pass.
