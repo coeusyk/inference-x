@@ -7,6 +7,9 @@ from typing import Annotated
 from fastapi import Depends
 
 from inference_x.core.settings import AppSettings, get_settings
+from inference_x.observability.exporters import build_exporter
+from inference_x.observability.recorder import MetricsRecorder
+from inference_x.observability.storage import InMemoryStorage
 
 logger = logging.getLogger(__name__)
 from inference_x.engines.base import BaseEngine
@@ -58,6 +61,18 @@ def get_chat_service(
         router=router,
         loaded_model=settings.default_model,
     )
+
+
+@lru_cache(maxsize=1)
+def _build_recorder() -> MetricsRecorder:
+    storage = InMemoryStorage()
+    exporter = build_exporter()
+    return MetricsRecorder(storage=storage, exporter=exporter)
+
+
+def get_recorder() -> MetricsRecorder:
+    """Return the process-level recorder singleton (not a FastAPI Depends)."""
+    return _build_recorder()
 
 
 def initialize_app() -> None:

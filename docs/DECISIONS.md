@@ -122,3 +122,35 @@ Use this document to capture non-obvious design decisions as the project evolves
 - Context: Phase 2 exit review found registry, router, and engine were built lazily on first request via `lru_cache` in `deps.py`. Config errors and model-load failures only surfaced when a client hit an endpoint.
 - Decision: Add a FastAPI `lifespan` handler in `main.py` that calls `deps.initialize_app()` at startup. `initialize_app()` eagerly builds registry, router, and engine; logs each step; re-raises on failure so uvicorn never enters a ready state. Unit tests skip eager init via `tests/conftest.py` autouse patch on `deps.initialize_app`.
 - Consequences: Misconfiguration and engine init failures fail fast at process start with CRITICAL logs. First request no longer pays cold-start init cost. Test suite remains GPU-less via conftest noop patch.
+
+---
+
+## Phase 3 decisions
+
+### DEC-016
+- Date: 2026-06-07
+- Status: accepted
+- Context: Observability must not touch route handlers or services, and must not block the request path.
+- Decision: Use Starlette `BaseHTTPMiddleware` as the sole injection point. The middleware times the full request, extracts model and token info from bodies for `/v1/chat/completions` only, then calls `MetricsRecorder.record()` synchronously after response dispatch. All errors in extraction are caught and discarded.
+- Consequences: Route handlers and services are completely unaware of observability. Any future observability extension only touches `middleware.py` and downstream storage/export. The middleware adds negligible overhead for non-chat routes (no body parsing).
+
+### DEC-017
+- Date: 2026-06-07
+- Status: accepted
+- Context: Choosing a storage backend for metrics that is non-blocking and has no external dependency.
+- Decision: `InMemoryStorage` — a thread-safe `collections.deque` capped at 1000 records. No file I/O, no network, no external DB. The optional `JsonLineExporter` (NDJSON append to file) is the only out-of-process path, enabled via `INFERENCE_X_METRICS_FILE` env var.
+- Consequences: Storage is trivially testable. Data does not survive process restarts. A Phase 5 hardening change can swap in a SQLite or file-backed adapter by implementing the same `append/all/recent` interface without changing recorder or middleware.
+
+### DEC-018
+- Date: 2026-06-07
+- Status: accepted
+- Context: `BaseHTTPMiddleware` buffers the response body when the middleware needs to read it (for token extraction). This changes how the response is streamed.
+- Decision: Only buffer the response body for `POST /v1/chat/completions` with status 200. For all other paths (health, models, errors) the response body_iterator is never touched. After buffering, a new `Response` is constructed with the same status, media type, and headers (excluding `content-length`, which Starlette recalculates). This preserves the exact payload the client receives.
+- Consequences: One additional in-memory allocation for chat completion responses (small for non-streaming). Phase 1 and Phase 2 API contracts are unaffected — confirmed by 93/93 passing tests including `test_response_body_unchanged_after_middleware`.
+
+### DEC-019
+- Date: 2026-06-07
+- Status: accepted
+- Context: The middleware singleton recorder must be wired at app creation (`add_middleware`), before FastAPI's dependency injection is available.
+- Decision: `deps._build_recorder()` is an `lru_cache` function that builds the `InMemoryStorage` + configured exporter + `MetricsRecorder`. `deps.get_recorder()` is a plain function (not FastAPI Depends) that returns this singleton. `main.py` calls `deps.get_recorder()` at module load when registering the middleware. Integration tests clear `recorder.storage` in a per-test fixture rather than injecting a different recorder.
+- Consequences: The recorder is a true process singleton shared between middleware and any future `MetricsService` Depends usage. Test isolation is via `storage.clear()` before each test — simple and reliable.

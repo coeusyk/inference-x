@@ -8,6 +8,7 @@ from inference_x.api.errors import runtime_error_handler, value_error_handler
 from inference_x.api.routes.chat_completions import router as chat_router
 from inference_x.api.routes.health import router as health_router
 from inference_x.api.routes.models import router as models_router
+from inference_x.observability.middleware import ObservabilityMiddleware
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -33,6 +34,9 @@ app = FastAPI(
 
 app.add_exception_handler(RuntimeError, runtime_error_handler)  # type: ignore[arg-type]
 app.add_exception_handler(ValueError, value_error_handler)  # type: ignore[arg-type]
+
+# Observability middleware — must be added before routers so it wraps all paths.
+app.add_middleware(ObservabilityMiddleware, recorder=deps.get_recorder())
 
 app.include_router(health_router)
 app.include_router(chat_router, prefix="/v1")

@@ -92,3 +92,26 @@ Capture reasoning, tradeoffs, benchmarks, and implementation details here so the
   - Startup log sequence: registry names → router ready → engine healthy.
   - Startup failure: CRITICAL log + process exit (lifespan re-raises).
   - Serve: `INFERENCE_X_DEFAULT_MODEL=qwen2.5-0.5b ./scripts/dev.sh serve` — model loads before first request.
+
+---
+
+### 2026-06-07 — Phase 3 observability pipeline (add-observability-pipeline)
+
+- **Change**: Added `observability/` package: `storage.py` (InMemoryStorage), `recorder.py` (MetricsRecorder), `exporters.py` (NullExporter + JsonLineExporter), `middleware.py` (ObservabilityMiddleware). Added `services/metrics_service.py`. Wired middleware into `main.py` via `app.add_middleware`. Recorder singleton in `deps.py`.
+- **Why**: A serving platform without observability cannot be debugged or compared. Phase 3 exit criteria require latency, token, and error recording without touching the API contract.
+- **Tradeoff**:
+  - Middleware is the only injection point — route handlers and services have zero observability code.
+  - In-memory ring buffer (1000 records, `collections.deque`) — no I/O in the request path; data lost on restart. Phase 5 can swap in a durable adapter.
+  - Response body buffered only for `POST /v1/chat/completions` status 200 — needed to extract token counts from the JSON body. All other paths are untouched. One extra allocation per chat request.
+  - `BaseHTTPMiddleware` body-buffer swap technique: consume `body_iterator`, create new `Response(content=bytes, ...)` — Starlette re-calculates `content-length`. Confirmed identical payloads via `test_response_body_unchanged_after_middleware`.
+  - File exporter (`JsonLineExporter`) is opt-in via `INFERENCE_X_METRICS_FILE` env var — off by default. Opens in append mode per write; no persistent file handle.
+  - Middleware recorder is a true process singleton — wired at module load before FastAPI DI is available. Tests isolate via `storage.clear()` in fixture (not recorder injection).
+- **Validation**:
+  - `uv run pytest tests/unit/ -v` → 93/93 passed (63 prior + 30 new observability tests).
+  - Middleware integration: health, chat, models endpoints all recorded; response body byte-for-byte identical after buffering; error flag set on 500.
+  - Recorder error safety: storage and exporter exceptions both swallowed (mock tests confirm).
+  - Phase 1 + 2 contracts: all prior 63 tests pass unchanged.
+- **Useful quote / command / number**:
+  - Enable file export: `INFERENCE_X_METRICS_FILE=/tmp/inferencex-metrics.jsonl ./scripts/dev.sh serve`
+  - Record shape: `{"request_id": "...", "path": "/v1/chat/completions", "method": "POST", "status_code": 200, "latency_ms": 142.5, "model": "qwen2.5-0.5b", "prompt_tokens": 12, "completion_tokens": 38, "total_tokens": 50, "error": false}`
+  - `MetricsService.summary()` returns: total_requests, error_count, avg_latency_ms, p95_latency_ms.
