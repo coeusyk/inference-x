@@ -1,0 +1,37 @@
+# InferenceX project rules
+
+- Treat InferenceX as a backend-first, layered LLM inference platform.
+- Preserve stable public API contracts once introduced.
+- Add new capabilities by adding modules, not by rewriting unrelated files.
+- Keep route handlers thin; put business logic in services.
+- Use typed schemas for requests, responses, and internal DTOs.
+- Prefer dependency injection over direct global imports.
+- Make behavior config-driven where possible, especially for models, routing, and logging.
+- Do not begin UI-heavy work before backend phase goals are complete.
+- When architecture changes, update `docs/ARCHITECTURE.md`, `docs/PHASES.md`, and any affected OpenSpec change docs in the same task.
+- Favor incremental edits that preserve previous working behavior.
+
+## Repo boundaries
+
+- `src/inference_x/api/` exposes HTTP endpoints and request validation.
+- `src/inference_x/services/` orchestrates application logic.
+- `src/inference_x/engines/` contains inference engine interfaces and implementations.
+- `src/inference_x/routing/` contains model selection logic and policies.
+- `src/inference_x/observability/` contains middleware, metrics, and exporters.
+- `src/inference_x/schemas/` contains Pydantic models only.
+- `config/` stores YAML configuration files; avoid hardcoding deploy-specific values.
+
+## Working style
+
+- Before making a non-trivial change, restate the task, list affected files, and propose an ordered plan.
+- Edit one conceptual area at a time.
+- Prefer small, reviewable patches over broad refactors.
+- If scope expands, stop and propose a new plan before continuing.
+- When introducing a new module, add a minimal docstring describing its responsibility.
+
+## Quality bar
+
+- New API work should include schema validation and at least one test.
+- New engine or routing logic should be covered by unit tests with mocks or fixtures.
+- Avoid dead code, placeholder TODOs, and commented-out implementations in committed changes.
+- Keep naming explicit and consistent with the architecture docs.
