@@ -1,3 +1,10 @@
+from __future__ import annotations
+
+import json
+import uuid
+from collections.abc import AsyncGenerator
+
+from inference_x.engines.base import BaseEngine
 from inference_x.engines.pool import EnginePool
 from inference_x.routing.base import BaseRouter
 from inference_x.schemas.chat import ChatCompletionRequest, ChatCompletionResponse
@@ -26,12 +33,35 @@ class ChatService:
         """Route and execute a chat completion request.
 
         Raises:
-            ValueError: streaming requested, or routed model not in engine pool.
+            ValueError: routed model not in engine pool.
             RuntimeError: engine inference failure.
         """
-        if request.stream:
-            raise ValueError("Streaming is not supported in Phase 1")
+        engine = self._resolve_engine(request)
+        return await engine.generate(request)
 
+    async def stream_response(
+        self, request: ChatCompletionRequest
+    ) -> AsyncGenerator[str, None]:
+        """Route a chat request and yield OpenAI-compatible SSE events."""
+        engine = self._resolve_engine(request)
+        completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
+
+        async for chunk in engine.generate_stream(request):
+            payload = {
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "choices": [
+                    {
+                        "delta": {"content": chunk},
+                        "index": 0,
+                    }
+                ],
+            }
+            yield f"data: {json.dumps(payload, separators=(',', ':'))}\n\n"
+
+        yield "data: [DONE]\n\n"
+
+    def _resolve_engine(self, request: ChatCompletionRequest) -> BaseEngine:
         routed_model = self._router.select(request)
 
         loaded = self._pool.loaded_models()
@@ -44,8 +74,7 @@ class ChatService:
                 f"(or add it to the existing list)."
             )
 
-        engine = self._pool.get(routed_model)
-        return await engine.generate(request)
+        return self._pool.get(routed_model)
 
     def engine_healthy(self) -> bool:
         return self._pool.all_healthy()

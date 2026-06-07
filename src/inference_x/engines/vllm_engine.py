@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
+import queue
+import threading
+import uuid
+from collections.abc import AsyncGenerator
 from typing import Any
 
 from inference_x.engines.base import BaseEngine
@@ -20,7 +25,7 @@ logger = logging.getLogger(__name__)
 _VLLM_AVAILABLE: bool | None = None
 
 
-def _load_vllm():
+def _load_vllm() -> None:
     global _VLLM_AVAILABLE
     if _VLLM_AVAILABLE is not None:
         return
@@ -48,6 +53,8 @@ class VLLMEngine(BaseEngine):
         *,
         pool_size: int = 1,
         pool_models: list[str] | None = None,
+        engine_index: int = 0,
+        free_vram_gib: float | None = None,
     ) -> None:
         _load_vllm()
         if not _VLLM_AVAILABLE:
@@ -60,6 +67,8 @@ class VLLMEngine(BaseEngine):
             model_config,
             pool_size=pool_size,
             pool_models=pool_models,
+            engine_index=engine_index,
+            free_vram_gib=free_vram_gib,
         )
         required = {"name", "model_path"}
         missing = required - model_config.keys()
@@ -69,6 +78,7 @@ class VLLMEngine(BaseEngine):
         self._model_name: str = model_config["name"]
         self._model_path: str = model_config["model_path"]
         self._healthy = False
+        self._engine_lock = threading.Lock()
 
         kwargs: dict[str, Any] = {
             "model": self._model_path,
@@ -80,6 +90,8 @@ class VLLMEngine(BaseEngine):
             kwargs["max_model_len"] = model_config["max_model_len"]
         if model_config.get("quantization"):
             kwargs["quantization"] = model_config["quantization"]
+        if pool_size > 1:
+            kwargs["enforce_eager"] = True
 
         if pool_size > 1 and "gpu_memory_utilization" in model_config:
             logger.info(
@@ -158,30 +170,104 @@ class VLLMEngine(BaseEngine):
         parts.append("Assistant:")
         return "\n".join(parts)
 
-    async def generate(self, request: ChatCompletionRequest) -> ChatCompletionResponse:
+    def _sampling_params(self, request: ChatCompletionRequest):
         SamplingParams = globals()["SamplingParams"]
-        sampling = SamplingParams(
+        return SamplingParams(
             temperature=request.temperature if request.temperature is not None else 0.7,
             max_tokens=request.max_tokens if request.max_tokens is not None else 512,
             top_p=request.top_p if request.top_p is not None else 0.95,
         )
 
-        vllm_messages = [{"role": m.role, "content": m.content} for m in request.messages]
+    def _stream_prompt(self, request: ChatCompletionRequest) -> str:
+        if not self._supports_chat:
+            return self._messages_to_prompt(request.messages)
 
         try:
+            tokenizer = self._llm.get_tokenizer()
+            vllm_messages = [
+                {"role": m.role, "content": m.content} for m in request.messages
+            ]
+            return tokenizer.apply_chat_template(
+                vllm_messages,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+        except Exception:
+            return self._messages_to_prompt(request.messages)
+
+    def _run_completion(self, request: ChatCompletionRequest):
+        """Blocking completion using the startup-loaded sync engine."""
+        sampling = self._sampling_params(request)
+        vllm_messages = [{"role": m.role, "content": m.content} for m in request.messages]
+
+        with self._engine_lock:
             if self._supports_chat:
-                outputs = self._llm.chat(
+                return self._llm.chat(
                     messages=vllm_messages,  # type: ignore[arg-type]
                     sampling_params=sampling,
                     use_tqdm=False,
                 )
-            else:
-                prompt = self._messages_to_prompt(request.messages)
-                outputs = self._llm.generate(
-                    prompts=[prompt],
-                    sampling_params=sampling,
-                    use_tqdm=False,
-                )
+            prompt = self._messages_to_prompt(request.messages)
+            return self._llm.generate(
+                prompts=[prompt],
+                sampling_params=sampling,
+                use_tqdm=False,
+            )
+
+    async def generate_stream(
+        self, request: ChatCompletionRequest
+    ) -> AsyncGenerator[str, None]:
+        if not _VLLM_AVAILABLE:
+            yield "Streaming not available (vLLM not loaded)"
+            return
+
+        sync_queue: queue.Queue[str | None] = queue.Queue()
+
+        def worker() -> None:
+            sampling = self._sampling_params(request)
+            prompt = self._stream_prompt(request)
+            request_id = f"cmpl-stream-{uuid.uuid4().hex}"
+            llm_engine = self._llm.llm_engine
+            previous_text = ""
+
+            try:
+                with self._engine_lock:
+                    llm_engine.add_request(request_id, prompt, sampling)
+                    while llm_engine.has_unfinished_requests():
+                        step_outputs = llm_engine.step()
+                        if not step_outputs:
+                            continue
+                        for output in step_outputs:
+                            if output.request_id != request_id or not output.outputs:
+                                continue
+                            text = output.outputs[0].text or ""
+                            if text.startswith(previous_text):
+                                chunk = text[len(previous_text) :]
+                            else:
+                                chunk = text
+                            previous_text = text
+                            if chunk:
+                                sync_queue.put(chunk)
+                            if output.finished:
+                                return
+            finally:
+                sync_queue.put(None)
+
+        try:
+            thread = threading.Thread(target=worker, daemon=True)
+            thread.start()
+            while True:
+                chunk = await asyncio.to_thread(sync_queue.get)
+                if chunk is None:
+                    break
+                yield chunk
+            thread.join()
+        except Exception as exc:
+            raise RuntimeError(f"vLLM streaming generation failed: {exc}") from exc
+
+    async def generate(self, request: ChatCompletionRequest) -> ChatCompletionResponse:
+        try:
+            outputs = await asyncio.to_thread(self._run_completion, request)
         except Exception as exc:
             raise RuntimeError(f"vLLM generation failed: {exc}") from exc
 

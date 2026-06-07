@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from collections.abc import AsyncGenerator
 
 from inference_x.schemas.chat import ChatCompletionRequest, ChatCompletionResponse
 
@@ -13,6 +14,12 @@ class BaseEngine(ABC):
     @abstractmethod
     async def generate(self, request: ChatCompletionRequest) -> ChatCompletionResponse:
         """Run inference for a chat completion request and return a typed response."""
+
+    @abstractmethod
+    async def generate_stream(
+        self, request: ChatCompletionRequest
+    ) -> AsyncGenerator[str, None]:
+        """Run inference and yield raw text chunks as they are generated."""
 
     @abstractmethod
     def is_healthy(self) -> bool:

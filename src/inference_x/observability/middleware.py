@@ -49,8 +49,9 @@ class ObservabilityMiddleware(BaseHTTPMiddleware):
         is_chat = request.method == "POST" and request.url.path == _CHAT_PATH
 
         model: str | None = None
+        stream_requested = False
         if is_chat:
-            model = await _extract_model(request)
+            model, stream_requested = await _extract_chat_request_metadata(request)
 
         try:
             response = await call_next(request)
@@ -73,7 +74,12 @@ class ObservabilityMiddleware(BaseHTTPMiddleware):
         completion_tokens: int | None = None
         total_tokens: int | None = None
 
-        if is_chat and status_code == 200:
+        if (
+            is_chat
+            and status_code == 200
+            and not stream_requested
+            and not _is_event_stream_response(response)
+        ):
             # Buffer the response body to read token counts, then re-wrap so
             # the client receives an identical payload.
             body, prompt_tokens, completion_tokens, total_tokens = (
@@ -105,8 +111,8 @@ class ObservabilityMiddleware(BaseHTTPMiddleware):
         return response
 
 
-async def _extract_model(request: Request) -> str | None:
-    """Parse the JSON request body and return the 'model' field if present.
+async def _extract_chat_request_metadata(request: Request) -> tuple[str | None, bool]:
+    """Parse cached chat request metadata used by metrics.
 
     Starlette caches the body after the first `await request.body()` call so
     downstream handlers can still read it.
@@ -114,9 +120,15 @@ async def _extract_model(request: Request) -> str | None:
     try:
         body_bytes = await request.body()
         payload = json.loads(body_bytes)
-        return payload.get("model") or None
+        return payload.get("model") or None, bool(payload.get("stream"))
     except Exception:
-        return None
+        return None, False
+
+
+def _is_event_stream_response(response: Response) -> bool:
+    content_type = response.headers.get("content-type", "")
+    media_type = getattr(response, "media_type", "") or ""
+    return "text/event-stream" in content_type or "text/event-stream" in media_type
 
 
 async def _buffer_and_extract_tokens(

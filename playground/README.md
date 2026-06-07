@@ -1,8 +1,10 @@
 # InferenceX Playground
 
-A Python CLI for interacting with and comparing InferenceX models.
-Uses [rich](https://github.com/Textualize/rich) for polished terminal output.
-Runs with `uv run python playground/client.py` — no frontend build required.
+Python playground tools for interacting with and comparing InferenceX models.
+The batch CLI uses [rich](https://github.com/Textualize/rich) for polished
+terminal output. The interactive TUI uses
+[Textual](https://github.com/Textualize/textual) and streams tokens live over
+SSE.
 
 ---
 
@@ -20,6 +22,15 @@ Runs with `uv run python playground/client.py` — no frontend build required.
 
 ```bash
 # From the repo root
+
+# Interactive Textual playground
+uv run python playground/app.py
+
+# Interactive playground with a specific model
+uv run python playground/app.py --model llama3-8b
+
+# Interactive side-by-side compare mode
+uv run python playground/app.py --compare qwen2.5-0.5b tinyllama-chat
 
 # Single prompt to the default model
 uv run python playground/client.py "What is the capital of France?"
@@ -47,6 +58,31 @@ uv run python playground/client.py --health
 # List registered models
 uv run python playground/client.py --list-models
 ```
+
+---
+
+## Interactive Textual app
+
+Launch:
+
+```bash
+uv run python playground/app.py
+uv run python playground/app.py --model llama3-8b
+uv run python playground/app.py --compare qwen2.5-0.5b tinyllama-chat
+```
+
+The top bar shows the server URL and health status. The response panel streams
+tokens as SSE chunks arrive from `POST /v1/chat/completions` with
+`stream=true`. In compare mode, both models stream into side-by-side panels.
+
+Shortcuts:
+
+- `Ctrl+Enter` submits the prompt.
+- `Enter` inserts a newline.
+- `Ctrl+M` or `Tab` cycles models in single-model mode.
+- `Ctrl+L` clears response panels.
+- `F1` toggles the help overlay.
+- `q` or `Ctrl+C` quits.
 
 ---
 

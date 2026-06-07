@@ -15,7 +15,7 @@ from inference_x.observability.storage import InMemoryStorage
 from inference_x.routing.task_router import TaskRouter
 from inference_x.services.chat_service import ChatService
 from inference_x.services.model_service import ModelRegistry
-from inference_x.utils.vllm_pool_config import validate_pool_fits
+from inference_x.utils.vllm_pool_config import probe_gpu_memory_gib, validate_pool_fits
 
 logger = logging.getLogger(__name__)
 
@@ -32,13 +32,16 @@ def _build_engine_pool(config_dir: str, loaded_models: tuple[str, ...]) -> Engin
     pool_size = len(loaded_models)
     validate_pool_fits(list(loaded_models))
     engines: dict = {}
-    for model_name in loaded_models:
+    for idx, model_name in enumerate(loaded_models):
+        free_gib, _total_gib = probe_gpu_memory_gib()
         model_config = registry.get(model_name)
         logger.info("Loading engine for model=%s (pool_size=%d)", model_name, pool_size)
         engines[model_name] = VLLMEngine(
             model_config.model_dump(),
             pool_size=pool_size,
             pool_models=list(loaded_models),
+            engine_index=idx,
+            free_vram_gib=free_gib,
         )
     return EnginePool(engines)
 

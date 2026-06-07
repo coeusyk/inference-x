@@ -53,6 +53,9 @@ class _StubEngine(BaseEngine):
             usage=ChatCompletionUsage(prompt_tokens=5, completion_tokens=3, total_tokens=8),
         )
 
+    async def generate_stream(self, request: ChatCompletionRequest):
+        yield "ok"
+
     def is_healthy(self) -> bool:
         return self._healthy
 
@@ -381,6 +384,10 @@ class TestObservabilityMiddleware:
         class _BrokenEngine(BaseEngine):
             async def generate(self, req: ChatCompletionRequest) -> ChatCompletionResponse:
                 raise RuntimeError("boom")
+
+            async def generate_stream(self, req: ChatCompletionRequest):
+                raise RuntimeError("boom")
+                yield ""
 
             def is_healthy(self) -> bool:
                 return True

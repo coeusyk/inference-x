@@ -28,13 +28,40 @@ def test_two_model_pool_uses_weight_aware_share():
     }
     pool = ["qwen2.5-0.5b", "tinyllama-chat"]
 
-    q_scaled = scale_model_config_for_pool(qwen, pool_size=2, pool_models=pool)
-    t_scaled = scale_model_config_for_pool(tiny, pool_size=2, pool_models=pool)
+    q_scaled = scale_model_config_for_pool(
+        qwen, pool_size=2, pool_models=pool, engine_index=0
+    )
+    t_scaled = scale_model_config_for_pool(
+        tiny,
+        pool_size=2,
+        pool_models=pool,
+        engine_index=1,
+        free_vram_gib=3.5,
+    )
 
     assert q_scaled["gpu_memory_utilization"] < t_scaled["gpu_memory_utilization"]
-    assert q_scaled["gpu_memory_utilization"] >= 0.25
+    assert q_scaled["gpu_memory_utilization"] == pytest.approx(0.2, abs=0.02)
     assert t_scaled["gpu_memory_utilization"] >= 0.38
     assert q_scaled["max_model_len"] == 2048
+
+
+def test_sequential_cap_limits_second_engine_to_free_vram():
+    tiny = {
+        "name": "tinyllama-chat",
+        "model_path": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+        "gpu_memory_utilization": 0.5,
+    }
+    pool = ["qwen2.5-0.5b", "tinyllama-chat"]
+    scaled = scale_model_config_for_pool(
+        tiny,
+        pool_size=2,
+        pool_models=pool,
+        engine_index=1,
+        free_vram_gib=2.3,
+        total_vram_gib=8.0,
+    )
+    assert scaled["gpu_memory_utilization"] < 0.38
+    assert scaled["gpu_memory_utilization"] >= 0.25
 
 
 def test_validate_pool_fits_rejects_impossible_combo():

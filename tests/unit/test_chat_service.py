@@ -1,4 +1,6 @@
 """Unit tests for ChatService (Phase 4: multi-model engine pool)."""
+import json
+
 import pytest
 
 from inference_x.engines.base import BaseEngine
@@ -60,6 +62,11 @@ class _StubEngine(BaseEngine):
             usage=ChatCompletionUsage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
         )
 
+    async def generate_stream(self, request: ChatCompletionRequest):
+        if self._raise:
+            raise RuntimeError("stub streaming error")
+        yield "ok"
+
     def is_healthy(self) -> bool:
         return self._healthy
 
@@ -83,15 +90,18 @@ class TestChatService:
         assert resp.choices[0].message.content == "ok"
 
     @pytest.mark.asyncio
-    async def test_complete_rejects_streaming(self):
+    async def test_stream_response_formats_sse(self):
         svc = _make_service()
         req = ChatCompletionRequest(
             model="test",
             messages=[ChatMessage(role="user", content="hello")],
             stream=True,
         )
-        with pytest.raises(ValueError, match="Streaming is not supported"):
-            await svc.complete(req)
+        events = [event async for event in svc.stream_response(req)]
+        assert events[-1] == "data: [DONE]\n\n"
+        payload = json.loads(events[0].removeprefix("data: ").strip())
+        assert payload["object"] == "chat.completion.chunk"
+        assert payload["choices"][0]["delta"]["content"] == "ok"
 
     @pytest.mark.asyncio
     async def test_complete_propagates_runtime_error(self):
@@ -150,6 +160,9 @@ class TestChatService:
                     )],
                     usage=ChatCompletionUsage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
                 )
+
+            async def generate_stream(self, request: ChatCompletionRequest):
+                yield f"from {self._name}"
 
             def is_healthy(self) -> bool:
                 return True

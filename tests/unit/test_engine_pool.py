@@ -13,6 +13,9 @@ class _StubEngine(BaseEngine):
     async def generate(self, request: ChatCompletionRequest) -> ChatCompletionResponse:
         raise NotImplementedError
 
+    async def generate_stream(self, request: ChatCompletionRequest):
+        yield "stub"
+
     def is_healthy(self) -> bool:
         return self._healthy
 

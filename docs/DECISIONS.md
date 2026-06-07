@@ -79,10 +79,11 @@ Use this document to capture non-obvious design decisions as the project evolves
 
 ### DEC-010
 - Date: 2026-06-07
-- Status: accepted
+- Status: superseded
 - Context: Request schema accepts `stream: bool` but Phase 1 has no SSE implementation.
 - Decision: Reject `stream=true` in `ChatService.complete()` with `ValueError` → HTTP 400 and structured error body.
 - Consequences: Clients get an explicit error instead of a misleading non-streaming 200 response.
+- Superseded by: DEC-023 (2026-06-07) — Phase 5 enables OpenAI-compatible SSE streaming.
 
 ---
 
@@ -179,3 +180,21 @@ Use this document to capture non-obvious design decisions as the project evolves
 - Context: The playground CLI output was plain text (`print()` + string formatting). Good enough for smoke tests but not demos or article screenshots. The Phase 4 compare output specifically relied on a fixed-width `SEPARATOR` string with manual column math.
 - Decision: Add `rich>=13.0` as a project dependency. Introduce `playground/console.py` with per-call Console factories (`stdout_console()`, `stderr_console()`) and top-level helpers (`print_header`, `print_health`, `print_models_table`, `print_error`). Add `print_single` and `print_compare` to `client.py` and wire them into `run_single`, `run_compare`, and `run_compare_sequential`. All public function signatures (`format_single`, `format_compare`, `extract_text`, `format_usage`, `wrap_column`, `Prompt`, etc.) and the `SEPARATOR` constant are kept unchanged so the test suite requires no edits. Console instances are created fresh at call time (`Console(file=sys.stdout, ...)`) so tests that `mock.patch("sys.stdout")` capture rich output correctly without any special test fixtures.
 - Consequences: Model names are bold and prominent; latency/tokens are muted; errors are red-bordered panels to stderr; compare mode shows two Panels side-by-side via `Columns` + a stats `Table`; sequential compare shows a spinner during the server-reload wait. 158 unit tests pass unchanged.
+
+---
+
+## Phase 5 decisions
+
+### DEC-023
+- Date: 2026-06-07
+- Status: accepted
+- Context: DEC-010 intentionally rejected `stream=true` while Phase 1 had no SSE implementation. Phase 5 now needs streaming for OpenAI-compatible clients and a live playground demo.
+- Decision: Enable `stream=true` on `POST /v1/chat/completions`. Engines expose `generate_stream()` as raw text chunks, `ChatService.stream_response()` formats OpenAI-compatible SSE `data: {...}` events, and the route returns `text/event-stream`. Observability skips response-body buffering for streaming responses.
+- Consequences: Non-streaming JSON responses remain unchanged. Streaming requests are recorded by middleware without backend token extraction, so streamed token counts are client-side estimates until a later usage event is added.
+
+### DEC-024
+- Date: 2026-06-07
+- Status: accepted
+- Context: The rich CLI improved batch output, but Phase 5 needs an interactive demo where token streaming, latency, health, and model comparison are visible while the request is running.
+- Decision: Add a Textual TUI in `playground/app.py` with `httpx` async streaming. Keep `playground/client.py` intact for batch compare use. Use Textual CSS for a dark terminal layout and expose pure helper functions for unit tests instead of testing the full app event loop.
+- Consequences: The playground now has a demo-ready live interface without adding backend UI endpoints or npm tooling. `textual` and `httpx` are runtime dependencies, and token usage shown after streams is estimated client-side.

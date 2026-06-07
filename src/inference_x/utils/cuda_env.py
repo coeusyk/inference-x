@@ -100,4 +100,11 @@ def ensure_vllm_runtime_env(*, pool_size: int = 1) -> str | None:
             "WSL detected: disabled FlashInfer sampler (VLLM_USE_FLASHINFER_SAMPLER=0)"
         )
 
+    if pool_size > 1 and "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS" not in os.environ:
+        os.environ["VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS"] = "0"
+        logger.info(
+            "Multi-model pool: disabled CUDA graph memory profiler "
+            "(VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0)"
+        )
+
     return cuda_home

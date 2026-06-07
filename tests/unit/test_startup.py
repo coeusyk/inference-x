@@ -69,6 +69,9 @@ def test_initialize_app_builds_registry_and_router(monkeypatch, tmp_path):
         async def generate(self, request: ChatCompletionRequest) -> ChatCompletionResponse:
             raise NotImplementedError
 
+        async def generate_stream(self, request: ChatCompletionRequest):
+            yield "stub"
+
         def is_healthy(self) -> bool:
             return True
 
@@ -104,6 +107,9 @@ def test_initialize_app_loads_multiple_models(monkeypatch, tmp_path):
     class _Stub(BaseEngine):
         async def generate(self, request: ChatCompletionRequest) -> ChatCompletionResponse:
             raise NotImplementedError
+
+        async def generate_stream(self, request: ChatCompletionRequest):
+            yield "stub"
 
         def is_healthy(self) -> bool:
             return True

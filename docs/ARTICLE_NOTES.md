@@ -221,7 +221,23 @@ Capture reasoning, tradeoffs, benchmarks, and implementation details here so the
 
 - **Problem**: Phase 4 playground `--compare` required two separate server processes (DEC-011 one-engine-per-process). Useful for large models, but unnecessary friction for small models that fit together in VRAM.
 - **Solution**: `EnginePool` (`engines/pool.py`) holds `{model_name: BaseEngine}`. `ChatService` dispatches by routed model name. `INFERENCE_X_LOADED_MODELS=qwen2.5-0.5b,tinyllama-chat` loads both at startup.
-- **GPU sizing**: `scale_model_config_for_pool()` weight-splits `gpu_memory_utilization` so two engines on one 8 GiB GPU fit (qwen ~0.29, tinyllama ~0.46). `validate_pool_fits()` fails fast when the combo cannot fit.
+- **GPU sizing**: `scale_model_config_for_pool()` weight-splits `gpu_memory_utilization`, then applies sequential VRAM caps so each engine passes vLLM's free-memory check (first engine reserved lower — qwen ~0.20, tinyllama ~0.46 on 8 GiB WSL2). Multi-model pools use `enforce_eager=True`. `validate_pool_fits()` fails fast when the combo cannot fit.
 - **Usage**: `INFERENCE_X_LOADED_MODELS=qwen2.5-0.5b,tinyllama-chat ./scripts/dev.sh serve`, then `python playground/client.py --compare qwen2.5-0.5b tinyllama-chat "your prompt"`.
 - **WSL pin_memory**: `vllm_platform_patch.py` probes CUDA pinned memory and patches vLLM's WSL detection before import. Optional `./scripts/install_vllm_patch.sh` (one-time) propagates the patch to vLLM spawn workers via site-packages `.pth`.
 - **Validation**: dual-model init OK on 8 GiB WSL2 GPU; 158+ unit tests pass.
+
+## Phase 5 SSE streaming backend (2026-06-07)
+
+- **Change**: `POST /v1/chat/completions` now supports `stream=true` with OpenAI-compatible SSE chunks and a final `data: [DONE]` event.
+- **Why**: DEC-010's explicit rejection was correct before SSE existed; Phase 5 needs live token delivery for clients and the interactive playground.
+- **Tradeoff**: Observability records streamed requests without response-body token extraction so middleware does not buffer or delay SSE delivery.
+- **Validation**: Added unit/integration coverage for service SSE formatting, `[DONE]`, `text/event-stream` route behavior, and unchanged non-streaming JSON behavior.
+- **Streaming engine path**: Reuses the startup-loaded sync `LLM.llm_engine` (`add_request` + `step`) instead of lazily creating a second `AsyncLLMEngine` per model, avoiding duplicate GPU loads on first stream and fixing empty/slow compare-mode streams in multi-model pools.
+
+## Phase 5 Textual interactive playground (2026-06-07)
+
+- **Change**: Added `playground/app.py` and `playground/app.css` for a dark Textual TUI with single-model and compare-mode streaming panels.
+- **Why Textual vs rich**: rich remains ideal for batch CLI output; Textual adds focus management, key bindings, layout, live updates, and an app loop for interactive demos.
+- **Why streaming matters**: Token-by-token SSE makes the demo feel alive and shows latency while generation is still running instead of after a full blocking response.
+- **Tradeoff**: Tests cover pure SSE parsing, model fetch, and health helpers; the full Textual app is validated manually because its async UI loop is not started in unit tests.
+- **Demo capture**: Use `asciinema rec` around `uv run python playground/app.py` after starting the server to capture a reproducible terminal demo.

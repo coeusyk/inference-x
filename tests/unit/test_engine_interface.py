@@ -33,6 +33,9 @@ class _StubEngine(BaseEngine):
             ),
         )
 
+    async def generate_stream(self, request: ChatCompletionRequest):
+        yield "stub response"
+
     def is_healthy(self) -> bool:
         return self._healthy
 
@@ -57,3 +60,13 @@ class TestBaseEngineContract:
         assert isinstance(resp, ChatCompletionResponse)
         assert resp.model == "stub"
         assert resp.choices[0].message.content == "stub response"
+
+    @pytest.mark.asyncio
+    async def test_generate_stream_yields_chunks(self):
+        engine = _StubEngine()
+        req = ChatCompletionRequest(
+            model="stub",
+            messages=[ChatMessage(role="user", content="hi")],
+        )
+        chunks = [chunk async for chunk in engine.generate_stream(req)]
+        assert chunks == ["stub response"]

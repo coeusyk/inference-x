@@ -48,6 +48,10 @@ class _StubEngine(BaseEngine):
             ),
         )
 
+    async def generate_stream(self, request: ChatCompletionRequest):
+        yield "Hello "
+        yield "from stub"
+
     def is_healthy(self) -> bool:
         return self._healthy
 
@@ -166,19 +170,24 @@ class TestChatCompletionsEndpoint:
         resp = client.post("/v1/chat/completions", json=payload)
         assert resp.status_code == 422
 
-    def test_stream_true_returns_400(self, client):
+    def test_stream_true_returns_event_stream(self, client):
         payload = dict(self._payload)
         payload["stream"] = True
         resp = client.post("/v1/chat/completions", json=payload)
-        assert resp.status_code == 400
-        body = resp.json()
-        assert body["error"]["type"] == "invalid_request_error"
-        assert "Streaming" in body["error"]["message"]
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("text/event-stream")
+        lines = [line for line in resp.text.splitlines() if line.startswith("data: ")]
+        assert lines[0].startswith("data: {")
+        assert lines[-1] == "data: [DONE]"
 
     def test_engine_failure_returns_structured_500(self, client):
         class _FailingEngine(BaseEngine):
             async def generate(self, request: ChatCompletionRequest) -> ChatCompletionResponse:
                 raise RuntimeError("inference exploded")
+
+            async def generate_stream(self, request: ChatCompletionRequest):
+                raise RuntimeError("inference exploded")
+                yield ""
 
             def is_healthy(self) -> bool:
                 return True
