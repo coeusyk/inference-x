@@ -172,3 +172,10 @@ Use this document to capture non-obvious design decisions as the project evolves
 - Context: Phase 4 requires a playground and comparison flow. Options: (a) React/Next.js SPA, (b) single HTML+JS file, (c) Python CLI script.
 - Decision: Python CLI script (`playground/client.py`) using stdlib only (`argparse`, `urllib.request`, `json`). No npm, no node_modules, no frontend build pipeline. The script talks directly to the existing API over HTTP.
 - Consequences: Runs immediately in WSL2 with `python3` — zero setup beyond a live server. Output is terminal text designed for paste/screenshot. Side-by-side compare uses columnar layout. Testable with `unittest.mock`. A future HTML client can be added without touching the Python script.
+
+### DEC-022
+- Date: 2026-06-07
+- Status: accepted
+- Context: The playground CLI output was plain text (`print()` + string formatting). Good enough for smoke tests but not demos or article screenshots. The Phase 4 compare output specifically relied on a fixed-width `SEPARATOR` string with manual column math.
+- Decision: Add `rich>=13.0` as a project dependency. Introduce `playground/console.py` with per-call Console factories (`stdout_console()`, `stderr_console()`) and top-level helpers (`print_header`, `print_health`, `print_models_table`, `print_error`). Add `print_single` and `print_compare` to `client.py` and wire them into `run_single`, `run_compare`, and `run_compare_sequential`. All public function signatures (`format_single`, `format_compare`, `extract_text`, `format_usage`, `wrap_column`, `Prompt`, etc.) and the `SEPARATOR` constant are kept unchanged so the test suite requires no edits. Console instances are created fresh at call time (`Console(file=sys.stdout, ...)`) so tests that `mock.patch("sys.stdout")` capture rich output correctly without any special test fixtures.
+- Consequences: Model names are bold and prominent; latency/tokens are muted; errors are red-bordered panels to stderr; compare mode shows two Panels side-by-side via `Columns` + a stats `Table`; sequential compare shows a spinner during the server-reload wait. 158 unit tests pass unchanged.

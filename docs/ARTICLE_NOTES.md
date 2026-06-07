@@ -201,6 +201,22 @@ Capture reasoning, tradeoffs, benchmarks, and implementation details here so the
 - **Fix**: `ensure_vllm_runtime_env()` in `utils/cuda_env.py` sets `VLLM_USE_FLASHINFER_SAMPLER=0` on WSL (PyTorch-native sampler, no JIT) and sets `CUDA_HOME` from the bundled toolkit when needed. `scripts/dev.sh serve` exports the same default.
 - **Validation**: unit tests in `tests/unit/test_cuda_env.py`; re-run `./scripts/dev.sh serve` with TinyLlama after fix.
 
+## Rich terminal UI for playground client (2026-06-07)
+
+- **Why**: Plain-text `print()` output was functional but not demo-ready. Model names got no visual prominence; errors looked identical to normal output; compare was fixed-width ASCII columns.
+- **Dependency**: `rich>=13.0` added to `[project.dependencies]` — already transitively available but now declared and locked.
+- **Design choices**:
+  - `Panel` (dim-blue border) for single-model output; model name bold in title, latency dim.
+  - `Columns([panel_a, panel_b], equal=True, expand=True)` for side-by-side compare; left panel dim-blue, right panel dim-cyan.
+  - `Table(box=None)` beneath compare panels for aligned Model / Prompt tokens / Completion tokens / Total tokens / Latency columns.
+  - `Rule` with `[prompt.label]` theme style between each compare pair in multi-prompt runs.
+  - `Console.status()` spinner during the server-reload wait in `--sequential` mode.
+  - `Console(file=sys.stderr)` + `Panel` (red border) for all user-facing errors — no bare `stderr` prints.
+  - One-line dim header ("InferenceX Playground · URL") for prompt modes; absent for `--health` / `--list-models`.
+- **Test compatibility**: Console instances created fresh at call time with `Console(file=sys.stdout)` so `mock.patch("sys.stdout", StringIO())` captures rich output. All 158 tests pass with zero test changes.
+- **Rich in non-TTY mode**: box-drawing characters are output, ANSI codes are suppressed — screenshots look clean, CI passes identically.
+- **Useful for articles**: per-prompt `Rule` labels, side-by-side panels, and the stats table are all screenshot-friendly.
+
 ## Multi-model engine pool — Phase 4 compare on single server (2026-06-07)
 
 - **Problem**: Phase 4 playground `--compare` required two separate server processes (DEC-011 one-engine-per-process). Useful for large models, but unnecessary friction for small models that fit together in VRAM.

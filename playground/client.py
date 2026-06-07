@@ -216,6 +216,91 @@ def format_compare(
 
 
 # ---------------------------------------------------------------------------
+# Rich output functions
+# ---------------------------------------------------------------------------
+
+def print_single(
+    response: dict[str, Any],
+    model: str,
+) -> None:
+    """Render a single-model response as a rich Panel."""
+    from rich.panel import Panel
+    from rich.text import Text
+    from console import stdout_console
+
+    text = extract_text(response)
+    latency = response.get("_latency_ms")
+    lat_str = f" [dim]{latency:.0f}ms[/dim]" if latency is not None else ""
+    usage = format_usage(response)
+
+    title = f"[bold]{model}[/bold]{lat_str}"
+    panel = Panel(
+        Text(text, style="bright_white"),
+        title=title,
+        title_align="left",
+        border_style="dim blue",
+    )
+    c = stdout_console()
+    c.print(panel)
+    c.print(f"[dim]{usage}[/dim]")
+
+
+def print_compare(
+    model_a: str,
+    response_a: dict[str, Any],
+    model_b: str,
+    response_b: dict[str, Any],
+) -> None:
+    """Render two responses side-by-side using rich Columns + stats Table."""
+    from rich.columns import Columns
+    from rich.panel import Panel
+    from rich.table import Table
+    from rich.text import Text
+    from console import stdout_console
+
+    def _panel(model: str, resp: dict[str, Any], border: str) -> Panel:
+        text = extract_text(resp)
+        lat = resp.get("_latency_ms")
+        lat_str = f" [dim]{lat:.0f}ms[/dim]" if lat is not None else ""
+        return Panel(
+            Text(text, style="bright_white"),
+            title=f"[bold]{model}[/bold]{lat_str}",
+            title_align="left",
+            border_style=border,
+        )
+
+    c = stdout_console()
+    c.print(
+        Columns(
+            [_panel(model_a, response_a, "dim blue"), _panel(model_b, response_b, "dim cyan")],
+            equal=True,
+            expand=True,
+        )
+    )
+
+    # Token / latency summary table
+    stats = Table(box=None, show_header=True, header_style="bold", padding=(0, 2))
+    stats.add_column("Model")
+    stats.add_column("Prompt tokens", justify="right", style="dim")
+    stats.add_column("Completion tokens", justify="right", style="dim")
+    stats.add_column("Total tokens", justify="right", style="dim")
+    stats.add_column("Latency", justify="right", style="dim")
+
+    for model, resp in ((model_a, response_a), (model_b, response_b)):
+        u = resp.get("usage") or {}
+        lat = resp.get("_latency_ms")
+        stats.add_row(
+            f"[bold]{model}[/bold]",
+            str(u.get("prompt_tokens", "?")),
+            str(u.get("completion_tokens", "?")),
+            str(u.get("total_tokens", "?")),
+            f"{lat:.0f}ms" if lat is not None else "?",
+        )
+
+    c.print(stats)
+
+
+# ---------------------------------------------------------------------------
 # Prompt loading
 # ---------------------------------------------------------------------------
 
@@ -309,8 +394,10 @@ def run_single(
     temperature: float,
     max_tokens: int,
 ) -> None:
+    from console import print_error, stdout_console
+
     label = prompt.label or prompt.text[:60]
-    print(f"\nRunning: {label}")
+    stdout_console().print(f"\n[dim]Running:[/dim] {label}")
     t0 = time.perf_counter()
     try:
         resp = chat_completion(
@@ -322,9 +409,9 @@ def run_single(
             system=prompt.system,
         )
         resp["_latency_ms"] = (time.perf_counter() - t0) * 1000
-        print(format_single(prompt.text, resp, model))
+        print_single(resp, model)
     except RuntimeError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
+        print_error(str(exc))
 
 
 def fetch_completion(
@@ -380,11 +467,20 @@ def run_compare_sequential(
     max_tokens: int,
 ) -> int:
     """Compare two models on one GPU by running A first, then B after server restart."""
-    print(f"\n=== Sequential compare: {model_a} vs {model_b} ===")
-    print(f"Server: {base_url}\n")
+    from console import print_error, stdout_console
+
+    c = stdout_console()
+    c.print(
+        f"\n[dim bold]Sequential compare:[/dim bold] "
+        f"[bold]{model_a}[/bold] vs [bold]{model_b}[/bold]"
+    )
+    c.print(f"[dim]Server: {base_url}[/dim]\n")
 
     # Phase 1 — model A (must be loaded now)
-    print(f"Phase 1: querying {model_a!r} ({len(prompts)} prompt(s))...")
+    c.print(
+        f"[dim]Phase 1:[/dim] querying [bold]{model_a}[/bold] "
+        f"([dim]{len(prompts)} prompt(s)[/dim])..."
+    )
     responses_a: list[dict[str, Any]] = []
     for prompt in prompts:
         label = prompt.label or prompt.text[:60]
@@ -392,40 +488,59 @@ def run_compare_sequential(
             responses_a.append(
                 fetch_completion(prompt, model_a, base_url, temperature, max_tokens)
             )
-            print(f"  ✓ {label}")
+            c.print(f"  [bold green]✓[/bold green] {label}")
         except RuntimeError as exc:
-            print(f"  ✗ {label}: {exc}", file=sys.stderr)
+            print_error(f"{label}: {exc}")
             return 1
 
     # Phase 2 — wait for model B
-    print(
-        f"\n>>> Stop the server and restart with:\n"
-        f"    INFERENCE_X_DEFAULT_MODEL={model_b} ./scripts/dev.sh serve\n"
-        f">>> Waiting for {model_b!r} on {base_url} (up to 10 min)..."
+    c.print(
+        f"\n[yellow]Restart the server with:[/yellow]\n"
+        f"  [dim]INFERENCE_X_DEFAULT_MODEL={model_b} ./scripts/dev.sh serve[/dim]\n"
     )
-    if not wait_for_loaded_model(base_url, model_b):
-        print(
-            f"ERROR: Timed out waiting for {model_b!r} on {base_url}.",
-            file=sys.stderr,
-        )
+    with c.status(
+        f"Waiting for [bold]{model_b}[/bold] to be ready… (up to 10 min)"
+    ):
+        ok = wait_for_loaded_model(base_url, model_b)
+
+    if not ok:
+        print_error(f"Timed out waiting for {model_b!r} on {base_url}.")
         return 1
-    print(f"  ✓ {model_b!r} is ready\n")
+    c.print(f"[bold green]✓[/bold green] [bold]{model_b!r}[/bold] is ready\n")
 
     # Phase 3 — model B + display
-    print(f"Phase 2: querying {model_b!r} and printing comparisons...")
+    c.print(
+        f"[dim]Phase 2:[/dim] querying [bold]{model_b}[/bold] "
+        "and printing comparisons…"
+    )
     for prompt, resp_a in zip(prompts, responses_a):
         label = prompt.label or prompt.text[:60]
         try:
             resp_b = fetch_completion(
                 prompt, model_b, base_url, temperature, max_tokens
             )
-            print(f"\n--- {label} ---")
-            print(format_compare(prompt.text, model_a, resp_a, model_b, resp_b))
+            _print_compare_with_rule(label, model_a, resp_a, model_b, resp_b)
         except RuntimeError as exc:
-            print(f"ERROR on {label}: {exc}", file=sys.stderr)
+            print_error(f"{label}: {exc}")
             return 1
 
     return 0
+
+
+def _print_compare_with_rule(
+    label: str,
+    model_a: str,
+    response_a: dict[str, Any],
+    model_b: str,
+    response_b: dict[str, Any],
+) -> None:
+    """Print a prompt Rule then the side-by-side compare panels."""
+    from rich.rule import Rule
+    from console import stdout_console
+
+    c = stdout_console()
+    c.print(Rule(f"[prompt.label]{label}[/prompt.label]"))
+    print_compare(model_a, response_a, model_b, response_b)
 
 
 def run_compare(
@@ -437,8 +552,9 @@ def run_compare(
     temperature: float,
     max_tokens: int,
 ) -> None:
+    from console import print_error
+
     label = prompt.label or prompt.text[:60]
-    print(f"\nComparing: {label}")
     try:
         resp_a = fetch_completion(
             prompt, model_a, base_url_a, temperature, max_tokens
@@ -446,9 +562,9 @@ def run_compare(
         resp_b = fetch_completion(
             prompt, model_b, base_url_b, temperature, max_tokens
         )
-        print(format_compare(prompt.text, model_a, resp_a, model_b, resp_b))
+        _print_compare_with_rule(label, model_a, resp_a, model_b, resp_b)
     except RuntimeError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
+        print_error(str(exc))
 
 
 # ---------------------------------------------------------------------------
@@ -541,32 +657,44 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from console import (
+        print_error,
+        print_header,
+        print_health,
+        print_models_table,
+        stdout_console,
+    )
+
     parser = build_parser()
     args = parser.parse_args(argv)
 
     base_url = args.base_url.rstrip("/")
 
+    # --health and --list-models are silent-header utilities
     if args.health:
         ok = health_check(base_url)
-        print("healthy" if ok else "unreachable")
+        print_health(ok, base_url)
         return 0 if ok else 1
 
     if args.list_models:
         models = list_models(base_url)
         if models:
-            print("Available models:")
-            for m in models:
-                print(f"  {m}")
+            print_models_table(models)
         else:
-            print("Could not fetch model list. Is the server running?")
+            stdout_console().print(
+                "[yellow]Could not fetch model list. Is the server running?[/yellow]"
+            )
         return 0
+
+    # All prompt modes show the header
+    print_header(base_url)
 
     # Collect prompts
     if args.prompts_file:
         try:
             prompts = load_prompts(args.prompts_file)
         except (FileNotFoundError, json.JSONDecodeError) as exc:
-            print(f"ERROR loading prompts file: {exc}", file=sys.stderr)
+            print_error(f"Error loading prompts file: {exc}")
             return 1
     elif args.prompt:
         prompts = [Prompt(text=args.prompt)]
@@ -591,7 +719,7 @@ def main(argv: list[str] | None = None) -> int:
         base_url_b = (args.base_url_b or base_url).rstrip("/")
         err = preflight_compare(compare_models[0], compare_models[1], base_url_a, base_url_b)
         if err:
-            print(f"ERROR: {err}", file=sys.stderr)
+            print_error(err)
             return 1
 
     for prompt in prompts:
