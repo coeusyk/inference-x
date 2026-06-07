@@ -186,3 +186,10 @@ Capture reasoning, tradeoffs, benchmarks, and implementation details here so the
 - **Problem**: `--compare` on one server hit HTTP 400 for every prompt on model B (`Routed to model 'X' but loaded model is 'Y'`) — DEC-011 one-model-per-server, not a backend bug.
 - **Fix**: `preflight_compare()` fails fast with setup instructions; `--sequential` runs model A, prompts server restart, waits for model B, then prints side-by-side results.
 - **Validation**: 39 playground unit tests (incl. preflight + sequential mocks); full suite 133/133.
+
+## TinyLlama first-load stall (2026-06-07)
+
+- **Symptom**: Server appears hung after `Using FlashAttention version 2` when switching to `tinyllama-chat`.
+- **Cause**: First HuggingFace download (~2.2 GB) with no vLLM progress logging; download can stall on slow/unreliable network (`.incomplete` blob in HF cache). Orphaned `VLLM::EngineCore` from a prior server also holds GPU memory.
+- **Fix**: Kill stale engine processes; pre-download with `huggingface-cli download TinyLlama/TinyLlama-1.1B-Chat-v1.0`; ensure only one server on the GPU; retry serve.
+- **Code**: Added startup log in `vllm_engine.py` warning about silent first-time downloads.

@@ -58,6 +58,10 @@ class VLLMEngine(BaseEngine):
             kwargs["quantization"] = model_config["quantization"]
 
         logger.info("Initializing vLLM engine for model=%s path=%s", self._model_name, self._model_path)
+        logger.info(
+            "Loading weights (first run downloads from HuggingFace with no progress "
+            "log until complete — can take several minutes on slow links)"
+        )
         try:
             self._llm: LLM = LLM(**kwargs)
             self._supports_chat = self._detect_chat_support()
