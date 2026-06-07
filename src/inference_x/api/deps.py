@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
 from functools import lru_cache
 from typing import Annotated
 
 from fastapi import Depends
 
 from inference_x.core.settings import AppSettings, get_settings
+
+logger = logging.getLogger(__name__)
 from inference_x.engines.base import BaseEngine
 from inference_x.engines.vllm_engine import VLLMEngine
 from inference_x.routing.task_router import TaskRouter
@@ -55,3 +58,34 @@ def get_chat_service(
         router=router,
         loaded_model=settings.default_model,
     )
+
+
+def initialize_app() -> None:
+    """Eagerly build registry, router, and engine at application startup.
+
+    Raises on config or model-load failure so the process fails fast instead
+    of accepting requests that would fail on first dependency resolution.
+    """
+    settings = get_settings()
+    config_dir = settings.config_dir
+    default_model = settings.default_model
+
+    logger.info(
+        "Initializing InferenceX (config_dir=%s, default_model=%s)",
+        config_dir,
+        default_model,
+    )
+
+    registry = _build_registry(config_dir)
+    logger.info("Model registry loaded: %s", registry.names())
+
+    _build_router(config_dir, default_model)
+    logger.info("Task router ready (default_model=%s)", default_model)
+
+    engine = _build_engine(config_dir, default_model)
+    if not engine.is_healthy():
+        raise RuntimeError(
+            f"Engine for model '{default_model}' is not healthy after startup init"
+        )
+
+    logger.info("Engine loaded and healthy for model=%s", default_model)

@@ -230,3 +230,17 @@ class TestModelsEndpoint:
         assert "id" in model
         assert model["object"] == "model"
         assert model["owned_by"] == "inferencex"
+
+    def test_reflects_models_yaml(self, client):
+        """Models endpoint should list every entry from config/models.yaml."""
+        from inference_x.api.deps import get_registry
+        from inference_x.services.model_service import ModelRegistry
+
+        real_registry = ModelRegistry.from_config("config")
+        app.dependency_overrides[get_registry] = lambda: real_registry
+        with TestClient(app) as c:
+            resp = c.get("/v1/models")
+            assert resp.status_code == 200
+            ids = {m["id"] for m in resp.json()["data"]}
+            assert ids == set(real_registry.names())
+        app.dependency_overrides.clear()

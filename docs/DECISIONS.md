@@ -115,3 +115,10 @@ Use this document to capture non-obvious design decisions as the project evolves
 - Context: `ModelRegistry` could be derived from `AppSettings.get_model_config()` or owned separately.
 - Decision: Give `ModelRegistry` its own `from_config(config_dir)` factory that reads `models.yaml` and validates all entries via Pydantic. `AppSettings` retains `get_model_config` for backward compat but is no longer the canonical registry.
 - Consequences: Registry is independently testable with a `tmp_path` fixture. Settings retains minimal config surface for env vars.
+
+### DEC-015
+- Date: 2026-06-07
+- Status: accepted
+- Context: Phase 2 exit review found registry, router, and engine were built lazily on first request via `lru_cache` in `deps.py`. Config errors and model-load failures only surfaced when a client hit an endpoint.
+- Decision: Add a FastAPI `lifespan` handler in `main.py` that calls `deps.initialize_app()` at startup. `initialize_app()` eagerly builds registry, router, and engine; logs each step; re-raises on failure so uvicorn never enters a ready state. Unit tests skip eager init via `tests/conftest.py` autouse patch on `deps.initialize_app`.
+- Consequences: Misconfiguration and engine init failures fail fast at process start with CRITICAL logs. First request no longer pays cold-start init cost. Test suite remains GPU-less via conftest noop patch.

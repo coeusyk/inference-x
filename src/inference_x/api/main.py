@@ -1,18 +1,34 @@
 import logging
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from inference_x.api import deps
 from inference_x.api.errors import runtime_error_handler, value_error_handler
 from inference_x.api.routes.chat_completions import router as chat_router
 from inference_x.api.routes.health import router as health_router
 from inference_x.api.routes.models import router as models_router
 
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Eagerly initialize registry, router, and engine before serving requests."""
+    try:
+        deps.initialize_app()
+    except Exception as exc:
+        logger.critical("Startup initialization failed: %s", exc, exc_info=True)
+        raise
+    yield
+
 
 app = FastAPI(
     title="InferenceX",
     description="Self-hosted vLLM-backed OpenAI-compatible inference API",
     version="0.1.0",
+    lifespan=lifespan,
 )
 
 app.add_exception_handler(RuntimeError, runtime_error_handler)  # type: ignore[arg-type]

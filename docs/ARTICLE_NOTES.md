@@ -68,3 +68,27 @@ Capture reasoning, tradeoffs, benchmarks, and implementation details here so the
   - Config: `config/routing.yaml` `default_model` overridden by `INFERENCE_X_DEFAULT_MODEL` env var.
   - `GET /v1/models` returns `{"object": "list", "data": [{"id": "...", "object": "model", "owned_by": "inferencex"}]}`.
   - Routing adds zero HTTP round-trips — selection is in-process, synchronous, before engine dispatch.
+
+---
+
+### 2026-06-07 — Phase 2 exit criteria verification (add-model-registry-routing)
+
+- **Change**: Added FastAPI lifespan eager init (`initialize_app()` in `deps.py`, `lifespan` in `main.py`). Added `tests/conftest.py` to skip init in unit tests. Added `tests/unit/test_startup.py` (3 tests) and `/v1/models` config reflection test.
+- **Why**: Phase 2 exit review — config/model-load failures must surface at startup, not on first request.
+- **Tradeoff**:
+  - Eager init loads vLLM at process start (~90s–4min cold) before accepting traffic — ops trade latency for predictability.
+  - Unit tests patch `deps.initialize_app` to noop via autouse conftest — production path unchanged.
+  - Unregistered `model` in chat request falls back to default (HTTP 200 if default loaded), not HTTP 400 — intentional per DEC-011; documented fallback, not error.
+  - Registered but not-loaded model (e.g. request `tinyllama-chat` when `qwen2.5-0.5b` loaded) → HTTP 400 with restart instruction.
+  - Missing `model` field → FastAPI/Pydantic 422 (field required).
+  - Invalid/missing default model → `ValueError` at router construction → startup failure (now caught by lifespan).
+  - `config/routing.yaml` is declarative documentation; runtime default comes from `INFERENCE_X_DEFAULT_MODEL` env var (fallback `qwen2.5-0.5b`), not YAML parse at startup.
+- **Validation**:
+  - `uv run pytest tests/unit/ -v` → 63/63 passed (59 original + 3 startup + 1 models-yaml reflection).
+  - Runtime routing check: `unknown-model` → routes to `qwen2.5-0.5b`; invalid default → `ValueError` at construction.
+  - `GET /v1/models` returns 5 models matching `config/models.yaml` names.
+  - Phase 1 contracts unchanged: health 200/503/500, chat completions schema and error shapes preserved.
+- **Useful quote / command / number**:
+  - Startup log sequence: registry names → router ready → engine healthy.
+  - Startup failure: CRITICAL log + process exit (lifespan re-raises).
+  - Serve: `INFERENCE_X_DEFAULT_MODEL=qwen2.5-0.5b ./scripts/dev.sh serve` — model loads before first request.
