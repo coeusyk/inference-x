@@ -83,3 +83,35 @@ Use this document to capture non-obvious design decisions as the project evolves
 - Context: Request schema accepts `stream: bool` but Phase 1 has no SSE implementation.
 - Decision: Reject `stream=true` in `ChatService.complete()` with `ValueError` → HTTP 400 and structured error body.
 - Consequences: Clients get an explicit error instead of a misleading non-streaming 200 response.
+
+---
+
+## Phase 2 decisions
+
+### DEC-011
+- Date: 2026-06-07
+- Status: accepted
+- Context: Phase 2 adds a registry and router but the hardware is still one GPU / one loaded engine.
+- Decision: `ChatService` resolves a model name via `TaskRouter` then validates it against `loaded_model`. If the routed model differs from the loaded engine, a `ValueError` → HTTP 400 is returned with a clear restart instruction.
+- Consequences: Multi-model serving is explicitly deferred. Clients are told exactly what model is loaded and how to switch. No silent wrong-model responses.
+
+### DEC-012
+- Date: 2026-06-07
+- Status: accepted
+- Context: Choosing where to validate the `default_model` setting (startup vs. first request).
+- Decision: Validate at `TaskRouter` and `DefaultModelPolicy` construction — not at `ChatService.complete()`. If the default model is absent from the registry, the app fails to start with a clear `ValueError`.
+- Consequences: Misconfiguration surfaces immediately on startup, not mid-request. Operationally safer; no request can succeed against a missing default model.
+
+### DEC-013
+- Date: 2026-06-07
+- Status: accepted
+- Context: `GET /v1/models` was optional in the proposal.
+- Decision: Include it. It costs one thin route handler and two Pydantic models. It lets clients enumerate registered models without reading `models.yaml` directly and removes the need for out-of-band documentation.
+- Consequences: Adds one endpoint to the public contract. Follows OpenAI API shape (`object: "list"`, `data: [...]`).
+
+### DEC-014
+- Date: 2026-06-07
+- Status: accepted
+- Context: `ModelRegistry` could be derived from `AppSettings.get_model_config()` or owned separately.
+- Decision: Give `ModelRegistry` its own `from_config(config_dir)` factory that reads `models.yaml` and validates all entries via Pydantic. `AppSettings` retains `get_model_config` for backward compat but is no longer the canonical registry.
+- Consequences: Registry is independently testable with a `tmp_path` fixture. Settings retains minimal config surface for env vars.

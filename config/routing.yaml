@@ -1,0 +1,7 @@
+routing:
+  # The model served when no explicit registered model is requested.
+  # Must match a 'name' entry in config/models.yaml.
+  default_model: qwen2.5-0.5b
+
+  # Override with environment variable: INFERENCE_X_DEFAULT_MODEL
+  # e.g. INFERENCE_X_DEFAULT_MODEL=tinyllama-chat ./scripts/dev.sh serve

@@ -47,3 +47,24 @@ Capture reasoning, tradeoffs, benchmarks, and implementation details here so the
   - vLLM 0.22.1 on Python 3.13; WSL forces `spawn` multiprocessing and `pin_memory=False`.
   - Health codes: 200 healthy, 503 engine flag false, 500 engine init/inference failure.
   - Error shape: `{"error": {"message": "...", "type": "internal_error"|"invalid_request_error"}}`; validation errors use FastAPI 422 `detail` array.
+
+---
+
+### 2026-06-07 — Phase 2 model registry and routing layer (add-model-registry-routing)
+
+- **Change**: Added `ModelRegistry`, `BaseRouter`, `TaskRouter`, `ExplicitModelPolicy`, `DefaultModelPolicy`, `GET /v1/models`. Wired routing into `ChatService`. All config-driven via `config/routing.yaml` + `config/models.yaml`.
+- **Why**: Phase 2 contract — platform should select models by policy, not hardcode one engine reference in the service layer.
+- **Tradeoff**:
+  - Still single-engine (one GPU). Router resolves a model name; if it doesn't match the loaded engine, HTTP 400 is returned with a restart instruction. Multi-engine fanout deferred to Phase 3+.
+  - `DefaultModelPolicy` validates the default at construction time, not per-request — misconfiguration fails at startup, not mid-request.
+  - `ExplicitModelPolicy` returns `None` for unregistered models (falls through to default) rather than rejecting — clients can pass any `model` field and still get a valid response via fallback.
+  - `ModelRegistry.from_config()` owns YAML parsing and Pydantic validation; `AppSettings.get_model_config()` retained for backward compat only.
+  - `GET /v1/models` included (was optional in proposal) — removes need for out-of-band config knowledge; one thin handler.
+- **Validation**:
+  - `uv run pytest tests/unit/ -v` → 59/59 passed. 27 new tests: `test_model_registry.py` (11 tests), `test_router.py` (9 tests), extended `test_routes.py` (+4 for `/v1/models`) and `test_chat_service.py` (+2 routing tests).
+  - `POST /v1/chat/completions` contract: unchanged. `GET /health` contract: unchanged.
+- **Useful quote / command / number**:
+  - Route selection order: `ExplicitModelPolicy` → `DefaultModelPolicy` (two policies, chain-of-responsibility).
+  - Config: `config/routing.yaml` `default_model` overridden by `INFERENCE_X_DEFAULT_MODEL` env var.
+  - `GET /v1/models` returns `{"object": "list", "data": [{"id": "...", "object": "model", "owned_by": "inferencex"}]}`.
+  - Routing adds zero HTTP round-trips — selection is in-process, synchronous, before engine dispatch.

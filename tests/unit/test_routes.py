@@ -1,4 +1,4 @@
-"""Contract tests for /v1/chat/completions and /health endpoints.
+"""Contract tests for /v1/chat/completions, /health, and /v1/models endpoints.
 
 Uses a stub engine injected via FastAPI dependency override so that vLLM
 is never imported in this test — it runs on any machine without a GPU.
@@ -6,9 +6,10 @@ is never imported in this test — it runs on any machine without a GPU.
 import pytest
 from fastapi.testclient import TestClient
 
+from inference_x.api.deps import get_chat_service, get_registry
 from inference_x.api.main import app
-from inference_x.api.deps import get_chat_service
 from inference_x.engines.base import BaseEngine
+from inference_x.routing.task_router import TaskRouter
 from inference_x.schemas.chat import (
     ChatCompletionChoice,
     ChatCompletionMessage,
@@ -16,8 +17,16 @@ from inference_x.schemas.chat import (
     ChatCompletionResponse,
     ChatCompletionUsage,
 )
+from inference_x.schemas.model import ModelEntry
 from inference_x.services.chat_service import ChatService
+from inference_x.services.model_service import ModelRegistry
 
+_TEST_MODEL = "test-model"
+
+
+# ---------------------------------------------------------------------------
+# Stubs
+# ---------------------------------------------------------------------------
 
 class _StubEngine(BaseEngine):
     def __init__(self, healthy: bool = True) -> None:
@@ -42,16 +51,35 @@ class _StubEngine(BaseEngine):
         return self._healthy
 
 
+def _make_stub_registry() -> ModelRegistry:
+    return ModelRegistry([ModelEntry(name=_TEST_MODEL, model_path="test/stub")])
+
+
+def _make_stub_service(healthy: bool = True) -> ChatService:
+    registry = _make_stub_registry()
+    router = TaskRouter(registry, _TEST_MODEL)
+    return ChatService(
+        engine=_StubEngine(healthy=healthy),
+        registry=registry,
+        router=router,
+        loaded_model=_TEST_MODEL,
+    )
+
+
 def _stub_service_factory(healthy: bool = True):
     def _override() -> ChatService:
-        return ChatService(_StubEngine(healthy=healthy))
-
+        return _make_stub_service(healthy=healthy)
     return _override
 
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
 
 @pytest.fixture()
 def client():
     app.dependency_overrides[get_chat_service] = _stub_service_factory(healthy=True)
+    app.dependency_overrides[get_registry] = _make_stub_registry
     with TestClient(app) as c:
         yield c
     app.dependency_overrides.clear()
@@ -60,10 +88,15 @@ def client():
 @pytest.fixture()
 def unhealthy_client():
     app.dependency_overrides[get_chat_service] = _stub_service_factory(healthy=False)
+    app.dependency_overrides[get_registry] = _make_stub_registry
     with TestClient(app) as c:
         yield c
     app.dependency_overrides.clear()
 
+
+# ---------------------------------------------------------------------------
+# Health endpoint
+# ---------------------------------------------------------------------------
 
 class TestHealthEndpoint:
     def test_health_returns_200_when_healthy(self, client):
@@ -94,9 +127,13 @@ class TestHealthEndpoint:
         app.dependency_overrides.clear()
 
 
+# ---------------------------------------------------------------------------
+# Chat completions endpoint
+# ---------------------------------------------------------------------------
+
 class TestChatCompletionsEndpoint:
     _payload = {
-        "model": "test-model",
+        "model": _TEST_MODEL,
         "messages": [{"role": "user", "content": "hello"}],
     }
 
@@ -108,7 +145,7 @@ class TestChatCompletionsEndpoint:
         resp = client.post("/v1/chat/completions", json=self._payload)
         body = resp.json()
         assert body["object"] == "chat.completion"
-        assert body["model"] == "test-model"
+        assert body["model"] == _TEST_MODEL
         assert len(body["choices"]) == 1
         assert body["choices"][0]["message"]["role"] == "assistant"
         assert body["choices"][0]["message"]["content"] == "Hello from stub"
@@ -148,10 +185,48 @@ class TestChatCompletionsEndpoint:
             def is_healthy(self) -> bool:
                 return True
 
-        app.dependency_overrides[get_chat_service] = lambda: ChatService(_FailingEngine())
+        registry = _make_stub_registry()
+        router = TaskRouter(registry, _TEST_MODEL)
+        failing_svc = ChatService(
+            engine=_FailingEngine(),
+            registry=registry,
+            router=router,
+            loaded_model=_TEST_MODEL,
+        )
+        app.dependency_overrides[get_chat_service] = lambda: failing_svc
         with TestClient(app) as c:
             resp = c.post("/v1/chat/completions", json=self._payload)
             assert resp.status_code == 500
             body = resp.json()
             assert body["error"]["type"] == "internal_error"
         app.dependency_overrides.clear()
+
+
+# ---------------------------------------------------------------------------
+# Models endpoint
+# ---------------------------------------------------------------------------
+
+class TestModelsEndpoint:
+    def test_returns_200(self, client):
+        resp = client.get("/v1/models")
+        assert resp.status_code == 200
+
+    def test_returns_list_object(self, client):
+        resp = client.get("/v1/models")
+        body = resp.json()
+        assert body["object"] == "list"
+        assert isinstance(body["data"], list)
+
+    def test_contains_stub_model(self, client):
+        resp = client.get("/v1/models")
+        body = resp.json()
+        ids = [m["id"] for m in body["data"]]
+        assert _TEST_MODEL in ids
+
+    def test_model_object_shape(self, client):
+        resp = client.get("/v1/models")
+        body = resp.json()
+        model = body["data"][0]
+        assert "id" in model
+        assert model["object"] == "model"
+        assert model["owned_by"] == "inferencex"
