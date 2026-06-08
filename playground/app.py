@@ -15,17 +15,26 @@ import httpx
 
 try:
     from url_validation import validate_base_url
+    from startup_screen import ModelSelectScreen
+    from benchmark_tab import BenchmarkTab
 except ImportError:
     from playground.url_validation import validate_base_url
+    from playground.startup_screen import ModelSelectScreen
+    from playground.benchmark_tab import BenchmarkTab
+
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.widgets import Markdown, Static, TextArea
+from textual.widgets import Label, Markdown, Rule, Select, Static, TextArea, TabbedContent, TabPane
 
 DEFAULT_BASE_URL = "http://localhost:8000"
 DEFAULT_MODEL = "qwen2.5-0.5b"
 DEFAULT_TEMPERATURE = 0.7
 DEFAULT_MAX_TOKENS = 512
 
+
+# ---------------------------------------------------------------------------
+# Pure helper functions (used by tests and the TUI)
+# ---------------------------------------------------------------------------
 
 def parse_sse_line(line: str) -> str | None:
     """Extract a token from one OpenAI-compatible SSE data line."""
@@ -81,8 +90,12 @@ def fetch_models(base_url: str, client: httpx.Client) -> list[str]:
         return []
 
 
+# ---------------------------------------------------------------------------
+# ResponsePanel widget
+# ---------------------------------------------------------------------------
+
 class ResponsePanel(Vertical):
-    """A titled response pane with markdown content and a usage footer."""
+    """A titled response pane with markdown content, empty-state, and a usage footer."""
 
     def __init__(self, model: str, *, panel_id: str) -> None:
         super().__init__(id=panel_id, classes="response-panel")
@@ -94,6 +107,10 @@ class ResponsePanel(Vertical):
     def compose(self) -> ComposeResult:
         yield Static(self._title_text(), classes="panel-title")
         with VerticalScroll(classes="response-scroll"):
+            yield Static(
+                "Send a message to begin",
+                classes="empty-state",
+            )
             yield Markdown("", classes="response-markdown")
         yield Static("", classes="usage")
 
@@ -101,21 +118,32 @@ class ResponsePanel(Vertical):
         self.content = ""
         self.started_at = None
         self.completed = False
-        self.query_one(Markdown).update("")
-        self.query_one(".usage", Static).update("")
+        try:
+            self.query_one(".empty-state", Static).display = True
+            self.query_one(Markdown).update("")
+            self.query_one(".usage", Static).update("")
+        except Exception:
+            pass
         self.refresh_title()
 
     def start(self) -> None:
         self.content = ""
         self.started_at = time.perf_counter()
         self.completed = False
-        self.query_one(Markdown).update("")
-        self.query_one(".usage", Static).update("")
+        try:
+            self.query_one(".empty-state", Static).display = False
+            self.query_one(Markdown).update("")
+            self.query_one(".usage", Static).update("")
+        except Exception:
+            pass
         self.refresh_title()
 
     def append_token(self, token: str) -> None:
         self.content += token
-        self.query_one(Markdown).update(self.content)
+        try:
+            self.query_one(Markdown).update(self.content)
+        except Exception:
+            pass
         self.refresh_title()
 
     def finish(self, prompt: str) -> None:
@@ -124,17 +152,24 @@ class ResponsePanel(Vertical):
         completion_tokens = len(self.content.split())
         total_tokens = prompt_tokens + completion_tokens
         elapsed = self.elapsed_seconds()
-        self.query_one(".usage", Static).update(
-            f"prompt {prompt_tokens} | completion {completion_tokens} | "
-            f"total {total_tokens} | {elapsed:.1f}s"
-        )
+        try:
+            self.query_one(".usage", Static).update(
+                f"prompt {prompt_tokens} | completion {completion_tokens} | "
+                f"total {total_tokens} | {elapsed:.1f}s"
+            )
+        except Exception:
+            pass
         self.refresh_title()
 
     def set_error(self, message: str) -> None:
         self.completed = True
         self.content = message
-        self.query_one(Markdown).update(f"**Error:** {message}")
-        self.query_one(".usage", Static).update("")
+        try:
+            self.query_one(".empty-state", Static).display = False
+            self.query_one(Markdown).update(f"**Error:** {message}")
+            self.query_one(".usage", Static).update("")
+        except Exception:
+            pass
         self.refresh_title()
 
     def elapsed_seconds(self) -> float:
@@ -143,7 +178,10 @@ class ResponsePanel(Vertical):
         return time.perf_counter() - self.started_at
 
     def refresh_title(self) -> None:
-        self.query_one(".panel-title", Static).update(self._title_text())
+        try:
+            self.query_one(".panel-title", Static).update(self._title_text())
+        except Exception:
+            pass
 
     def _title_text(self) -> str:
         if self.started_at is None:
@@ -151,6 +189,10 @@ class ResponsePanel(Vertical):
         state = "done" if self.completed else "streaming"
         return f"{self.model}  {self.elapsed_seconds():.1f}s  {state}"
 
+
+# ---------------------------------------------------------------------------
+# Main application
+# ---------------------------------------------------------------------------
 
 class InferenceXApp(App[None]):
     """Interactive terminal playground for live streaming completions."""
@@ -162,7 +204,6 @@ class InferenceXApp(App[None]):
         ("q", "quit", "Quit"),
         ("ctrl+l", "clear_responses", "Clear"),
         ("ctrl+m", "cycle_model", "Next model"),
-        ("tab", "cycle_model", "Next model"),
         ("f1", "toggle_help", "Help"),
     ]
 
@@ -182,32 +223,98 @@ class InferenceXApp(App[None]):
         self.current_model_index = 0
         self.healthy = False
         self.in_flight = False
+        # Token stats (updated after each completion)
+        self._last_prompt_tokens: int | None = None
+        self._last_completion_tokens: int | None = None
+        self._last_total_tokens: int | None = None
+        self._last_latency: float | None = None
 
     def compose(self) -> ComposeResult:
-        yield Static("", id="header-bar")
-        with Horizontal(id="response-layout"):
-            yield ResponsePanel(self.models[0], panel_id="panel-a")
-            yield ResponsePanel(
-                self.models[1] if self.compare else "",
-                panel_id="panel-b",
-            )
-        with Horizontal(id="prompt-bar"):
-            yield Static("", id="model-selector")
-            yield TextArea.code_editor(
-                "",
-                id="prompt-input",
-                show_line_numbers=False,
-            )
-        yield Static("", id="status-bar")
+        # ── Header (outside tabs — always visible) ────────────────────────────
+        with Horizontal(id="header-bar"):
+            yield Label("InferenceX Playground", id="header-title")
+            yield Label(self.base_url, id="header-url")
+            yield Label("● offline", id="header-health")
+        yield Rule(id="header-rule")
+
+        with TabbedContent(id="main-tabs"):
+            # ── Chat tab ──────────────────────────────────────────────────────
+            with TabPane("Chat", id="tab-chat"):
+                # ── Response area ─────────────────────────────────────────────
+                with Horizontal(id="response-layout"):
+                    yield ResponsePanel(self.models[0], panel_id="panel-a")
+                    yield ResponsePanel(
+                        self.models[1] if self.compare else "",
+                        panel_id="panel-b",
+                    )
+                yield Rule(id="content-rule")
+
+                # ── Prompt bar ────────────────────────────────────────────────
+                with Horizontal(id="prompt-bar"):
+                    with Vertical(id="model-select-area"):
+                        yield Label("Model", id="model-label")
+                        yield Select(
+                            [],
+                            id="model-selector",
+                            prompt="Select model…",
+                            allow_blank=True,
+                        )
+                        yield Static("", id="model-compare-label", classes="hidden")
+                    yield TextArea.code_editor(
+                        "",
+                        id="prompt-input",
+                        show_line_numbers=False,
+                    )
+                yield Rule(id="status-rule")
+
+                # ── Status bar ────────────────────────────────────────────────
+                with Horizontal(id="status-bar"):
+                    yield Static("Ready", id="status-message")
+                    yield Label("[dim]prompt[/dim]", classes="stat-label")
+                    yield Static("—", id="stat-prompt", classes="stat-value")
+                    yield Label("[dim]completion[/dim]", classes="stat-label")
+                    yield Static("—", id="stat-completion", classes="stat-value")
+                    yield Label("[dim]total[/dim]", classes="stat-label")
+                    yield Static("—", id="stat-total", classes="stat-value")
+                    yield Label("[dim]latency[/dim]", classes="stat-label")
+                    yield Static("—", id="stat-latency", classes="stat-value")
+
+            # ── Benchmark tab ─────────────────────────────────────────────────
+            with TabPane("Benchmark", id="tab-benchmark"):
+                yield BenchmarkTab(base_url=self.base_url, id="benchmark-panel")
+
         yield Static(self._help_text(), id="help-overlay", classes="hidden")
 
     async def on_mount(self) -> None:
         self.query_one("#prompt-input", TextArea).placeholder = (
-            "Enter a prompt and press Ctrl+Enter to send..."
+            "Enter a prompt and press Ctrl+Enter to send…"
         )
         if not self.compare:
             self.query_one("#panel-b", ResponsePanel).display = False
+
         self.set_interval(0.2, self._refresh_live_titles)
+
+        # ── Model selection startup screen (non-compare mode only) ────────────
+        if not self.compare:
+            selected = await self.push_screen_wait(
+                ModelSelectScreen(
+                    base_url=self.base_url,
+                    initial_model=self.models[0] if self.models else None,
+                )
+            )
+            if selected:
+                self.models = [selected]
+                self.current_model_index = 0
+
+        # Wire up compare label or model select widget
+        if self.compare:
+            self.query_one("#model-selector", Select).display = False
+            compare_label = self.query_one("#model-compare-label", Static)
+            compare_label.remove_class("hidden")
+            compare_label.update(
+                f"[bold]{self.compare[0]}[/bold] vs [bold]{self.compare[1]}[/bold]"
+            )
+
         await self._refresh_server_state()
         self._render_header()
         self._render_model_selector()
@@ -221,18 +328,16 @@ class InferenceXApp(App[None]):
                     health.status_code == 200
                     and health.json().get("status") == "healthy"
                 )
-                models = await client.get(f"{self.base_url}/v1/models")
-                if models.status_code == 200:
+                models_resp = await client.get(f"{self.base_url}/v1/models")
+                if models_resp.status_code == 200:
                     ids = [
                         item["id"]
-                        for item in models.json().get("data", [])
+                        for item in models_resp.json().get("data", [])
                         if isinstance(item, dict) and isinstance(item.get("id"), str)
                     ]
                     if self.compare:
                         if ids:
-                            missing = [
-                                m for m in self.compare if m not in ids
-                            ]
+                            missing = [m for m in self.compare if m not in ids]
                             if missing:
                                 self.healthy = False
                         self.models = list(self.compare)
@@ -248,9 +353,23 @@ class InferenceXApp(App[None]):
         except (httpx.HTTPError, ValueError):
             self.healthy = False
 
+    # ── Event handlers ─────────────────────────────────────────────────────
+
+    def on_select_changed(self, event: Select.Changed) -> None:
+        """Update active model when the model Select widget changes."""
+        if event.select.id != "model-selector":
+            return
+        if event.value is Select.NULL:
+            return
+        model_str = str(event.value)
+        if model_str in self.models:
+            self.current_model_index = self.models.index(model_str)
+            panel = self.query_one("#panel-a", ResponsePanel)
+            panel.model = model_str
+            panel.refresh_title()
+
     def action_toggle_help(self) -> None:
-        help_overlay = self.query_one("#help-overlay", Static)
-        help_overlay.toggle_class("hidden")
+        self.query_one("#help-overlay", Static).toggle_class("hidden")
 
     def action_clear_responses(self) -> None:
         self.query_one("#panel-a", ResponsePanel).clear_response()
@@ -280,7 +399,7 @@ class InferenceXApp(App[None]):
         self.in_flight = True
         prompt_input = self.query_one("#prompt-input", TextArea)
         prompt_input.disabled = True
-        self._set_status("Streaming...", kind="progress")
+        self._set_status("Streaming…", kind="progress")
 
         await self._refresh_server_state()
         self._render_header()
@@ -300,14 +419,18 @@ class InferenceXApp(App[None]):
             else:
                 await self._stream_model(self._active_model(), prompt, panel_a)
 
-            total_tokens = sum(
-                len(panel.content.split())
-                for panel in (panel_a, panel_b)
-                if panel.display is not False
-            )
+            # Collect stats for the status bar
+            prompt_tokens = len(prompt.split())
+            if self.compare:
+                completion_tokens = len(panel_a.content.split()) + len(panel_b.content.split())
+            else:
+                completion_tokens = len(panel_a.content.split())
+            total_tokens = prompt_tokens + completion_tokens
             elapsed = max(panel_a.elapsed_seconds(), panel_b.elapsed_seconds())
+
+            self._update_stats(prompt_tokens, completion_tokens, total_tokens, elapsed)
             self._set_status(
-                f"Done - {total_tokens} tokens in {elapsed:.1f}s",
+                f"Done — {total_tokens} tokens in {elapsed:.1f}s",
                 kind="success",
             )
         except httpx.ReadTimeout:
@@ -348,6 +471,8 @@ class InferenceXApp(App[None]):
                         panel.append_token(token)
         panel.finish(prompt)
 
+    # ── Internal render helpers ────────────────────────────────────────────
+
     def _active_model(self) -> str:
         if self.compare:
             return self.compare[0]
@@ -360,29 +485,61 @@ class InferenceXApp(App[None]):
     def _refresh_live_titles(self) -> None:
         if not self.in_flight:
             return
-        self.query_one("#panel-a", ResponsePanel).refresh_title()
-        self.query_one("#panel-b", ResponsePanel).refresh_title()
+        try:
+            self.query_one("#panel-a", ResponsePanel).refresh_title()
+            self.query_one("#panel-b", ResponsePanel).refresh_title()
+        except Exception:
+            pass
 
     def _render_header(self) -> None:
-        dot = "●" if self.healthy else "●"
-        state = "healthy" if self.healthy else "unreachable"
-        self.query_one("#header-bar", Static).update(
-            f"InferenceX Playground    {self.base_url} {dot} {state}"
-        )
-        self.query_one("#header-bar", Static).set_class(self.healthy, "healthy")
+        healthy = self.healthy
+        health_text = "● healthy" if healthy else "● offline"
+        try:
+            self.query_one("#header-health", Label).update(health_text)
+            self.query_one("#header-health", Label).set_class(healthy, "healthy")
+            self.query_one("#header-health", Label).set_class(not healthy, "offline")
+        except Exception:
+            pass
 
     def _render_model_selector(self) -> None:
         if self.compare:
-            text = f"{self.compare[0]} vs {self.compare[1]}"
-        else:
-            text = self._active_model()
-        self.query_one("#model-selector", Static).update(text)
+            # Compare label is updated once in on_mount; nothing more needed.
+            return
+        try:
+            sel = self.query_one("#model-selector", Select)
+            options = [(m, m) for m in self.models]
+            sel.set_options(options)
+            if self.models:
+                target = self.models[
+                    min(self.current_model_index, len(self.models) - 1)
+                ]
+                sel.value = target
+        except Exception:
+            pass
 
     def _set_status(self, message: str, *, kind: str) -> None:
-        status = self.query_one("#status-bar", Static)
-        status.update(message)
-        status.remove_class("success", "error", "progress")
-        status.add_class(kind)
+        try:
+            msg = self.query_one("#status-message", Static)
+            msg.update(message)
+            msg.remove_class("success", "error", "progress")
+            msg.add_class(kind)
+        except Exception:
+            pass
+
+    def _update_stats(
+        self,
+        prompt_tokens: int,
+        completion_tokens: int,
+        total_tokens: int,
+        latency: float,
+    ) -> None:
+        try:
+            self.query_one("#stat-prompt", Static).update(str(prompt_tokens))
+            self.query_one("#stat-completion", Static).update(str(completion_tokens))
+            self.query_one("#stat-total", Static).update(str(total_tokens))
+            self.query_one("#stat-latency", Static).update(f"{latency:.1f}s")
+        except Exception:
+            pass
 
     @staticmethod
     def _help_text() -> str:
@@ -390,18 +547,35 @@ class InferenceXApp(App[None]):
             "Shortcuts\n"
             "Ctrl+Enter  submit prompt\n"
             "Enter       add newline\n"
-            "Ctrl+M/Tab  cycle model\n"
+            "Ctrl+M      cycle model\n"
             "Ctrl+L      clear panels\n"
             "F1          toggle help\n"
-            "q/Ctrl+C    quit"
+            "q / Ctrl+C  quit"
         )
 
 
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="InferenceX Textual playground")
-    parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
-    parser.add_argument("--model", default=DEFAULT_MODEL)
-    parser.add_argument("--compare", nargs=2, metavar=("MODEL_A", "MODEL_B"))
+    parser.add_argument(
+        "--base-url",
+        default=DEFAULT_BASE_URL,
+        help=f"Server base URL (default: {DEFAULT_BASE_URL})",
+    )
+    parser.add_argument(
+        "--model",
+        default=DEFAULT_MODEL,
+        help="Pre-select this model in the startup screen (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--compare",
+        nargs=2,
+        metavar=("MODEL_A", "MODEL_B"),
+        help="Side-by-side compare mode; skips the model selection screen.",
+    )
     parser.add_argument(
         "--allow-internal",
         action="store_true",

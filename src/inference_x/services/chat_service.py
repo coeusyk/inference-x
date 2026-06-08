@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from collections.abc import AsyncGenerator
 
+from inference_x.core.settings import get_settings
 from inference_x.engines.base import BaseEngine
 from inference_x.engines.pool import EnginePool
 from inference_x.routing.base import BaseRouter
@@ -42,22 +44,46 @@ class ChatService:
     async def stream_response(
         self, request: ChatCompletionRequest
     ) -> AsyncGenerator[str, None]:
-        """Route a chat request and yield OpenAI-compatible SSE events."""
+        """Route a chat request and yield OpenAI-compatible SSE events.
+
+        Applies a per-token timeout (INFERENCE_X_STREAM_TIMEOUT_S) so that a
+        stalled engine does not hold the connection open indefinitely.
+        """
         engine = self._resolve_engine(request)
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
+        timeout_s = get_settings().stream_timeout_s
 
-        async for chunk in engine.generate_stream(request):
-            payload = {
-                "id": completion_id,
-                "object": "chat.completion.chunk",
-                "choices": [
-                    {
-                        "delta": {"content": chunk},
-                        "index": 0,
-                    }
-                ],
-            }
-            yield f"data: {json.dumps(payload, separators=(',', ':'))}\n\n"
+        gen = engine.generate_stream(request)
+        try:
+            while True:
+                try:
+                    if timeout_s > 0:
+                        chunk = await asyncio.wait_for(
+                            gen.__anext__(), timeout=timeout_s
+                        )
+                    else:
+                        chunk = await gen.__anext__()
+                except StopAsyncIteration:
+                    break
+                except asyncio.TimeoutError:
+                    yield (
+                        f"data: {{\"error\":\"stream timed out after {timeout_s}s\"}}\n\n"
+                    )
+                    break
+
+                payload = {
+                    "id": completion_id,
+                    "object": "chat.completion.chunk",
+                    "choices": [
+                        {
+                            "delta": {"content": chunk},
+                            "index": 0,
+                        }
+                    ],
+                }
+                yield f"data: {json.dumps(payload, separators=(',', ':'))}\n\n"
+        finally:
+            await gen.aclose()
 
         yield "data: [DONE]\n\n"
 

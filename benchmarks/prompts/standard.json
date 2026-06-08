@@ -1,0 +1,15 @@
+{
+  "suite_version": "b47066414716cf4a0970adc790384f5173bd488cf80da47d28936b3d2ce5cfa4",
+  "prompts": [
+    {"label": "short_factual_1", "text": "What is the capital of France?"},
+    {"label": "short_factual_2", "text": "What is the boiling point of water in Celsius?"},
+    {"label": "short_factual_3", "text": "How many planets are in the solar system?"},
+    {"label": "long_generation_1", "text": "Write a short story about a robot who discovers music for the first time."},
+    {"label": "long_generation_2", "text": "Write a detailed essay explaining how the internet changed modern communication, covering at least three major areas of impact."},
+    {"label": "code_generation_1", "text": "Write a Python function that checks whether a given string is a palindrome. Include a docstring and at least two example calls."},
+    {"label": "code_generation_2", "text": "Implement a simple binary search algorithm in Python. Return the index of the target value or -1 if not found."},
+    {"label": "reasoning_1", "text": "A farmer has 17 sheep. All but 9 die. How many sheep does the farmer have left? Think step by step."},
+    {"label": "reasoning_2", "text": "If a train travels at 60 miles per hour and needs to cover 150 miles, how long will the journey take? Show your reasoning."},
+    {"label": "chat_roleplay_1", "text": "You are a helpful assistant who speaks like a pirate. Explain what machine learning is in three sentences."}
+  ]
+}

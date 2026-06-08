@@ -1,0 +1,154 @@
+"""Unit tests for ModelAdvisor scoring and ranking."""
+from __future__ import annotations
+
+import pytest
+
+from inference_x.benchmarks.advisor import ModelAdvisor
+from inference_x.benchmarks.schemas import (
+    AdvisorResult,
+    BenchmarkResult,
+    HardwareProfile,
+    PromptResult,
+)
+
+
+def _make_result(
+    model_name: str,
+    throughput: float,
+    ttft_ms: float,
+    peak_vram_delta_gb: float,
+) -> BenchmarkResult:
+    return BenchmarkResult(
+        model_name=model_name,
+        suite_version="test",
+        timestamp="2026-06-08T12:00:00+00:00",
+        concurrency=1,
+        prompt_results=[
+            PromptResult(
+                prompt_label="q1",
+                tokens_generated=20,
+                ttft_ms=ttft_ms,
+                total_latency_ms=800.0,
+                tokens_per_sec=throughput,
+            )
+        ],
+        p50_latency_ms=800.0,
+        p95_latency_ms=850.0,
+        p99_latency_ms=900.0,
+        mean_throughput_tps=throughput,
+        peak_vram_delta_gb=peak_vram_delta_gb,
+    )
+
+
+def _hw(vram_free: float, vram_total: float, has_gpu: bool = True) -> HardwareProfile:
+    return HardwareProfile(
+        gpu_name="Test GPU",
+        vram_total_gb=vram_total,
+        vram_free_gb=vram_free,
+        cpu_cores=8,
+        ram_total_gb=32.0,
+        has_gpu=has_gpu,
+    )
+
+
+class TestModelAdvisorRanking:
+    def test_higher_throughput_ranks_first(self):
+        results = [
+            _make_result("slow-model", throughput=10.0, ttft_ms=300.0, peak_vram_delta_gb=1.0),
+            _make_result("fast-model", throughput=50.0, ttft_ms=100.0, peak_vram_delta_gb=2.0),
+        ]
+        advisor = ModelAdvisor()
+        ranked = advisor.rank(_hw(vram_free=6.0, vram_total=8.0), results)
+        assert ranked[0].model_name == "fast-model"
+        assert ranked[1].model_name == "slow-model"
+
+    def test_vram_exceeded_marks_not_viable(self):
+        results = [
+            _make_result("big-model", throughput=60.0, ttft_ms=50.0, peak_vram_delta_gb=8.0),
+            _make_result("small-model", throughput=20.0, ttft_ms=200.0, peak_vram_delta_gb=1.5),
+        ]
+        advisor = ModelAdvisor()
+        ranked = advisor.rank(_hw(vram_free=6.0, vram_total=8.0), results)
+
+        big = next(r for r in ranked if r.model_name == "big-model")
+        small = next(r for r in ranked if r.model_name == "small-model")
+
+        assert big.viable is False
+        assert big.score == 0.0
+        assert small.viable is True
+        assert small.score > 0.0
+
+    def test_non_viable_model_ranks_last(self):
+        results = [
+            _make_result("too-big", throughput=100.0, ttft_ms=10.0, peak_vram_delta_gb=10.0),
+            _make_result("fits", throughput=30.0, ttft_ms=200.0, peak_vram_delta_gb=2.0),
+        ]
+        advisor = ModelAdvisor()
+        ranked = advisor.rank(_hw(vram_free=6.0, vram_total=8.0), results)
+        assert ranked[-1].model_name == "too-big"
+
+    def test_cpu_only_hardware_skips_vram_gate(self):
+        results = [
+            _make_result("model-a", throughput=10.0, ttft_ms=500.0, peak_vram_delta_gb=8.0),
+        ]
+        advisor = ModelAdvisor()
+        hw = _hw(vram_free=0.0, vram_total=0.0, has_gpu=False)
+        ranked = advisor.rank(hw, results)
+        assert ranked[0].viable is True
+        assert ranked[0].score > 0.0
+
+    def test_empty_results_returns_empty_list(self):
+        advisor = ModelAdvisor()
+        ranked = advisor.rank(_hw(vram_free=6.0, vram_total=8.0), [])
+        assert ranked == []
+
+    def test_recommendation_str_viable_format(self):
+        results = [
+            _make_result("qwen", throughput=42.0, ttft_ms=150.0, peak_vram_delta_gb=2.1),
+        ]
+        advisor = ModelAdvisor()
+        ranked = advisor.rank(_hw(vram_free=6.0, vram_total=8.0), results)
+        rec = ranked[0].recommendation_str
+        assert "qwen" in rec
+        assert "tok/s" in rec
+        assert "TTFT" in rec or "ms" in rec
+
+    def test_recommendation_str_not_viable_format(self):
+        results = [
+            _make_result("llama-big", throughput=80.0, ttft_ms=50.0, peak_vram_delta_gb=9.0),
+        ]
+        advisor = ModelAdvisor()
+        ranked = advisor.rank(_hw(vram_free=6.0, vram_total=8.0), results)
+        rec = ranked[0].recommendation_str
+        assert "Skip" in rec or "skip" in rec or "requires" in rec
+
+    def test_24gb_hardware_accepts_large_model(self):
+        results = [
+            _make_result("llama-8b", throughput=25.0, ttft_ms=200.0, peak_vram_delta_gb=7.5),
+            _make_result("qwen-small", throughput=50.0, ttft_ms=80.0, peak_vram_delta_gb=1.2),
+        ]
+        advisor = ModelAdvisor()
+        ranked = advisor.rank(_hw(vram_free=20.0, vram_total=24.0), results)
+        assert all(r.viable is True for r in ranked)
+
+    def test_6gb_hardware_rejects_large_model(self):
+        results = [
+            _make_result("llama-8b", throughput=25.0, ttft_ms=200.0, peak_vram_delta_gb=7.5),
+            _make_result("qwen-small", throughput=50.0, ttft_ms=80.0, peak_vram_delta_gb=1.2),
+        ]
+        advisor = ModelAdvisor()
+        ranked = advisor.rank(_hw(vram_free=6.0, vram_total=8.0), results)
+        llama = next(r for r in ranked if r.model_name == "llama-8b")
+        qwen = next(r for r in ranked if r.model_name == "qwen-small")
+        assert llama.viable is False
+        assert qwen.viable is True
+
+    def test_scores_are_normalized_0_to_100(self):
+        results = [
+            _make_result("model-a", throughput=40.0, ttft_ms=100.0, peak_vram_delta_gb=1.0),
+            _make_result("model-b", throughput=20.0, ttft_ms=300.0, peak_vram_delta_gb=2.0),
+        ]
+        advisor = ModelAdvisor()
+        ranked = advisor.rank(_hw(vram_free=6.0, vram_total=8.0), results)
+        for r in ranked:
+            assert 0.0 <= r.score <= 100.0

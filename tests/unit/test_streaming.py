@@ -1,6 +1,7 @@
 """Tests for SSE streaming chat completions."""
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
@@ -146,3 +147,65 @@ def test_non_streaming_route_still_returns_json():
     body = resp.json()
     assert body["object"] == "chat.completion"
     assert body["choices"][0]["message"]["content"] == "Hello world"
+
+
+# ---------------------------------------------------------------------------
+# Streaming timeout tests
+# ---------------------------------------------------------------------------
+
+class _StallingEngine(BaseEngine):
+    """Engine whose stream_response never yields (simulates a stalled backend)."""
+
+    async def generate(self, request: ChatCompletionRequest) -> ChatCompletionResponse:
+        return ChatCompletionResponse(
+            model=request.model,
+            choices=[
+                ChatCompletionChoice(
+                    index=0,
+                    message=ChatCompletionMessage(content=""),
+                    finish_reason="stop",
+                )
+            ],
+            usage=ChatCompletionUsage(prompt_tokens=1, completion_tokens=0, total_tokens=1),
+        )
+
+    async def generate_stream(self, request: ChatCompletionRequest):
+        # Simulate a stall: never yields a token
+        await asyncio.sleep(9999)
+        yield "never"
+
+    def is_healthy(self) -> bool:
+        return True
+
+
+def _stalling_service() -> ChatService:
+    registry = _registry()
+    router = TaskRouter(registry, _TEST_MODEL)
+    pool = EnginePool({_TEST_MODEL: _StallingEngine()})
+    return ChatService(engine_pool=pool, registry=registry, router=router)
+
+
+@pytest.mark.asyncio
+async def test_stream_timeout_emits_error_sse_event(monkeypatch):
+    """When the engine stalls, stream_response should yield a timeout error event."""
+    monkeypatch.setenv("INFERENCE_X_STREAM_TIMEOUT_S", "0.05")
+
+    from inference_x.core import settings as settings_mod
+    settings_mod.get_settings.cache_clear()
+
+    service = _stalling_service()
+    req = ChatCompletionRequest(
+        model=_TEST_MODEL,
+        messages=[ChatMessage(role="user", content="hello")],
+        stream=True,
+    )
+    events = [event async for event in service.stream_response(req)]
+
+    # Must still end with [DONE]
+    assert events[-1] == "data: [DONE]\n\n"
+    # One of the non-DONE events must mention the timeout
+    non_done = [e for e in events if e != "data: [DONE]\n\n"]
+    assert any("timed out" in e or "error" in e for e in non_done), non_done
+
+    # Restore settings cache for subsequent tests
+    settings_mod.get_settings.cache_clear()

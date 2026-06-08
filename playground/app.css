@@ -1,23 +1,58 @@
+/* ── Base ─────────────────────────────────────────────────────────────── */
+
 Screen {
     background: #0f1117;
     color: #d7dce5;
+    layers: below above overlay;
 }
+
+/* ── Header bar ──────────────────────────────────────────────────────── */
 
 #header-bar {
     height: 1;
     padding: 0 1;
-    color: #7f8795;
-    text-style: bold;
-    dock: top;
 }
 
-#header-bar.healthy {
+#header-title {
+    width: auto;
+    color: #7aa884;
+    text-style: bold;
+}
+
+#header-url {
+    width: 1fr;
+    content-align: center middle;
+    color: #7f8795;
+}
+
+#header-health {
+    width: auto;
+    color: #d06c75;
+}
+
+#header-health.healthy {
     color: #7aa884;
 }
 
+#header-health.offline {
+    color: #d06c75;
+}
+
+/* ── Rules ───────────────────────────────────────────────────────────── */
+
+#header-rule,
+#content-rule,
+#status-rule {
+    height: 1;
+    margin: 0;
+    color: #343b49;
+}
+
+/* ── Response panels ─────────────────────────────────────────────────── */
+
 #response-layout {
     height: 1fr;
-    padding: 1 1 0 1;
+    padding: 0 1;
 }
 
 .response-panel {
@@ -39,6 +74,14 @@ Screen {
     padding: 0 1;
 }
 
+.empty-state {
+    color: #596275;
+    text-style: italic;
+    content-align: center middle;
+    width: 1fr;
+    height: 1fr;
+}
+
 .response-markdown {
     color: #d7dce5;
 }
@@ -49,48 +92,87 @@ Screen {
     color: #7f8795;
 }
 
+/* ── Prompt bar ──────────────────────────────────────────────────────── */
+
 #prompt-bar {
-    height: 7;
-    padding: 1;
+    height: 9;
+    padding: 0 1;
+}
+
+#model-select-area {
+    width: 28;
+    height: 100%;
+    padding: 0 0 0 0;
+}
+
+#model-label {
+    height: 1;
+    padding: 0 1;
+    color: #7f8795;
 }
 
 #model-selector {
-    width: 28;
-    height: 100%;
-    border: round #343b49;
+    width: 26;
+    color: #c9d1e3;
+}
+
+#model-compare-label {
+    height: 3;
     padding: 1;
+    border: round #343b49;
     color: #c9d1e3;
     text-style: bold;
+    width: 26;
 }
 
 #prompt-input {
     width: 1fr;
     height: 100%;
     border: round #343b49;
+    margin-left: 1;
 }
+
+/* ── Status bar ──────────────────────────────────────────────────────── */
 
 #status-bar {
     height: 1;
     padding: 0 1;
-    dock: bottom;
+}
+
+#status-message {
+    width: 1fr;
     color: #7f8795;
 }
 
-#status-bar.success {
+#status-message.success {
     color: #7aa884;
 }
 
-#status-bar.error {
+#status-message.error {
     color: #d06c75;
 }
 
-#status-bar.progress {
+#status-message.progress {
     color: #d1a65a;
 }
 
+.stat-label {
+    width: auto;
+    color: #596275;
+    padding: 0 0 0 2;
+}
+
+.stat-value {
+    width: auto;
+    color: #c9d1e3;
+    padding: 0 1 0 1;
+}
+
+/* ── Help overlay ────────────────────────────────────────────────────── */
+
 #help-overlay {
     layer: overlay;
-    width: 42;
+    width: 44;
     height: 10;
     align: center middle;
     border: round #596275;

@@ -210,3 +210,75 @@ Use this document to capture non-obvious design decisions as the project evolves
   - **Rate limiting / inference concurrency caps** — requires queue design and 503 contract; deferred until multi-tenant or public exposure.
   - **Streaming / request wall-clock timeouts** — needs engine cancellation semantics vLLM does not expose cleanly on the sync `llm_engine` path.
   - **Request body size limits at middleware** — depends on Starlette/FastAPI global limit policy coordinated with observability body peek.
+
+### DEC-SEC-01
+- Date: 2026-06-08
+- Status: accepted
+- Context: Security audit of all transitive dependencies run with `uv run pip-audit`.
+- Decision: Accept the single finding. Full output:
+  ```
+  Found 1 known vulnerability in 1 package
+  Name      Version  ID              Fix Versions
+  --------- -------  --------------  ------------
+  diskcache  5.6.3   CVE-2025-69872  (none listed)
+  ```
+  `diskcache` is a transitive dependency of `vllm` and is not directly imported or called by InferenceX code. No public fix version is available at audit time. The risk surface is limited to local-only execution (server binds to 127.0.0.1). Re-audit when vllm ships an updated transitive dep.
+- Consequences: Known CVE accepted under local-only deployment assumption. Must re-evaluate before any public network exposure.
+
+### DEC-GIT-01
+- Date: 2026-06-08
+- Status: accepted
+- Context: `logs/` directory is created by the server at runtime but was absent from `.gitignore`, risking the log file (`logs/inference_x.log`) being tracked by git.
+- Decision: Added `logs/` to `.gitignore`. If the log file was already committed before this fix, run `git rm --cached logs/inference_x.log` manually to stop tracking it without deleting the file on disk.
+- Consequences: Future server runs will not accidentally commit log files. The manual `git rm --cached` step is a one-time cleanup for repos that tracked the file before this fix.
+
+### DEC-DEFER-01
+- Date: 2026-06-08
+- Status: accepted (deferred)
+- Context: API authentication — no identity model or key storage exists.
+- Decision: Not implemented. Server binds to `127.0.0.1` (loopback-only), providing network-level isolation for single-user local use. Authentication must be designed and implemented before any public network exposure.
+- Consequences: Any process that can reach localhost 8000 can call the API without credentials. Acceptable for local-only dev; not acceptable for shared or public deployments.
+
+### DEC-DEFER-02
+- Date: 2026-06-08
+- Status: accepted (deferred)
+- Context: Rate limiting and inference concurrency caps — no queue or 503 backpressure exists.
+- Decision: Not implemented. Single-user local use case with one request at a time. A queue design with 503 contract is required before any multi-tenant or public exposure scenario.
+- Consequences: A burst of concurrent requests will all enter the vLLM engine simultaneously; GPU memory and latency will degrade. Acceptable for single-user dev.
+
+### DEC-DEFER-03
+- Date: 2026-06-08
+- Status: accepted
+- Context: Streaming timeout — needed to prevent stalled engine threads from holding SSE connections open indefinitely.
+- Decision: Implemented a per-token asyncio timeout in `ChatService.stream_response()` controlled by `INFERENCE_X_STREAM_TIMEOUT_S` (default 120s). Uses `asyncio.wait_for` on `gen.__anext__()` inside the service layer. On timeout, emits an error SSE event and terminates the stream with `data: [DONE]`. The sync vLLM thread continues to run until the OS reclaims it (daemon thread), but the client connection is released cleanly.
+- Consequences: Clients receive a clear error event and the HTTP connection closes within `stream_timeout_s` seconds. The background worker thread is not explicitly cancelled (vLLM sync engine has no cancellation hook), but daemon thread semantics ensure it does not prevent process exit.
+
+### DEC-027
+- Date: 2026-06-08
+- Status: accepted
+- Context: Phase 6 benchmark advisor needs a scoring function to rank models by hardware fit.
+- Decision: Weighted composite score (0–100) across four dimensions:
+  - **40% Throughput** — most user-visible metric; determines how fast the chat feels
+  - **30% TTFT (inverted)** — time-to-first-token drives perceived interactivity more than raw throughput
+  - **20% VRAM headroom** — remaining free VRAM after model load; a hard gate (score=0) when VRAM exceeded
+  - **10% Quantization fit** — placeholder weight reserved for INT8/FP8 quantization scoring in a future phase; currently always 1.0
+  All dimension scores are normalized against the best result in the batch (0–1) before weighting. The hard VRAM gate cannot be overridden by other scores.
+- Consequences: Models that technically exceed available VRAM are always ranked last (score=0, viable=False) regardless of throughput numbers. The quantization weight is intentionally reserved to avoid a weight-sum change when implemented.
+
+### DEC-028
+- Date: 2026-06-08
+- Status: accepted
+- Context: Phase 6 hardware profiler must work on multiple environments: WSL2 with CUDA, bare Linux with CUDA, and CPU-only machines.
+- Decision: Three-level fallback chain:
+  1. **pynvml** Python bindings — fastest, most accurate, works reliably on CUDA systems with NVML driver
+  2. **nvidia-smi subprocess** — subprocess parse of `--query-gpu=name,memory.total,memory.free --format=csv,noheader,nounits`; works when pynvml is absent but NVIDIA drivers are present
+  3. **CPU-only profile** — fallback when neither GPU path works; `has_gpu=False`, `vram_*=0.0`; VRAM-dependent models will all be hard-gated to non-viable by the advisor
+  CPU cores and RAM always come from `psutil` when available, with `os.cpu_count()` and 16.0 GB as final fallbacks. Both `pynvml` and `psutil` are optional extras (`[project.optional-dependencies] hardware`) — the profiler degrades without them.
+- Consequences: Hardware profiler is always safe to call; never raises. On pure CPU machines the advisor marks all GPU-bound models non-viable, which is correct behavior.
+
+### DEC-026
+- Date: 2026-06-08
+- Status: accepted
+- Context: The playground needed a better first-run experience: the operator had to know a model name before launching. The UI also lacked polish for model switching, response rendering, and quick-glance stats.
+- Decision: Add `playground/startup_screen.py` — a `ModalScreen[str]` that fetches `/v1/models` on mount and presents a `RadioSet` for selection before the main TUI renders. On error or empty list, falls back to a manual `Input`. Six UI changes: (1) startup model-select screen pushed via `push_screen_wait` in `on_mount`; (2) response area already uses `Markdown` — confirmed correct; (3) header replaced with `Horizontal` containing title / URL / health `Label` widgets and a `Rule` separator; (4) model selector in prompt bar replaced with Textual `Select` widget; (5) status bar extended with per-request token-count and latency columns; (6) empty-state message in each `ResponsePanel` hidden when first token arrives, shown on clear. `--model` flag retained as pre-selection hint for the startup screen. Tab key removed from `cycle_model` binding to avoid focus-navigation conflict.
+- Consequences: Launching without `--compare` now requires an interactive model selection step; `--compare` skips the screen. No env-var reading for model selection in the playground (the `--model` flag and server-provided model list are the only sources). `test_app.py` unchanged — the startup screen only runs inside `app.run()`.

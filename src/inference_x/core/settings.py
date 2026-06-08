@@ -35,6 +35,13 @@ class AppSettings:
             else [self.default_model]
         )
 
+        # Maximum seconds to wait between tokens during streaming.
+        # If no token is produced within this window the stream is terminated
+        # with an error SSE event.  Set to 0 to disable.
+        self.stream_timeout_s: float = float(
+            os.environ.get("INFERENCE_X_STREAM_TIMEOUT_S", "120")
+        )
+
     def get_model_config(self, model_name: str | None = None) -> dict[str, Any]:
         """Return the config block for *model_name* from models.yaml.
 

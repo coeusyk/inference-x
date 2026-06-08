@@ -226,6 +226,29 @@ Capture reasoning, tradeoffs, benchmarks, and implementation details here so the
 - **WSL pin_memory**: `vllm_platform_patch.py` probes CUDA pinned memory and patches vLLM's WSL detection before import. Optional `./scripts/install_vllm_patch.sh` (one-time) propagates the patch to vLLM spawn workers via site-packages `.pth`.
 - **Validation**: dual-model init OK on 8 GiB WSL2 GPU; 158+ unit tests pass.
 
+## Phase 6 benchmark suite and model advisor (2026-06-08)
+
+- **Change**: Added `src/inference_x/benchmarks/` package: `schemas.py` (HardwareProfile, BenchmarkResult, PromptResult, AdvisorResult), `hardware.py` (pynvml → nvidia-smi → CPU-only fallback chain), `runner.py` (BenchmarkRunner streaming HTTP runner), `storage.py` (ResultStore JSON save/load), `advisor.py` (ModelAdvisor 40/30/20/10 weighted scoring with VRAM hard gate). Added `benchmarks/prompts/standard.json` (10-prompt SHA256-versioned suite). Added `scripts/benchmark.py` CLI with server-reachability check, `scripts/advise.py` ranked table CLI. Added `GET /v1/benchmark/results` and `GET /v1/benchmark/advise` routes. Added `playground/benchmark_tab.py` Textual widget wired into `playground/app.py` as a "Benchmark" TabbedContent tab. Makefile: `benchmark`, `benchmark-all`, `advise` targets.
+- **Why**: Phase 6 contract — hardware-aware model recommendation without manual testing.
+- **Tradeoff**:
+  - Token counting is whitespace-split client-side (not tokenizer-exact); sufficient for relative comparisons within a suite run.
+  - VRAM delta measured by polling hardware profiler before/after the run; not per-request sampling.
+  - Quantization score is a placeholder (always 1.0) — reserved for when INT8/FP8 data is available.
+  - pynvml and psutil are optional extras; hardware profiler always degrades gracefully.
+- **Validation**: `uv run pytest tests/unit -q` → 233/233 passed. `make benchmark MODEL=qwen2.5-0.5b` produced a valid result JSON on live server. `BenchmarkResult` schema round-trip validated programmatically.
+- **Useful numbers**:
+  - 38 new unit tests: test_hardware.py (18), test_storage.py (11), test_advisor.py (10), test_benchmark_routes.py (6), test_schemas.py (+7 API-level 422 tests).
+  - Benchmark prompt suite SHA256: `b47066414716cf4a0970adc790384f5173bd488cf80da47d28936b3d2ce5cfa4`
+  - Live smoke on running server: 175.6 tok/s mean throughput for qwen2.5-0.5b on 10 prompts (real run, actual hardware).
+
+## Phase 5 hardening completion (2026-06-08)
+
+- **Change**: Schema constraints confirmed (max_length=32k, le=4096, temperature 0–2). API 422 tests added. Streaming timeout (`INFERENCE_X_STREAM_TIMEOUT_S=120`) implemented via `asyncio.wait_for` in `ChatService.stream_response`. `.gitignore` updated with `logs/`. Security audit run: one CVE (diskcache 5.6.3, CVE-2025-69872, transitive vLLM dep, accepted). Deferred items (auth, rate limiting) documented as DEC-DEFER-01/02. README fully rewritten with prerequisites, model download steps, LOADED_MODELS usage, all make targets, troubleshooting section. `docs/ARTICLE_DRAFT.md` created from ARTICLE_NOTES.
+- **Why**: Phase 5 exit criteria — security hardened, fully documented, ready for open-sourcing.
+- **Tradeoff**: Streaming timeout uses `asyncio.wait_for` on `gen.__anext__()` — daemon thread continues running but client connection releases cleanly within timeout window.
+- **Validation**: `uv run pytest tests/unit -q` → 195/195 passed. pip-audit clean except accepted transitive CVE.
+- **Useful numbers**: 195 unit tests, 0 failures. pip-audit: 1 CVE (transitive, accepted). Streaming timeout default: 120s.
+
 ## Phase 5 SSE streaming backend (2026-06-07)
 
 - **Change**: `POST /v1/chat/completions` now supports `stream=true` with OpenAI-compatible SSE chunks and a final `data: [DONE]` event.

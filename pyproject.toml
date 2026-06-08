@@ -14,6 +14,9 @@ dependencies = [
     "textual>=0.60",
 ]
 
+[project.optional-dependencies]
+hardware = ["pynvml>=11.0", "psutil>=5.9"]
+
 [dependency-groups]
 dev = [
     "pip-audit>=2.10.0",

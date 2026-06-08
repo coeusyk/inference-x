@@ -1,0 +1,145 @@
+"""Benchmark runner: measures throughput, TTFT, and latency for a model.
+
+The runner POSTs each prompt from the suite to the inference server with
+stream=True, measuring time-to-first-token (TTFT) and total latency.  It
+does not require vLLM or GPU access — it communicates over HTTP.
+"""
+from __future__ import annotations
+
+import json
+import statistics
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Optional
+
+import httpx
+
+from inference_x.benchmarks.hardware import profile_hardware
+from inference_x.benchmarks.schemas import BenchmarkResult, HardwareProfile, PromptResult
+
+
+def _load_suite(suite_path: str) -> tuple[str, list[dict]]:
+    """Return (suite_version, prompts_list) from a suite JSON file."""
+    data = json.loads(Path(suite_path).read_text(encoding="utf-8"))
+    return data["suite_version"], data["prompts"]
+
+
+def _run_prompt_stream(
+    client: httpx.Client,
+    base_url: str,
+    model_name: str,
+    prompt_text: str,
+    prompt_label: str,
+) -> PromptResult:
+    """POST one prompt with stream=True and measure timing metrics."""
+    payload = {
+        "model": model_name,
+        "messages": [{"role": "user", "content": prompt_text}],
+        "max_tokens": 256,
+        "stream": True,
+    }
+
+    tokens_generated = 0
+    ttft_ms: Optional[float] = None
+    t_start = time.perf_counter()
+
+    with client.stream(
+        "POST",
+        f"{base_url}/v1/chat/completions",
+        json=payload,
+        timeout=httpx.Timeout(10.0, read=120.0),
+    ) as response:
+        response.raise_for_status()
+        for line in response.iter_lines():
+            if not line.startswith("data:"):
+                continue
+            data = line.removeprefix("data:").strip()
+            if not data or data == "[DONE]":
+                continue
+            try:
+                chunk = json.loads(data)
+                delta = (chunk.get("choices") or [{}])[0].get("delta", {})
+                content = delta.get("content", "")
+                if content:
+                    if ttft_ms is None:
+                        ttft_ms = (time.perf_counter() - t_start) * 1000
+                    tokens_generated += len(content.split())
+            except (json.JSONDecodeError, IndexError):
+                continue
+
+    total_latency_ms = (time.perf_counter() - t_start) * 1000
+    if ttft_ms is None:
+        ttft_ms = total_latency_ms
+    tokens_per_sec = (tokens_generated / total_latency_ms * 1000) if total_latency_ms > 0 else 0.0
+
+    return PromptResult(
+        prompt_label=prompt_label,
+        tokens_generated=tokens_generated,
+        ttft_ms=round(ttft_ms, 2),
+        total_latency_ms=round(total_latency_ms, 2),
+        tokens_per_sec=round(tokens_per_sec, 2),
+    )
+
+
+def _percentile(data: list[float], p: float) -> float:
+    if not data:
+        return 0.0
+    sorted_data = sorted(data)
+    k = (len(sorted_data) - 1) * p / 100
+    f = int(k)
+    c = f + 1
+    if c >= len(sorted_data):
+        return sorted_data[f]
+    return sorted_data[f] + (sorted_data[c] - sorted_data[f]) * (k - f)
+
+
+class BenchmarkRunner:
+    """Runs a fixed prompt suite against a model and returns a BenchmarkResult."""
+
+    def run(
+        self,
+        model_name: str,
+        suite_path: str,
+        base_url: str = "http://127.0.0.1:8000",
+        concurrency: int = 1,
+    ) -> BenchmarkResult:
+        base_url = base_url.rstrip("/")
+        suite_version, prompts = _load_suite(suite_path)
+
+        hardware_before = profile_hardware()
+        prompt_results: list[PromptResult] = []
+
+        with httpx.Client() as client:
+            for prompt in prompts:
+                result = _run_prompt_stream(
+                    client=client,
+                    base_url=base_url,
+                    model_name=model_name,
+                    prompt_text=prompt["text"],
+                    prompt_label=prompt["label"],
+                )
+                prompt_results.append(result)
+
+        hardware_after = profile_hardware()
+
+        latencies = [r.total_latency_ms for r in prompt_results]
+        throughputs = [r.tokens_per_sec for r in prompt_results]
+
+        peak_vram_delta = max(
+            0.0,
+            hardware_before.vram_free_gb - hardware_after.vram_free_gb,
+        ) if hardware_before.has_gpu else 0.0
+
+        return BenchmarkResult(
+            model_name=model_name,
+            suite_version=suite_version,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            concurrency=concurrency,
+            prompt_results=prompt_results,
+            p50_latency_ms=round(_percentile(latencies, 50), 2),
+            p95_latency_ms=round(_percentile(latencies, 95), 2),
+            p99_latency_ms=round(_percentile(latencies, 99), 2),
+            mean_throughput_tps=round(statistics.mean(throughputs) if throughputs else 0.0, 2),
+            peak_vram_delta_gb=round(peak_vram_delta, 2),
+        )

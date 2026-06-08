@@ -24,3 +24,20 @@ client:
 .PHONY: stop
 stop:
 	pkill -f "uvicorn inference_x.api.main:app" || true
+
+# Benchmark a single model (server must be running)
+.PHONY: benchmark
+benchmark:
+	uv run python scripts/benchmark.py --model $(MODEL)
+
+# Benchmark all small models (server must be running with INFERENCE_X_LOADED_MODELS set)
+.PHONY: benchmark-all
+benchmark-all:
+	@for model in qwen2.5-0.5b tinyllama-chat; do \
+		uv run python scripts/benchmark.py --model $$model; \
+	done
+
+# Print ranked advisor report from stored benchmark results
+.PHONY: advise
+advise:
+	uv run python scripts/advise.py
