@@ -5,3 +5,5 @@ server:
   workers: 1          # vLLM is not fork-safe; always 1 worker
   reload: false       # set true for dev via INFERENCE_X_ENV=dev
   log_level: "info"
+  load_format: npcache        # adds numpy cache on first load, fast on subsequent
+  optimization_level: O1      # skip aggressive compilation on every dev restart

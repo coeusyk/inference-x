@@ -12,6 +12,12 @@ case "$cmd" in
     uv sync
     ;;
   serve)
+    if [[ -f "$ROOT/.env" ]]; then
+      set -a
+      # shellcheck disable=SC1091
+      source "$ROOT/.env"
+      set +a
+    fi
     export INFERENCE_X_DEFAULT_MODEL="${INFERENCE_X_DEFAULT_MODEL:-qwen2.5-0.5b}"
     # WSL2: FlashInfer sampler JIT needs a full CUDA toolkit; use PyTorch fallback.
     export VLLM_USE_FLASHINFER_SAMPLER="${VLLM_USE_FLASHINFER_SAMPLER:-0}"
@@ -42,11 +48,20 @@ Commands:
   serve   Start the API server (uses project .venv via uv run)
   test    Run unit tests
   smoke   Run HTTP smoke test against a running server
+  help    Show this message
+
+Make targets (run from repo root):
+  make help              Full command reference
+  make playground        Start server + Textual TUI
+  make benchmark MODEL=<name>   Run benchmark suite (server must be running)
+  make advise            Print ranked model advisor report
+  make stop              Stop background server
 
 Examples:
   ./scripts/dev.sh sync
   ./scripts/dev.sh serve          # terminal 1
   ./scripts/dev.sh smoke          # terminal 2
+  make benchmark MODEL=qwen2.5-0.5b # terminal 2 (after serve)
 
 Set INFERENCE_X_DEFAULT_MODEL to pick a single model from config/models.yaml.
 Set INFERENCE_X_LOADED_MODELS (comma-separated) to load multiple models at once.

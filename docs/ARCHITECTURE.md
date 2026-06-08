@@ -60,6 +60,17 @@ The observability layer records system behavior without polluting business logic
 
 This layer lives under `src/inferencex/observability/`.
 
+### 6. Benchmark layer (Phase 6)
+
+The benchmark layer measures inference performance and recommends models for local hardware:
+- hardware profiling (`benchmarks/hardware.py`) — GPU VRAM via pynvml or nvidia-smi
+- benchmark runner (`benchmarks/runner.py`) — streaming HTTP against `/v1/chat/completions`
+- result storage (`benchmarks/storage.py`) — JSON files under `docs/benchmarks/`
+- model advisor (`benchmarks/advisor.py`) — weighted scoring with VRAM viability gate
+
+This layer lives under `src/inference_x/benchmarks/`. It does not call vLLM directly;
+the benchmark CLI requires a running server.
+
 ## Dependency direction
 
 The allowed dependency flow is:
@@ -86,6 +97,7 @@ src/inferencex/
 ├── engines/
 ├── routing/
 ├── observability/
+├── benchmarks/
 ├── services/
 └── utils/
 ```
@@ -109,6 +121,9 @@ Contains model-selection policies and future fallback logic.
 
 #### `observability/`
 Contains middleware, metrics recorders, storage adapters, and exporters.
+
+#### `benchmarks/`
+Contains hardware profiling, benchmark runner, result storage, and model advisor logic.
 
 #### `core/`
 Contains settings, lifecycle hooks, and shared app setup.
@@ -163,4 +178,8 @@ Add observability middleware and metrics storage without moving business logic b
 Add a lightweight playground that consumes the existing API rather than introducing UI-specific backend logic where avoidable.
 
 ### Phase 5
-Add hardening, deployment guidance, benchmarks, and article-ready artifacts.
+Add hardening, deployment guidance, and article-ready artifacts.
+
+### Phase 6
+Add benchmark runner, hardware profiler, model advisor, and playground Benchmark tab.
+Additive API: `GET /v1/benchmark/results`, `GET /v1/benchmark/advise`.

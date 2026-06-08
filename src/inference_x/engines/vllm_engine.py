@@ -25,6 +25,211 @@ logger = logging.getLogger(__name__)
 _VLLM_AVAILABLE: bool | None = None
 
 
+def _probe_cuda_vram() -> dict[str, float | bool]:
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return {"cuda_available": False}
+        free, total = torch.cuda.mem_get_info(0)
+        return {
+            "cuda_available": True,
+            "free_gib": round(free / (1024**3), 2),
+            "total_gib": round(total / (1024**3), 2),
+        }
+    except Exception as exc:
+        return {"cuda_available": False, "probe_error": str(exc)}
+
+
+def _vram_budget_error(
+    model_name: str,
+    gpu_util: float,
+    free_gib: float,
+    total_gib: float,
+) -> RuntimeError:
+    requested = gpu_util * total_gib
+    return RuntimeError(
+        f"Insufficient GPU memory to start {model_name}. "
+        f"Free VRAM {free_gib:.2f} GiB is less than "
+        f"gpu_memory_utilization={gpu_util} requires ({requested:.2f} GiB of "
+        f"{total_gib:.2f} GiB total). Lower gpu_memory_utilization in "
+        "config/models.yaml, stop other GPU processes, or use a smaller model."
+    )
+
+
+def _check_vram_budget(
+    model_name: str,
+    gpu_util: float | None,
+    vram: dict[str, float | bool],
+) -> None:
+    if gpu_util is None or not vram.get("cuda_available"):
+        return
+    free = vram.get("free_gib")
+    total = vram.get("total_gib")
+    if not isinstance(free, (int, float)) or not isinstance(total, (int, float)):
+        return
+    requested = float(gpu_util) * float(total)
+    if float(free) < requested:
+        raise _vram_budget_error(model_name, float(gpu_util), float(free), float(total))
+
+
+_GATED_REPO_HINT = (
+    "Request access on HuggingFace, then authenticate:\n"
+    "  1. Visit the model page and accept the license\n"
+    "  2. uv run huggingface-cli login\n"
+    "  3. Or export HF_TOKEN=<your-token> before starting the server"
+)
+
+
+def resolve_hf_token() -> str | None:
+    """Return a HuggingFace token from the environment, if set."""
+    for key in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HUGGINGFACE_HUB_TOKEN"):
+        value = os.environ.get(key, "").strip()
+        if value:
+            return value
+    return None
+
+
+def _is_hf_hub_model_path(model_path: str) -> bool:
+    """True when *model_path* is a HuggingFace Hub repo id (org/name), not a local path."""
+    if not model_path:
+        return False
+    if model_path.startswith(("/", "./", "../", "~")):
+        return False
+    if os.path.isabs(model_path):
+        return False
+    # Windows absolute paths: C:\... or C:/...
+    if len(model_path) >= 2 and model_path[1] == ":":
+        return False
+    parts = model_path.split("/")
+    return len(parts) == 2 and bool(parts[0]) and bool(parts[1])
+
+
+def preflight_hf_access(
+    model_name: str,
+    model_path: str,
+    token: str | None,
+) -> None:
+    """Verify HuggingFace repo access before vLLM starts weight download.
+
+    Skips local filesystem paths. For Hub repos that are gated or private, probes
+    a lightweight config.json fetch so both missing-token and not-yet-approved
+    cases fail fast with a short message.
+    """
+    if not _is_hf_hub_model_path(model_path):
+        return
+
+    try:
+        from huggingface_hub import hf_hub_download, model_info
+        from huggingface_hub.errors import GatedRepoError, RepositoryNotFoundError
+    except ImportError:
+        logger.warning(
+            "huggingface_hub not available; skipping HF preflight for %s",
+            model_path,
+        )
+        return
+
+    try:
+        info = model_info(model_path, token=token)
+    except RepositoryNotFoundError:
+        raise RuntimeError(
+            f"Model '{model_path}' not found on HuggingFace. "
+            "Check model_path in config/models.yaml."
+        ) from None
+
+    gated = bool(getattr(info, "gated", False))
+    private = bool(getattr(info, "private", False))
+    if not gated and not private:
+        return
+
+    try:
+        hf_hub_download(repo_id=model_path, filename="config.json", token=token)
+    except GatedRepoError:
+        if token:
+            raise RuntimeError(
+                f"Access to '{model_path}' is not yet approved for your HuggingFace "
+                f"account. Request access at https://huggingface.co/{model_path} "
+                "and wait for approval."
+            ) from None
+        raise RuntimeError(
+            f"Model '{model_name}' ({model_path}) is gated on HuggingFace.\n"
+            f"{_GATED_REPO_HINT}"
+        ) from None
+    except RepositoryNotFoundError:
+        raise RuntimeError(
+            f"Model '{model_path}' not found on HuggingFace. "
+            "Check model_path in config/models.yaml."
+        ) from None
+
+
+def _gated_model_startup_error(model_name: str, model_path: str) -> RuntimeError:
+    return RuntimeError(
+        f"Model '{model_name}' ({model_path}) is gated on HuggingFace.\n"
+        f"{_GATED_REPO_HINT}"
+    )
+
+
+def _map_vllm_init_error(model_name: str, model_path: str, exc: Exception) -> RuntimeError:
+    """Turn low-level vLLM/HuggingFace failures into actionable RuntimeErrors."""
+    msg = str(exc)
+    lower = msg.lower()
+    if (
+        "gated repo" in lower
+        or "gatedrepo" in lower
+        or "not in the authorized list" in lower
+        or ("403" in msg and "forbidden" in lower)
+    ):
+        return _gated_model_startup_error(model_name, model_path)
+    if "out of memory" in lower or "oom" in msg:
+        return RuntimeError(
+            f"CUDA OOM loading {model_path}. "
+            "Reduce gpu_memory_utilization or use a smaller model."
+        )
+    if (
+        "free memory on device" in lower
+        or ("gpu memory utilization" in lower and "less than desired" in lower)
+    ):
+        return RuntimeError(
+            f"GPU memory insufficient to start {model_name}. "
+            "Lower gpu_memory_utilization in config/models.yaml, stop other GPU "
+            "processes (e.g. a previous ./scripts/dev.sh serve), or use a smaller model."
+        )
+    if "cache blocks" in lower or "kv cache" in lower:
+        return RuntimeError(
+            f"GPU memory insufficient for KV cache loading {model_name}. "
+            "When running multiple models on one GPU, load fewer models or "
+            "lower gpu_memory_utilization / max_model_len in config/models.yaml."
+        )
+    if "not found" in lower:
+        return RuntimeError(
+            f"Model not found: {model_path}. Check model_path in config/models.yaml."
+        )
+    if "nvcc" in lower or "cuda_home" in lower:
+        return RuntimeError(
+            "vLLM FlashInfer JIT requires nvcc. On WSL2 without a system CUDA "
+            "toolkit, run via `uv run` so the bundled nvidia-cuda-nvcc wheel is "
+            "used, or set CUDA_HOME to your CUDA toolkit root."
+        )
+    if "engine core initialization failed" in lower:
+        vram = _probe_cuda_vram()
+        total = vram.get("total_gib")
+        if isinstance(total, (int, float)) and float(total) <= 10 and "8b" in model_name.lower():
+            return RuntimeError(
+                f"vLLM failed loading {model_name} on a {float(total):.0f} GiB GPU. "
+                "Llama 3 8B in bf16 needs roughly 16 GiB VRAM for weights alone. "
+                "Use a smaller model (e.g. qwen2.5-1.5b) or a quantized checkpoint."
+            )
+        if isinstance(total, (int, float)) and vram.get("free_gib") is not None:
+            free = float(vram["free_gib"])  # type: ignore[arg-type]
+            return RuntimeError(
+                f"vLLM engine subprocess failed for {model_name}. "
+                f"GPU has {free:.2f}/{float(total):.2f} GiB free. "
+                "Lower gpu_memory_utilization in config/models.yaml, stop other "
+                "GPU processes, or use a smaller model."
+            )
+    return RuntimeError(f"vLLM initialization failed for {model_name}: {msg}")
+
+
 def _load_vllm() -> None:
     global _VLLM_AVAILABLE
     if _VLLM_AVAILABLE is not None:
@@ -80,10 +285,15 @@ class VLLMEngine(BaseEngine):
         self._healthy = False
         self._engine_lock = threading.Lock()
 
+        hf_token = resolve_hf_token()
+        preflight_hf_access(self._model_name, self._model_path, hf_token)
+
         kwargs: dict[str, Any] = {
             "model": self._model_path,
             "dtype": "auto",
         }
+        if hf_token:
+            kwargs["hf_token"] = hf_token
         if "gpu_memory_utilization" in model_config:
             kwargs["gpu_memory_utilization"] = model_config["gpu_memory_utilization"]
         if "max_model_len" in model_config:
@@ -112,6 +322,9 @@ class VLLMEngine(BaseEngine):
                 "CUDA_HOME not set and nvcc not found; FlashInfer JIT may fail on WSL2"
             )
         LLM = globals()["LLM"]
+        gpu_util = kwargs.get("gpu_memory_utilization")
+        if isinstance(gpu_util, (int, float)):
+            _check_vram_budget(self._model_name, float(gpu_util), _probe_cuda_vram())
         try:
             self._llm: LLM = LLM(**kwargs)
             self._supports_chat = self._detect_chat_support()
@@ -122,29 +335,7 @@ class VLLMEngine(BaseEngine):
                 self._supports_chat,
             )
         except Exception as exc:
-            msg = str(exc)
-            if "out of memory" in msg.lower() or "OOM" in msg:
-                raise RuntimeError(
-                    f"CUDA OOM loading {self._model_path}. "
-                    "Reduce gpu_memory_utilization or use a smaller model."
-                ) from exc
-            if "cache blocks" in msg.lower() or "kv cache" in msg.lower():
-                raise RuntimeError(
-                    f"GPU memory insufficient for KV cache loading {self._model_name}. "
-                    "When running multiple models on one GPU, load fewer models or "
-                    "lower gpu_memory_utilization / max_model_len in config/models.yaml."
-                ) from exc
-            if "not found" in msg.lower():
-                raise RuntimeError(
-                    f"Model not found: {self._model_path}. Check model_path in config/models.yaml."
-                ) from exc
-            if "nvcc" in msg.lower() or "cuda_home" in msg.lower():
-                raise RuntimeError(
-                    "vLLM FlashInfer JIT requires nvcc. On WSL2 without a system CUDA "
-                    "toolkit, run via `uv run` so the bundled nvidia-cuda-nvcc wheel is "
-                    "used, or set CUDA_HOME to your CUDA toolkit root."
-                ) from exc
-            raise RuntimeError(f"vLLM initialization failed: {msg}") from exc
+            raise _map_vllm_init_error(self._model_name, self._model_path, exc) from exc
 
     def _detect_chat_support(self) -> bool:
         try:

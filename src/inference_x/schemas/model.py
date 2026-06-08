@@ -14,6 +14,7 @@ class ModelEntry(BaseModel):
     gpu_memory_utilization: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     max_model_len: Optional[int] = Field(default=None, ge=1)
     quantization: Optional[str] = None
+    gated: bool = False
 
 
 class ModelList(BaseModel):

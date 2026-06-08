@@ -1,25 +1,25 @@
 # InferenceX
 
+[![Python 3.13+](https://img.shields.io/badge/python-3.13%2B-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/downloads/)
+[![vLLM](https://img.shields.io/badge/inference-vLLM-6E40C9?style=flat-square)](https://docs.vllm.ai)
+[![OpenAI-compatible](https://img.shields.io/badge/API-OpenAI--compatible-412991?style=flat-square&logo=openai&logoColor=white)](https://platform.openai.com/docs/api-reference)
+[![uv](https://img.shields.io/badge/package%20manager-uv-DE5FE9?style=flat-square)](https://docs.astral.sh/uv/)
+[![Tests](https://img.shields.io/badge/tests-233%20passing-22C55E?style=flat-square&logo=pytest&logoColor=white)](./tests)
+[![License: MIT](https://img.shields.io/badge/license-MIT-F59E0B?style=flat-square)](./LICENSE)
+[![Phase 6 complete](https://img.shields.io/badge/phase-6%20complete-0EA5E9?style=flat-square)](#phases)
+
 InferenceX is a self-hosted LLM inference platform built incrementally on top of vLLM.
 It provides an OpenAI-compatible `POST /v1/chat/completions` endpoint, a model registry,
 an observability pipeline, and an interactive Textual playground — all designed to run on
 a single WSL2 machine with one consumer-grade GPU.
-
-## Current direction
-
-The project begins with a stable OpenAI-compatible chat completions API and expands in phases:
-- Phase 1: core vLLM-backed inference
-- Phase 2: model registry and routing
-- Phase 3: observability
-- Phase 4: playground and evaluation
-- Phase 5: hardening and publication readiness
-- Phase 6: benchmark suite and model advisor (in progress)
 
 ## Key docs
 
 - `docs/ARCHITECTURE.md`
 - `docs/PHASES.md`
 - `docs/DECISIONS.md`
+- `docs/ARTICLE_DRAFT.md`
+- `playground/README.md`
 - `.cursor/rules/`
 
 ---
@@ -66,7 +66,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 ```bash
 # Clone the repository
-git clone https://github.com/youruser/inference-x.git
+git clone https://github.com/coeusyk/inference-x.git
 cd inference-x
 
 # Install all dependencies (creates .venv automatically)
@@ -100,12 +100,20 @@ snapshot_download('TinyLlama/TinyLlama-1.1B-Chat-v1.0')
 "
 ```
 
-For gated models (e.g. Llama 3) you must authenticate first:
+For gated models (e.g. `llama3-8b` in `config/models.yaml`):
+
+1. Request access on the [model page](https://huggingface.co/meta-llama/Meta-Llama-3-8B-Instruct) and wait for approval.
+2. Authenticate locally:
 
 ```bash
 uv run huggingface-cli login
+# or: export HF_TOKEN=hf_...   (see .env.example)
+
 uv run huggingface-cli download meta-llama/Meta-Llama-3-8B-Instruct
+INFERENCE_X_DEFAULT_MODEL=llama3-8b ./scripts/dev.sh serve
 ```
+
+Without a token, startup fails immediately with a short message instead of a HuggingFace stack trace. If you have a token but access is not yet approved, startup fails with a separate message pointing you to the model page — no multi-minute vLLM stack trace.
 
 ---
 
@@ -120,9 +128,11 @@ uv run python scripts/smoke_test.py
 
 # Or call the API directly
 curl -s http://localhost:8000/health
+curl -s http://localhost:8000/v1/models
 curl -s -X POST http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"qwen2.5-0.5b","messages":[{"role":"user","content":"Hello"}]}'
+curl -s http://localhost:8000/v1/benchmark/advise
 ```
 
 ### Loading multiple models (for compare mode)
@@ -137,21 +147,30 @@ simultaneously. VRAM is split automatically between them.
 
 ---
 
-## Make targets
+## Commands
+
+Run `make help` for a full list of make targets and common CLI invocations.
 
 ```bash
-make playground        # Start server + Textual TUI in one command
+make help              # Show all available commands
+
+# Server & playground
+make playground        # Start server + Textual TUI (Chat + Benchmark tabs)
 make playground-compare MODEL_A=qwen2.5-0.5b MODEL_B=tinyllama-chat
 make client            # Batch CLI runner (rich terminal output)
 make stop              # Stop background uvicorn process
-make benchmark MODEL=qwen2.5-0.5b   # Run benchmark suite (Phase 6)
-make benchmark-all     # Benchmark all models in models.yaml (Phase 6)
-make advise            # Print ranked model advisor report (Phase 6)
+
+# Benchmarks (server must be running in another terminal)
+make benchmark MODEL=qwen2.5-0.5b
+make benchmark-all
+make advise
 ```
 
 ---
 
 ## Configuration reference
+
+Copy `.env.example` to `.env` at the repo root — both `./scripts/dev.sh serve` and the Python app load it automatically (shell variables already exported take precedence).
 
 | File | Purpose |
 |------|---------|
@@ -172,23 +191,43 @@ Key environment variables:
 
 ---
 
-## Benchmark (Phase 6 — coming soon)
+## Benchmark suite
 
-The benchmark suite measures throughput, time-to-first-token (TTFT), and latency
-percentiles (p50/p95/p99) for each loaded model and produces a hardware-aware ranking.
+The benchmark runner measures throughput (tokens/sec), time-to-first-token (TTFT),
+latency percentiles (p50/p95/p99), and peak VRAM delta per model. The model advisor
+ranks results against your hardware profile (GPU VRAM, CPU, RAM).
+
+**Prerequisites:** server running with the target model loaded.
 
 ```bash
-# Requires server to be running
-make benchmark MODEL=qwen2.5-0.5b
-make benchmark-all
-make advise
+# Terminal 1
+INFERENCE_X_DEFAULT_MODEL=qwen2.5-0.5b ./scripts/dev.sh serve
+
+# Terminal 2
+make benchmark MODEL=qwen2.5-0.5b    # writes docs/benchmarks/results-<model>-<timestamp>.json
+make benchmark-all                   # benchmarks qwen2.5-0.5b and tinyllama-chat
+make advise                          # ranked recommendation table in terminal
 ```
 
-Results are stored in `docs/benchmarks/` as JSON files and can be read via
-`GET /v1/benchmark/results` and `GET /v1/benchmark/advise`.
+Optional hardware profiling deps (improves VRAM accuracy on WSL2):
 
-> **Coming soon:** benchmark scoring, hardware profiler, and playground Benchmark tab
-> are implemented in Phase 6 (in progress).
+```bash
+uv sync --extra hardware   # installs nvidia-ml-py + psutil
+```
+
+**API endpoints** (read-only, return empty lists when no results exist yet):
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /v1/benchmark/results` | Stored benchmark results + current hardware profile |
+| `GET /v1/benchmark/advise` | Ranked advisor output + hardware profile |
+
+**Playground:** the Textual TUI includes a **Benchmark** tab with hardware info,
+throughput table, advisor recommendations, and a "Run Benchmark" button.
+
+**Prompt suite:** `benchmarks/prompts/standard.json` — 10 fixed prompts (factual,
+generation, code, reasoning, chat). Results are comparable across runs via
+`suite_version` (SHA256 of the prompt list).
 
 ---
 
@@ -236,6 +275,33 @@ export PATH=$CUDA_HOME/bin:$PATH
 export VLLM_USE_FLASHINFER_SAMPLER=0
 ./scripts/dev.sh serve
 ```
+
+### Gated model access denied (Llama 3)
+
+**Symptom:** Server exits on startup with `gated on HuggingFace`, `not yet approved`, or `403 Forbidden` for `meta-llama/...`.
+
+**Fix:**
+
+1. Open https://huggingface.co/meta-llama/Meta-Llama-3-8B-Instruct and request access (Meta license).
+2. Wait for approval email from HuggingFace (a token alone is not enough until access is granted).
+3. After approval: `uv run huggingface-cli login`
+4. Retry: `INFERENCE_X_DEFAULT_MODEL=llama3-8b ./scripts/dev.sh serve`
+
+If you do not have access yet, use an ungated model instead:
+
+```bash
+INFERENCE_X_DEFAULT_MODEL=qwen2.5-0.5b ./scripts/dev.sh serve
+```
+
+### GPU memory insufficient (Llama 3 on 8 GiB)
+
+**Symptom:** Startup fails with `Free memory on device cuda:0 ... less than desired GPU memory utilization` or `Insufficient GPU memory to start llama3-8b`.
+
+**Fix:**
+
+1. Stop other GPU processes (`make stop`, or kill leftover `uvicorn` / vLLM workers).
+2. Lower `gpu_memory_utilization` for `llama3-8b` in `config/models.yaml` (default is now `0.85` for 8 GiB WSL2 GPUs).
+3. If startup still fails after passing the memory check, the 8B bf16 model likely needs **16 GiB+ VRAM** — use `qwen2.5-1.5b` or a quantized Llama checkpoint instead.
 
 ### Port already in use
 

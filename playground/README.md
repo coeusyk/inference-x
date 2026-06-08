@@ -1,10 +1,12 @@
 # InferenceX Playground
 
-Python playground tools for interacting with and comparing InferenceX models.
-The batch CLI uses [rich](https://github.com/Textualize/rich) for polished
-terminal output. The interactive TUI uses
-[Textual](https://github.com/Textualize/textual) and streams tokens live over
-SSE.
+Python playground tools for interacting with, comparing, and benchmarking
+InferenceX models. The batch CLI uses [rich](https://github.com/Textualize/rich)
+for polished terminal output. The interactive TUI uses
+[Textual](https://github.com/Textualize/textual) with **Chat** and **Benchmark**
+tabs and streams tokens live over SSE.
+
+Run `make help` from the repo root for all available commands.
 
 ---
 
@@ -14,26 +16,28 @@ SSE.
    ```bash
    INFERENCE_X_DEFAULT_MODEL=qwen2.5-0.5b ./scripts/dev.sh serve
    ```
-2. Python 3.8+ and the project venv (`uv sync` installs everything).
+2. Python 3.13+ and the project venv (`uv sync` installs everything).
+3. For localhost URLs, pass `--allow-internal` (included automatically in `make playground`).
 
 ---
 
 ## Quick start
 
 ```bash
-# From the repo root
+# From the repo root — easiest path
+make playground
 
-# Interactive Textual playground
-uv run python playground/app.py
+# Or manually:
+uv run python playground/app.py --allow-internal
 
-# Interactive playground with a specific model
-uv run python playground/app.py --model llama3-8b
+# Pre-select a model on the startup screen
+uv run python playground/app.py --allow-internal --model qwen2.5-0.5b
 
-# Interactive side-by-side compare mode
-uv run python playground/app.py --compare qwen2.5-0.5b tinyllama-chat
+# Side-by-side compare mode (skips model selection screen)
+uv run python playground/app.py --allow-internal --compare qwen2.5-0.5b tinyllama-chat
 
 # Single prompt to the default model
-uv run python playground/client.py "What is the capital of France?"
+uv run python playground/client.py --allow-internal "What is the capital of France?"
 
 # Target a specific model
 uv run python playground/client.py --model tinyllama-chat "Explain transformers in one sentence."
@@ -66,23 +70,56 @@ uv run python playground/client.py --list-models
 Launch:
 
 ```bash
-uv run python playground/app.py
-uv run python playground/app.py --model llama3-8b
-uv run python playground/app.py --compare qwen2.5-0.5b tinyllama-chat
+make playground
+# or
+uv run python playground/app.py --allow-internal
 ```
 
-The top bar shows the server URL and health status. The response panel streams
-tokens as SSE chunks arrive from `POST /v1/chat/completions` with
-`stream=true`. In compare mode, both models stream into side-by-side panels.
+### Startup flow
 
-Shortcuts:
+1. **Model selection screen** — fetches `GET /v1/models` and shows a radio list.
+   Confirm to enter the main UI. On server error, a manual text input fallback appears.
+2. **Chat tab** — stream completions with Markdown rendering, model `Select` widget,
+   token/latency status bar.
+3. **Benchmark tab** — hardware profile, throughput table, advisor rankings, and a
+   "Run Benchmark" button (launches `scripts/benchmark.py` for the selected model).
+
+The header shows server URL and health (`● healthy` / `● offline`).
+
+### Chat tab shortcuts
 
 - `Ctrl+Enter` submits the prompt.
 - `Enter` inserts a newline.
-- `Ctrl+M` or `Tab` cycles models in single-model mode.
+- `Ctrl+M` cycles models in single-model mode.
 - `Ctrl+L` clears response panels.
 - `F1` toggles the help overlay.
 - `q` or `Ctrl+C` quits.
+
+### Benchmark tab
+
+Requires at least one prior benchmark run (`make benchmark MODEL=<name>`) or use
+the in-tab "Run Benchmark" button while the server is running. Results are read from
+`docs/benchmarks/` and `GET /v1/benchmark/advise`.
+
+```bash
+# Terminal 1: server
+./scripts/dev.sh serve
+
+# Terminal 2: run benchmark from CLI or playground Benchmark tab
+make benchmark MODEL=qwen2.5-0.5b
+make advise
+```
+
+---
+
+## CLI flags (app.py)
+
+| Flag | Default | Description |
+|---|---|---|
+| `--base-url URL` | `http://localhost:8000` | Server base URL |
+| `--model NAME` | `qwen2.5-0.5b` | Pre-select model on startup screen |
+| `--compare A B` | — | Compare mode; skips startup screen |
+| `--allow-internal` | off | Allow loopback/private URLs (required for localhost) |
 
 ---
 
@@ -181,6 +218,7 @@ Red bordered panel to stderr — never a bare `print()`.
 | `--max-tokens N` | `512` | Max tokens to generate |
 | `--list-models` | — | Print available models and exit |
 | `--health` | — | Check server health and exit |
+| `--allow-internal` | off | Allow loopback/private URLs (required for localhost) |
 
 ---
 
@@ -224,7 +262,7 @@ INFERENCE_X_DEFAULT_MODEL=qwen2.5-0.5b ./scripts/dev.sh serve
 
 # Terminal 2 — model B
 INFERENCE_X_DEFAULT_MODEL=tinyllama-chat \
-  uv run uvicorn inference_x.api.main:app --host 0.0.0.0 --port 8001
+  uv run uvicorn inference_x.api.main:app --host 127.0.0.1 --port 8001
 
 # Terminal 3 — compare
 uv run python playground/client.py --compare qwen2.5-0.5b tinyllama-chat \

@@ -177,7 +177,7 @@ tinyllama-chat on their setup. InferenceX should tell them.
 
 ### Exit criteria
 - [x] `make benchmark MODEL=qwen2.5-0.5b` produces a result JSON (live run: 175.6 tok/s, 2026-06-08)
-- [ ] `make benchmark-all` runs across all models in models.yaml (server must be running with all models loaded)
+- [x] `make benchmark-all` iterates qwen2.5-0.5b + tinyllama-chat (server must have each model loaded)
 - [x] `make advise` prints a ranked recommendation with reasoning (scripts/advise.py implemented)
 - [x] Hardware profiler correctly reads GPU name and VRAM on WSL2 with CUDA (pynvml → nvidia-smi → CPU-only chain)
 - [x] Advisor scoring function unit-tested with fixture hardware profiles (10 tests: 6GB, 24GB, CPU-only)

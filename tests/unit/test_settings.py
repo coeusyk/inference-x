@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from inference_x.core.settings import AppSettings, get_settings
+from inference_x.core.settings import AppSettings, get_settings, load_project_env
 
 
 @pytest.fixture()
@@ -88,3 +88,11 @@ class TestAppSettings:
         monkeypatch.setenv("INFERENCE_X_LOADED_MODELS", " alpha , beta ")
         settings = AppSettings()
         assert settings.loaded_models == ["alpha", "beta"]
+
+    def test_default_model_from_dotenv_file(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("INFERENCE_X_DEFAULT_MODEL", raising=False)
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".env").write_text("INFERENCE_X_DEFAULT_MODEL=llama3-8b\n")
+        load_project_env()
+        settings = AppSettings()
+        assert settings.default_model == "llama3-8b"

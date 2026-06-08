@@ -294,7 +294,11 @@ class InferenceXApp(App[None]):
 
         self.set_interval(0.2, self._refresh_live_titles)
 
-        # ── Model selection startup screen (non-compare mode only) ────────────
+        # push_screen_wait must run inside a worker (Textual requirement).
+        self.run_worker(self._startup_flow(), exclusive=True)
+
+    async def _startup_flow(self) -> None:
+        """Model selection screen + initial server sync."""
         if not self.compare:
             selected = await self.push_screen_wait(
                 ModelSelectScreen(
@@ -305,9 +309,7 @@ class InferenceXApp(App[None]):
             if selected:
                 self.models = [selected]
                 self.current_model_index = 0
-
-        # Wire up compare label or model select widget
-        if self.compare:
+        else:
             self.query_one("#model-selector", Select).display = False
             compare_label = self.query_one("#model-compare-label", Static)
             compare_label.remove_class("hidden")

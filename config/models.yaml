@@ -25,9 +25,10 @@ models:
     gpu_memory_utilization: 0.6
     max_model_len: 8192
 
-  # Production model (requires HuggingFace auth: `huggingface-cli login`)
+  # Gated on HuggingFace (gated: true is a documentation hint; access is checked at startup)
   - name: llama3-8b
     engine: vllm
     model_path: meta-llama/Meta-Llama-3-8B-Instruct
-    gpu_memory_utilization: 0.9
+    gpu_memory_utilization: 0.85   # 8 GiB GPUs: 0.9 needs 7.2 GiB free; WSL2 often has ~6.9 GiB
     max_model_len: 4096
+    gated: true

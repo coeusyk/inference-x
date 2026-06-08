@@ -8,6 +8,26 @@ from typing import Any
 import yaml
 
 
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[3]
+
+
+def load_project_env() -> None:
+    """Load repo-root ``.env`` into ``os.environ`` (existing shell vars win)."""
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        return
+
+    for candidate in (_repo_root() / ".env", Path.cwd() / ".env"):
+        if candidate.is_file():
+            load_dotenv(candidate, override=False)
+            return
+
+
+load_project_env()
+
+
 class AppSettings:
     """Application settings sourced from environment variables and YAML config files.
 

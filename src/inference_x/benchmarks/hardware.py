@@ -1,4 +1,4 @@
-"""Hardware profiler with pynvml → nvidia-smi → CPU-only fallback chain."""
+"""Hardware profiler with nvidia-ml-py → nvidia-smi → CPU-only fallback chain."""
 from __future__ import annotations
 
 import os
@@ -24,9 +24,9 @@ def _ram_total_gb() -> float:
         return 16.0
 
 
-def _profile_via_pynvml() -> Optional[HardwareProfile]:
+def _profile_via_nvml() -> Optional[HardwareProfile]:
     try:
-        import pynvml  # type: ignore[import-untyped]
+        import pynvml  # nvidia-ml-py provides this module
         pynvml.nvmlInit()
         handle = pynvml.nvmlDeviceGetHandleByIndex(0)
         name = pynvml.nvmlDeviceGetName(handle)
@@ -92,8 +92,8 @@ def _cpu_only_profile() -> HardwareProfile:
 
 
 def profile_hardware() -> HardwareProfile:
-    """Detect hardware using pynvml → nvidia-smi → CPU-only fallback chain."""
-    profile = _profile_via_pynvml()
+    """Detect hardware using nvidia-ml-py → nvidia-smi → CPU-only fallback chain."""
+    profile = _profile_via_nvml()
     if profile is not None:
         return profile
 

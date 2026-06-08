@@ -44,15 +44,21 @@ This repository uses OpenSpec for spec-driven development.
 - `src/inference_x/routing/` contains model selection policies and routing logic.
 - `src/inference_x/observability/` contains middleware, metrics, storage, and exporters.
 - `src/inference_x/schemas/` contains request/response models only.
+- `src/inference_x/benchmarks/` contains hardware profiling, benchmark runner, storage, and advisor logic.
+- `benchmarks/prompts/` contains versioned benchmark prompt suites (not Python code).
 - `tests/` contains unit, integration, and contract tests only.
 
 ## Phase 1 contract
 
 Phase 1 must remain focused on one stable inference path.
 
-Required endpoints:
+Required endpoints (Phase 1):
 - `POST /v1/chat/completions`
 - `GET /health`
+
+Additional endpoints (later phases, additive only):
+- `GET /v1/models` (Phase 2)
+- `GET /v1/benchmark/results`, `GET /v1/benchmark/advise` (Phase 6)
 
 Phase 1 expectations:
 - one configured vLLM-backed model

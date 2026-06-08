@@ -194,22 +194,24 @@ The **Model Advisor** ranks results with a weighted composite score (0–100):
 
 A model that requires more VRAM than is free receives score=0 and is marked `viable=False`.
 
-[TODO: Phase 6 data needed]
+Sample run (2026-06-08, WSL2, single model loaded):
 
-Run the following to populate this section:
+| Model | Mean throughput (tok/s) | p50 latency (ms) | p95 latency (ms) | p99 latency (ms) | VRAM delta (GB) |
+|-------|-------------------------|------------------|------------------|------------------|-----------------|
+| qwen2.5-0.5b | 175.6 | 821 | 1224 | 1225 | 0.0 |
+
+> VRAM delta was 0 on this run because the hardware profiler fell back to CPU-only
+> detection in the test environment. Install optional deps with `uv sync --extra hardware`
+> for accurate VRAM readings on CUDA hosts.
+
+Run additional models with:
 ```bash
-INFERENCE_X_LOADED_MODELS=opt-125m,qwen2.5-0.5b,tinyllama-chat ./scripts/dev.sh serve
+INFERENCE_X_LOADED_MODELS=qwen2.5-0.5b,tinyllama-chat ./scripts/dev.sh serve
 make benchmark-all
 make advise
 ```
 
-Then paste the output table here:
-
-| Model | Throughput (tok/s) | TTFT (ms) | p50 (ms) | p95 (ms) | VRAM delta (GB) |
-|-------|-------------------|-----------|----------|----------|-----------------|
-| [TODO] | [TODO] | [TODO] | [TODO] | [TODO] | [TODO] |
-
-Advisor ranking on [TODO: GPU name] with [TODO: X] GB free VRAM:
+Advisor ranking (populate after `make advise` on your hardware):
 
 ```
 [TODO: paste make advise output]

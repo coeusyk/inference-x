@@ -21,6 +21,21 @@
 - `src/inference_x/schemas/` contains Pydantic models only.
 - `config/` stores YAML configuration files; avoid hardcoding deploy-specific values.
 
+## Path Handling
+
+- Never use absolute paths anywhere in generated code, config files, scripts, or documentation.
+- This project runs on different machines (Windows WSL2, Linux) where home directories and
+  project roots differ. An absolute path that works on one machine will silently break on another.
+- Always use paths relative to the project root or the file being edited.
+- For Python code, resolve paths at runtime using `Path(__file__).parent` or
+  `Path(__file__).resolve().parent` anchored to a known file in the module tree.
+- For config files (YAML, TOML), use relative paths from the config file's own location,
+  or use a placeholder like `./models/` that the application resolves at startup.
+- For shell scripts and the Makefile, use `$(shell pwd)` or `$(CURDIR)` — never hardcode
+  a path like `/home/user/` or `/mnt/c/`.
+- If a path must be configurable (e.g., model weights directory), expose it as an environment
+  variable with a sensible relative default, not a hardcoded absolute path.
+
 ## Working style
 
 - Before making a non-trivial change, restate the task, list affected files, and propose an ordered plan.

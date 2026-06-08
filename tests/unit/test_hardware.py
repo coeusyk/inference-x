@@ -1,4 +1,4 @@
-"""Unit tests for hardware profiler with mocked pynvml / nvidia-smi."""
+"""Unit tests for hardware profiler with mocked nvidia-ml-py / nvidia-smi."""
 from __future__ import annotations
 
 import subprocess
@@ -11,7 +11,7 @@ import pytest
 from inference_x.benchmarks.hardware import (
     _cpu_only_profile,
     _profile_via_nvidia_smi,
-    _profile_via_pynvml,
+    _profile_via_nvml,
     profile_hardware,
 )
 from inference_x.benchmarks.schemas import HardwareProfile
@@ -37,11 +37,11 @@ def _make_pynvml_mock(gpu_name: str, total_mib: int, free_mib: int) -> ModuleTyp
 # pynvml path tests
 # ---------------------------------------------------------------------------
 
-class TestProfileViaPynvml:
+class TestProfileViaNvml:
     def test_6gb_gpu(self):
         mock_pynvml = _make_pynvml_mock("NVIDIA GeForce RTX 3060", 6144, 5120)
         with patch.dict(sys.modules, {"pynvml": mock_pynvml}):
-            profile = _profile_via_pynvml()
+            profile = _profile_via_nvml()
         assert profile is not None
         assert profile.has_gpu is True
         assert profile.gpu_name == "NVIDIA GeForce RTX 3060"
@@ -51,22 +51,22 @@ class TestProfileViaPynvml:
     def test_24gb_gpu(self):
         mock_pynvml = _make_pynvml_mock("NVIDIA RTX 3090", 24576, 20480)
         with patch.dict(sys.modules, {"pynvml": mock_pynvml}):
-            profile = _profile_via_pynvml()
+            profile = _profile_via_nvml()
         assert profile is not None
         assert profile.has_gpu is True
         assert abs(profile.vram_total_gb - 24.0) < 0.1
         assert abs(profile.vram_free_gb - 20.0) < 0.1
 
-    def test_pynvml_import_error_returns_none(self):
+    def test_nvml_import_error_returns_none(self):
         with patch.dict(sys.modules, {"pynvml": None}):
-            profile = _profile_via_pynvml()
+            profile = _profile_via_nvml()
         assert profile is None
 
-    def test_pynvml_runtime_error_returns_none(self):
+    def test_nvml_runtime_error_returns_none(self):
         mock_pynvml = MagicMock()
         mock_pynvml.nvmlInit.side_effect = RuntimeError("nvml init failed")
         with patch.dict(sys.modules, {"pynvml": mock_pynvml}):
-            profile = _profile_via_pynvml()
+            profile = _profile_via_nvml()
         assert profile is None
 
 
@@ -127,14 +127,14 @@ class TestCpuOnlyProfile:
 # ---------------------------------------------------------------------------
 
 class TestProfileHardwareFallbackChain:
-    def test_uses_pynvml_when_available(self):
+    def test_uses_nvml_when_available(self):
         mock_pynvml = _make_pynvml_mock("Test GPU", 8192, 7168)
         with patch.dict(sys.modules, {"pynvml": mock_pynvml}):
             profile = profile_hardware()
         assert profile.has_gpu is True
         assert profile.gpu_name == "Test GPU"
 
-    def test_falls_back_to_nvidia_smi_when_pynvml_absent(self):
+    def test_falls_back_to_nvidia_smi_when_nvml_absent(self):
         mock_output = "Test GPU, 8192, 7168\n"
         mock_result = MagicMock()
         mock_result.returncode = 0
