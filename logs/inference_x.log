@@ -1,0 +1,228 @@
+2026-06-08 13:48:50 [INFO] inference_x.utils.cuda_env: CUDA_HOME set from venv CUDA toolkit (FlashInfer JIT): /home/coeusyk/projects/inference-x/.venv/lib/python3.13/site-packages/nvidia/cu13
+2026-06-08 13:48:50 [INFO] inference_x.utils.cuda_env: CUDA_HOME set from venv CUDA toolkit (FlashInfer JIT): /home/coeusyk/projects/inference-x/.venv/lib/python3.13/site-packages/nvidia/cu13
+2026-06-08 13:48:50 [INFO] inference_x.utils.cuda_env: WSL detected: disabled FlashInfer sampler (VLLM_USE_FLASHINFER_SAMPLER=0)
+2026-06-08 13:48:50 [INFO] inference_x.utils.cuda_env: CUDA_HOME set from venv CUDA toolkit (FlashInfer JIT): /home/coeusyk/projects/inference-x/.venv/lib/python3.13/site-packages/nvidia/cu13
+2026-06-08 13:48:51 [WARNING] inference_x.observability.recorder: MetricsRecorder: storage.append failed: disk full
+2026-06-08 13:48:51 [WARNING] inference_x.observability.recorder: MetricsRecorder: exporter.export failed: no space
+2026-06-08 13:48:51 [WARNING] inference_x.observability.exporters: JsonLineExporter: failed to write record: [Errno 2] No such file or directory: '/nonexistent/path/metrics.jsonl'
+2026-06-08 13:48:51 [INFO] inference_x.observability.exporters: Metrics exporter: JsonLineExporter → /tmp/pytest-of-coeusyk/pytest-3/test_build_exporter_json_when_0/out.jsonl
+2026-06-08 13:48:51 [ERROR] inference_x.api.errors: RuntimeError on /v1/chat/completions: boom
+Traceback (most recent call last):
+  File "/home/coeusyk/projects/inference-x/.venv/lib/python3.13/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/home/coeusyk/projects/inference-x/.venv/lib/python3.13/site-packages/fastapi/routing.py", line 120, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "/home/coeusyk/projects/inference-x/.venv/lib/python3.13/site-packages/fastapi/routing.py", line 674, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<3 lines>...
+    )
+    ^
+  File "/home/coeusyk/projects/inference-x/.venv/lib/python3.13/site-packages/fastapi/routing.py", line 328, in run_endpoint_function
+    return await dependant.call(**values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/coeusyk/projects/inference-x/src/inference_x/api/routes/chat_completions.py", line 28, in chat_completions
+    return await service.complete(request)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/coeusyk/projects/inference-x/src/inference_x/services/chat_service.py", line 40, in complete
+    return await engine.generate(request)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/coeusyk/projects/inference-x/tests/unit/test_observability.py", line 386, in generate
+    raise RuntimeError("boom")
+RuntimeError: boom
+2026-06-08 13:48:51 [ERROR] inference_x.api.errors: RuntimeError on /health: vLLM initialization failed
+Traceback (most recent call last):
+  File "/home/coeusyk/projects/inference-x/.venv/lib/python3.13/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/home/coeusyk/projects/inference-x/.venv/lib/python3.13/site-packages/fastapi/routing.py", line 120, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "/home/coeusyk/projects/inference-x/.venv/lib/python3.13/site-packages/fastapi/routing.py", line 457, in app
+    solved_result = await solve_dependencies(
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<6 lines>...
+    )
+    ^
+  File "/home/coeusyk/projects/inference-x/.venv/lib/python3.13/site-packages/fastapi/dependencies/utils.py", line 680, in solve_dependencies
+    solved = await run_in_threadpool(call, **solved_result.values)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/coeusyk/projects/inference-x/.venv/lib/python3.13/site-packages/starlette/concurrency.py", line 32, in run_in_threadpool
+    return await anyio.to_thread.run_sync(func)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/coeusyk/projects/inference-x/.venv/lib/python3.13/site-packages/anyio/to_thread.py", line 63, in run_sync
+    return await get_async_backend().run_sync_in_worker_thread(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        func, args, abandon_on_cancel=abandon_on_cancel, limiter=limiter
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/home/coeusyk/projects/inference-x/.venv/lib/python3.13/site-packages/anyio/_backends/_asyncio.py", line 2518, in run_sync_in_worker_thread
+    return await future
+           ^^^^^^^^^^^^
+  File "/home/coeusyk/projects/inference-x/.venv/lib/python3.13/site-packages/anyio/_backends/_asyncio.py", line 1002, in run
+    result = context.run(func, *args)
+  File "/home/coeusyk/projects/inference-x/tests/unit/test_routes.py", line 120, in _fail_service
+    raise RuntimeError("vLLM initialization failed")
+RuntimeError: vLLM initialization failed
+2026-06-08 13:48:51 [ERROR] inference_x.api.errors: RuntimeError on /v1/chat/completions: inference exploded
+Traceback (most recent call last):
+  File "/home/coeusyk/projects/inference-x/.venv/lib/python3.13/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/home/coeusyk/projects/inference-x/.venv/lib/python3.13/site-packages/fastapi/routing.py", line 120, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "/home/coeusyk/projects/inference-x/.venv/lib/python3.13/site-packages/fastapi/routing.py", line 674, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<3 lines>...
+    )
+    ^
+  File "/home/coeusyk/projects/inference-x/.venv/lib/python3.13/site-packages/fastapi/routing.py", line 328, in run_endpoint_function
+    return await dependant.call(**values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/coeusyk/projects/inference-x/src/inference_x/api/routes/chat_completions.py", line 28, in chat_completions
+    return await service.complete(request)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/coeusyk/projects/inference-x/src/inference_x/services/chat_service.py", line 40, in complete
+    return await engine.generate(request)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/coeusyk/projects/inference-x/tests/unit/test_routes.py", line 186, in generate
+    raise RuntimeError("inference exploded")
+RuntimeError: inference exploded
+2026-06-08 13:48:51 [INFO] inference_x.api.deps: Initializing InferenceX (config_dir=/tmp/pytest-of-coeusyk/pytest-3/test_initialize_app_builds_reg0/config, default_model=alpha, loaded_models=['alpha'])
+2026-06-08 13:48:51 [INFO] inference_x.api.deps: Model registry loaded: ['alpha']
+2026-06-08 13:48:51 [INFO] inference_x.api.deps: Task router ready (default_model=alpha)
+2026-06-08 13:48:51 [INFO] inference_x.api.deps: Engine pool ready: ['alpha']
+2026-06-08 13:48:51 [INFO] inference_x.api.deps: Initializing InferenceX (config_dir=/tmp/pytest-of-coeusyk/pytest-3/test_initialize_app_loads_mult0/config, default_model=alpha, loaded_models=['alpha', 'beta'])
+2026-06-08 13:48:51 [INFO] inference_x.api.deps: Model registry loaded: ['alpha', 'beta']
+2026-06-08 13:48:51 [INFO] inference_x.api.deps: Task router ready (default_model=alpha)
+2026-06-08 13:48:51 [INFO] inference_x.api.deps: Engine pool ready: ['alpha', 'beta']
+2026-06-08 13:48:51 [CRITICAL] inference_x.api.main: Startup initialization failed: engine load failed
+Traceback (most recent call last):
+  File "/home/coeusyk/projects/inference-x/src/inference_x/api/main.py", line 43, in lifespan
+    deps.initialize_app()
+    ~~~~~~~~~~~~~~~~~~~^^
+  File "/home/coeusyk/projects/inference-x/tests/unit/test_startup.py", line 134, in _fail_init
+    raise RuntimeError("engine load failed")
+RuntimeError: engine load failed
+2026-06-08 13:48:51 [INFO] inference_x.utils.vllm_platform_patch: WSL pin_memory override disabled via INFERENCE_X_DISABLE_WSL_PIN_MEMORY
+2026-06-08 13:49:31 [INFO] inference_x.utils.cuda_env: CUDA_HOME set from venv CUDA toolkit (FlashInfer JIT): /home/coeusyk/projects/inference-x/.venv/lib/python3.13/site-packages/nvidia/cu13
+2026-06-08 13:49:31 [INFO] inference_x.utils.cuda_env: CUDA_HOME set from venv CUDA toolkit (FlashInfer JIT): /home/coeusyk/projects/inference-x/.venv/lib/python3.13/site-packages/nvidia/cu13
+2026-06-08 13:49:31 [INFO] inference_x.utils.cuda_env: WSL detected: disabled FlashInfer sampler (VLLM_USE_FLASHINFER_SAMPLER=0)
+2026-06-08 13:49:31 [INFO] inference_x.utils.cuda_env: CUDA_HOME set from venv CUDA toolkit (FlashInfer JIT): /home/coeusyk/projects/inference-x/.venv/lib/python3.13/site-packages/nvidia/cu13
+2026-06-08 13:49:31 [WARNING] inference_x.observability.recorder: MetricsRecorder: storage.append failed: disk full
+2026-06-08 13:49:31 [WARNING] inference_x.observability.recorder: MetricsRecorder: exporter.export failed: no space
+2026-06-08 13:49:31 [WARNING] inference_x.observability.exporters: JsonLineExporter: failed to write record: [Errno 2] No such file or directory: '/nonexistent/path/metrics.jsonl'
+2026-06-08 13:49:31 [INFO] inference_x.observability.exporters: Metrics exporter: JsonLineExporter → /tmp/pytest-of-coeusyk/pytest-4/test_build_exporter_json_when_0/out.jsonl
+2026-06-08 13:49:31 [ERROR] inference_x.api.errors: RuntimeError on /v1/chat/completions: boom
+Traceback (most recent call last):
+  File "/home/coeusyk/projects/inference-x/.venv/lib/python3.13/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/home/coeusyk/projects/inference-x/.venv/lib/python3.13/site-packages/fastapi/routing.py", line 120, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "/home/coeusyk/projects/inference-x/.venv/lib/python3.13/site-packages/fastapi/routing.py", line 674, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<3 lines>...
+    )
+    ^
+  File "/home/coeusyk/projects/inference-x/.venv/lib/python3.13/site-packages/fastapi/routing.py", line 328, in run_endpoint_function
+    return await dependant.call(**values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/coeusyk/projects/inference-x/src/inference_x/api/routes/chat_completions.py", line 28, in chat_completions
+    return await service.complete(request)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/coeusyk/projects/inference-x/src/inference_x/services/chat_service.py", line 40, in complete
+    return await engine.generate(request)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/coeusyk/projects/inference-x/tests/unit/test_observability.py", line 386, in generate
+    raise RuntimeError("boom")
+RuntimeError: boom
+2026-06-08 13:49:31 [ERROR] inference_x.api.errors: RuntimeError on /health: vLLM initialization failed
+Traceback (most recent call last):
+  File "/home/coeusyk/projects/inference-x/.venv/lib/python3.13/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/home/coeusyk/projects/inference-x/.venv/lib/python3.13/site-packages/fastapi/routing.py", line 120, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "/home/coeusyk/projects/inference-x/.venv/lib/python3.13/site-packages/fastapi/routing.py", line 457, in app
+    solved_result = await solve_dependencies(
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<6 lines>...
+    )
+    ^
+  File "/home/coeusyk/projects/inference-x/.venv/lib/python3.13/site-packages/fastapi/dependencies/utils.py", line 680, in solve_dependencies
+    solved = await run_in_threadpool(call, **solved_result.values)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/coeusyk/projects/inference-x/.venv/lib/python3.13/site-packages/starlette/concurrency.py", line 32, in run_in_threadpool
+    return await anyio.to_thread.run_sync(func)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/coeusyk/projects/inference-x/.venv/lib/python3.13/site-packages/anyio/to_thread.py", line 63, in run_sync
+    return await get_async_backend().run_sync_in_worker_thread(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        func, args, abandon_on_cancel=abandon_on_cancel, limiter=limiter
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/home/coeusyk/projects/inference-x/.venv/lib/python3.13/site-packages/anyio/_backends/_asyncio.py", line 2518, in run_sync_in_worker_thread
+    return await future
+           ^^^^^^^^^^^^
+  File "/home/coeusyk/projects/inference-x/.venv/lib/python3.13/site-packages/anyio/_backends/_asyncio.py", line 1002, in run
+    result = context.run(func, *args)
+  File "/home/coeusyk/projects/inference-x/tests/unit/test_routes.py", line 120, in _fail_service
+    raise RuntimeError("vLLM initialization failed")
+RuntimeError: vLLM initialization failed
+2026-06-08 13:49:31 [ERROR] inference_x.api.errors: RuntimeError on /v1/chat/completions: inference exploded
+Traceback (most recent call last):
+  File "/home/coeusyk/projects/inference-x/.venv/lib/python3.13/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/home/coeusyk/projects/inference-x/.venv/lib/python3.13/site-packages/fastapi/routing.py", line 120, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "/home/coeusyk/projects/inference-x/.venv/lib/python3.13/site-packages/fastapi/routing.py", line 674, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<3 lines>...
+    )
+    ^
+  File "/home/coeusyk/projects/inference-x/.venv/lib/python3.13/site-packages/fastapi/routing.py", line 328, in run_endpoint_function
+    return await dependant.call(**values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/coeusyk/projects/inference-x/src/inference_x/api/routes/chat_completions.py", line 28, in chat_completions
+    return await service.complete(request)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/coeusyk/projects/inference-x/src/inference_x/services/chat_service.py", line 40, in complete
+    return await engine.generate(request)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/coeusyk/projects/inference-x/tests/unit/test_routes.py", line 186, in generate
+    raise RuntimeError("inference exploded")
+RuntimeError: inference exploded
+2026-06-08 13:49:31 [INFO] inference_x.api.deps: Initializing InferenceX (config_dir=/tmp/pytest-of-coeusyk/pytest-4/test_initialize_app_builds_reg0/config, default_model=alpha, loaded_models=['alpha'])
+2026-06-08 13:49:31 [INFO] inference_x.api.deps: Model registry loaded: ['alpha']
+2026-06-08 13:49:31 [INFO] inference_x.api.deps: Task router ready (default_model=alpha)
+2026-06-08 13:49:31 [INFO] inference_x.api.deps: Engine pool ready: ['alpha']
+2026-06-08 13:49:31 [INFO] inference_x.api.deps: Initializing InferenceX (config_dir=/tmp/pytest-of-coeusyk/pytest-4/test_initialize_app_loads_mult0/config, default_model=alpha, loaded_models=['alpha', 'beta'])
+2026-06-08 13:49:31 [INFO] inference_x.api.deps: Model registry loaded: ['alpha', 'beta']
+2026-06-08 13:49:31 [INFO] inference_x.api.deps: Task router ready (default_model=alpha)
+2026-06-08 13:49:31 [INFO] inference_x.api.deps: Engine pool ready: ['alpha', 'beta']
+2026-06-08 13:49:31 [CRITICAL] inference_x.api.main: Startup initialization failed: engine load failed
+Traceback (most recent call last):
+  File "/home/coeusyk/projects/inference-x/src/inference_x/api/main.py", line 43, in lifespan
+    deps.initialize_app()
+    ~~~~~~~~~~~~~~~~~~~^^
+  File "/home/coeusyk/projects/inference-x/tests/unit/test_startup.py", line 134, in _fail_init
+    raise RuntimeError("engine load failed")
+RuntimeError: engine load failed
+2026-06-08 13:49:31 [INFO] inference_x.utils.vllm_platform_patch: WSL pin_memory override disabled via INFERENCE_X_DISABLE_WSL_PIN_MEMORY
+2026-06-08 13:52:11 [INFO] inference_x.api.deps: Initializing InferenceX (config_dir=config, default_model=qwen2.5-0.5b, loaded_models=['qwen2.5-0.5b'])
+2026-06-08 13:52:11 [INFO] inference_x.api.deps: Model registry loaded: ['opt-125m', 'qwen2.5-0.5b', 'tinyllama-chat', 'qwen2.5-1.5b', 'llama3-8b']
+2026-06-08 13:52:11 [INFO] inference_x.api.deps: Task router ready (default_model=qwen2.5-0.5b)
+2026-06-08 13:52:11 [INFO] inference_x.api.deps: Loading engine for model=qwen2.5-0.5b (pool_size=1)
+2026-06-08 13:52:14 [INFO] inference_x.engines.vllm_engine: Initializing vLLM engine for model=qwen2.5-0.5b path=Qwen/Qwen2.5-0.5B-Instruct
+2026-06-08 13:52:14 [INFO] inference_x.engines.vllm_engine: Loading weights (first run downloads from HuggingFace with no progress log until complete — can take several minutes on slow links)
+2026-06-08 13:52:14 [INFO] inference_x.utils.cuda_env: CUDA_HOME set from venv CUDA toolkit (FlashInfer JIT): /home/coeusyk/projects/inference-x/.venv/lib/python3.13/site-packages/nvidia/cu13
+2026-06-08 13:52:14 [INFO] inference_x.utils.cuda_env: WSL detected: disabled FlashInfer sampler (VLLM_USE_FLASHINFER_SAMPLER=0)
+2026-06-08 13:52:49 [INFO] inference_x.engines.vllm_engine: vLLM engine ready: model=qwen2.5-0.5b chat_template=True
+2026-06-08 13:52:49 [INFO] inference_x.api.deps: Engine pool ready: ['qwen2.5-0.5b']

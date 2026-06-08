@@ -198,3 +198,15 @@ Use this document to capture non-obvious design decisions as the project evolves
 - Context: The rich CLI improved batch output, but Phase 5 needs an interactive demo where token streaming, latency, health, and model comparison are visible while the request is running.
 - Decision: Add a Textual TUI in `playground/app.py` with `httpx` async streaming. Keep `playground/client.py` intact for batch compare use. Use Textual CSS for a dark terminal layout and expose pure helper functions for unit tests instead of testing the full app event loop.
 - Consequences: The playground now has a demo-ready live interface without adding backend UI endpoints or npm tooling. `textual` and `httpx` are runtime dependencies, and token usage shown after streams is estimated client-side.
+
+### DEC-025
+- Date: 2026-06-07
+- Status: accepted
+- Context: A post–Phase 5 security audit identified missing input bounds, verbose error leakage, permissive default bind address, unstructured logging, and playground SSRF risk to internal networks.
+- Decision: Hardening pass — (1) `ChatCompletionRequest` schema caps: `content` max 32k chars, ≤50 messages, `max_tokens` ≤4096 with per-model cap `min(4096, max_model_len)` in `ChatService`; (2) `ValueError`/`RuntimeError` HTTP handlers return generic `"Request could not be processed."` while logging full detail at ERROR; (3) default bind `127.0.0.1` in `config/server.yaml` and `scripts/dev.sh` (`INFERENCE_X_HOST` override); (4) load `config/logging.yaml` via `dictConfig` in `main.py` (rotating file + console); (5) `playground/url_validation.py` blocks private/link-local/loopback hosts unless `--allow-internal`.
+- Consequences: Playground `preflight_compare` can no longer parse model-mismatch hints from sanitized API errors — use `/health` `loaded_models` or `--sequential` instead. Local dev requires `--allow-internal` for `localhost` URLs. Makefile `playground` targets pass that flag automatically.
+- Deferred to Phase 6 (with reasons):
+  - **API authentication** — needs operator identity model and key storage; out of scope for a single-GPU dev server.
+  - **Rate limiting / inference concurrency caps** — requires queue design and 503 contract; deferred until multi-tenant or public exposure.
+  - **Streaming / request wall-clock timeouts** — needs engine cancellation semantics vLLM does not expose cleanly on the sync `llm_engine` path.
+  - **Request body size limits at middleware** — depends on Starlette/FastAPI global limit policy coordinated with observability body peek.

@@ -29,6 +29,12 @@ import argparse
 import json
 import re
 import sys
+from pathlib import Path as _Path
+
+# Make sibling playground modules importable when run as a script.
+sys.path.insert(0, str(_Path(__file__).resolve().parent))
+
+from url_validation import validate_base_url
 import textwrap
 import time
 import urllib.error
@@ -653,6 +659,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Check server health and exit.",
     )
+    p.add_argument(
+        "--allow-internal",
+        action="store_true",
+        help="Allow loopback and private-network base URLs (local dev).",
+    )
     return p
 
 
@@ -669,6 +680,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     base_url = args.base_url.rstrip("/")
+    url_error = validate_base_url(base_url, allow_internal=args.allow_internal)
+    if url_error:
+        print_error(url_error)
+        return 1
 
     # --health and --list-models are silent-header utilities
     if args.health:
@@ -717,6 +732,11 @@ def main(argv: list[str] | None = None) -> int:
     if compare_models:
         base_url_a = (args.base_url_a or base_url).rstrip("/")
         base_url_b = (args.base_url_b or base_url).rstrip("/")
+        for label, url in (("base-url-a", base_url_a), ("base-url-b", base_url_b)):
+            url_error = validate_base_url(url, allow_internal=args.allow_internal)
+            if url_error:
+                print_error(f"{label}: {url_error}")
+                return 1
         err = preflight_compare(compare_models[0], compare_models[1], base_url_a, base_url_b)
         if err:
             print_error(err)

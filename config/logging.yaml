@@ -1,0 +1,42 @@
+version: 1
+disable_existing_loggers: false
+
+formatters:
+  default:
+    format: "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    datefmt: "%Y-%m-%d %H:%M:%S"
+  json:
+    # Use for structured log ingestion (e.g. Loki, Datadog)
+    format: '{"time":"%(asctime)s","level":"%(levelname)s","logger":"%(name)s","message":"%(message)s"}'
+    datefmt: "%Y-%m-%dT%H:%M:%S"
+
+handlers:
+  console:
+    class: logging.StreamHandler
+    formatter: default
+    stream: ext://sys.stdout
+  file:
+    class: logging.handlers.RotatingFileHandler
+    formatter: default
+    filename: logs/inference_x.log
+    maxBytes: 10485760   # 10MB
+    backupCount: 3
+    encoding: utf8
+
+loggers:
+  inference_x:
+    level: INFO
+    handlers: [console, file]
+    propagate: false
+  uvicorn:
+    level: INFO
+    handlers: [console]
+    propagate: false
+  uvicorn.access:
+    level: WARNING   # suppress per-request access logs in prod; set INFO for dev
+    handlers: [console]
+    propagate: false
+
+root:
+  level: WARNING
+  handlers: [console]

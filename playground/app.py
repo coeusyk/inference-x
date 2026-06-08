@@ -5,12 +5,18 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import sys
 import time
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
 import httpx
+
+try:
+    from url_validation import validate_base_url
+except ImportError:
+    from playground.url_validation import validate_base_url
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Markdown, Static, TextArea
@@ -396,13 +402,23 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--compare", nargs=2, metavar=("MODEL_A", "MODEL_B"))
+    parser.add_argument(
+        "--allow-internal",
+        action="store_true",
+        help="Allow loopback and private-network base URLs (local dev).",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = _parse_args()
+    base_url = args.base_url.rstrip("/")
+    url_error = validate_base_url(base_url, allow_internal=args.allow_internal)
+    if url_error:
+        print(f"Error: {url_error}", file=sys.stderr)
+        sys.exit(1)
     compare = tuple(args.compare) if args.compare else None
-    app = InferenceXApp(base_url=args.base_url, model=args.model, compare=compare)
+    app = InferenceXApp(base_url=base_url, model=args.model, compare=compare)
     app.run()
 
 

@@ -1,9 +1,15 @@
 """Unit tests for Textual playground helper functions."""
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
 import httpx
 
-from playground.app import InferenceXApp, fetch_health, fetch_models, parse_sse_line, parse_sse_stream
+sys.path.insert(0, str(Path(__file__).parent.parent.parent / "playground"))
+
+from app import InferenceXApp, fetch_health, fetch_models, parse_sse_line, parse_sse_stream
+from url_validation import validate_base_url
 
 
 class _FakeClient:
@@ -117,3 +123,35 @@ def test_active_model_clamps_out_of_range_index():
 
     assert app._active_model() == "qwen2.5-0.5b"
     assert app.current_model_index == 0
+
+
+def test_validate_base_url_accepts_public_host():
+    assert validate_base_url("https://api.example.com") is None
+
+
+def test_validate_base_url_rejects_loopback_without_flag():
+    err = validate_base_url("http://127.0.0.1:8000")
+    assert err is not None
+    assert "internal" in err.lower()
+
+
+def test_validate_base_url_rejects_rfc1918_without_flag():
+    err = validate_base_url("http://192.168.1.10:8000")
+    assert err is not None
+    assert "internal" in err.lower()
+
+
+def test_validate_base_url_rejects_link_local_without_flag():
+    err = validate_base_url("http://169.254.169.254")
+    assert err is not None
+
+
+def test_validate_base_url_allows_loopback_with_flag():
+    assert validate_base_url("http://127.0.0.1:8000", allow_internal=True) is None
+    assert validate_base_url("http://localhost:8000", allow_internal=True) is None
+
+
+def test_validate_base_url_rejects_non_http_scheme():
+    err = validate_base_url("file:///etc/passwd")
+    assert err is not None
+    assert "scheme" in err.lower()

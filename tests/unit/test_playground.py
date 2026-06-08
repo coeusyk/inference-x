@@ -311,7 +311,7 @@ class TestPreflightCompare:
         stderr = StringIO()
         with mock.patch("urllib.request.urlopen", side_effect=http_err):
             with mock.patch("sys.stderr", stderr):
-                code = pg.main(["--compare", "a", "b", "hello"])
+                code = pg.main(["--allow-internal", "--compare", "a", "b", "hello"])
         assert code == 1
         assert "Cannot compare" in stderr.getvalue()
 
@@ -354,6 +354,7 @@ class TestCompareSequential:
             with mock.patch.object(pg, "wait_for_loaded_model", return_value=True):
                 with mock.patch("sys.stdout", buf):
                     code = pg.main([
+                        "--allow-internal",
                         "--compare", "model-a", "model-b",
                         "--sequential",
                         "hello",
@@ -367,13 +368,15 @@ class TestCompareSequential:
 # ---------------------------------------------------------------------------
 
 class TestCLI:
+    _LOCAL = ["--allow-internal"]
+
     def _run(self, argv: list[str], mock_resp=None) -> tuple[int, str]:
         """Run main() with mocked urlopen, capture stdout/stderr, return (exit_code, stdout)."""
         resp_body = json.dumps(mock_resp or _make_response("answer")).encode()
         buf = StringIO()
         with mock.patch("urllib.request.urlopen", return_value=_mock_urlopen(resp_body)):
             with mock.patch("sys.stdout", buf):
-                code = pg.main(argv)
+                code = pg.main(self._LOCAL + argv)
         return code, buf.getvalue()
 
     def test_inline_prompt_returns_0(self):
@@ -390,7 +393,7 @@ class TestCLI:
         buf = StringIO()
         with mock.patch("urllib.request.urlopen", return_value=_mock_urlopen(b"")):
             with mock.patch("sys.stdout", buf):
-                code = pg.main(["--health"])
+                code = pg.main(["--allow-internal", "--health"])
         assert code == 0
         assert "healthy" in buf.getvalue()
 
@@ -399,7 +402,7 @@ class TestCLI:
         buf = StringIO()
         with mock.patch("urllib.request.urlopen", return_value=_mock_urlopen(body)):
             with mock.patch("sys.stdout", buf):
-                code = pg.main(["--list-models"])
+                code = pg.main(["--allow-internal", "--list-models"])
         assert code == 0
         out = buf.getvalue()
         assert "qwen2.5-0.5b" in out
@@ -411,6 +414,7 @@ class TestCLI:
         with mock.patch("urllib.request.urlopen", return_value=_mock_urlopen(resp_body)):
             with mock.patch("sys.stdout", buf):
                 code = pg.main([
+                    "--allow-internal",
                     "--compare", "model-a", "model-b",
                     "--base-url-a", "http://localhost:8000",
                     "--base-url-b", "http://localhost:8001",
@@ -428,7 +432,7 @@ class TestCLI:
         buf = StringIO()
         with mock.patch("urllib.request.urlopen", return_value=_mock_urlopen(resp_body)):
             with mock.patch("sys.stdout", buf):
-                code = pg.main(["--prompts-file", str(f)])
+                code = pg.main(["--allow-internal", "--prompts-file", str(f)])
         assert code == 0
         assert "file answer" in buf.getvalue()
 

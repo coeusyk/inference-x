@@ -61,8 +61,24 @@ class ChatService:
 
         yield "data: [DONE]\n\n"
 
+    _GLOBAL_MAX_TOKENS = 4096
+
+    def _enforce_max_tokens_cap(self, routed_model: str, request: ChatCompletionRequest) -> None:
+        """Reject max_tokens above min(4096, model max_model_len) when configured."""
+        cap = self._GLOBAL_MAX_TOKENS
+        if routed_model in self._registry:
+            entry = self._registry.get(routed_model)
+            if entry.max_model_len is not None:
+                cap = min(cap, entry.max_model_len)
+        requested = request.max_tokens if request.max_tokens is not None else 512
+        if requested > cap:
+            raise ValueError(
+                f"max_tokens {requested} exceeds the limit of {cap} for model '{routed_model}'"
+            )
+
     def _resolve_engine(self, request: ChatCompletionRequest) -> BaseEngine:
         routed_model = self._router.select(request)
+        self._enforce_max_tokens_cap(routed_model, request)
 
         loaded = self._pool.loaded_models()
         if routed_model not in loaded:

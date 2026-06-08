@@ -125,7 +125,7 @@ class TestHealthEndpoint:
             assert resp.status_code == 500
             body = resp.json()
             assert body["error"]["type"] == "internal_error"
-            assert "vLLM initialization failed" in body["error"]["message"]
+            assert body["error"]["message"] == "Request could not be processed."
         app.dependency_overrides.clear()
 
 

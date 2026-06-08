@@ -23,7 +23,9 @@ case "$cmd" in
         export PATH="${CUDA_HOME}/bin:${PATH}"
       fi
     fi
-    uv run uvicorn inference_x.api.main:app --host 0.0.0.0 --port 8000
+    # Set to 0.0.0.0 only behind a reverse proxy with TLS
+    _host="${INFERENCE_X_HOST:-127.0.0.1}"
+    uv run uvicorn inference_x.api.main:app --host "$_host" --port 8000
     ;;
   test)
     uv run python -m pytest tests/unit/ -v

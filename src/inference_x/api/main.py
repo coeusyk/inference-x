@@ -1,6 +1,10 @@
 import logging
+import logging.config
+import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 
+import yaml
 from fastapi import FastAPI
 
 from inference_x.utils.vllm_platform_patch import apply as apply_vllm_platform_patch
@@ -15,7 +19,20 @@ from inference_x.api.routes.health import router as health_router
 from inference_x.api.routes.models import router as models_router
 from inference_x.observability.middleware import ObservabilityMiddleware
 
-logging.basicConfig(level=logging.INFO)
+
+def _configure_logging() -> None:
+    config_dir = Path(os.environ.get("INFERENCE_X_CONFIG_DIR", "config"))
+    logging_path = config_dir / "logging.yaml"
+    if logging_path.is_file():
+        logs_dir = Path("logs")
+        logs_dir.mkdir(exist_ok=True)
+        with logging_path.open(encoding="utf-8") as fh:
+            logging.config.dictConfig(yaml.safe_load(fh))
+    else:
+        logging.basicConfig(level=logging.INFO)
+
+
+_configure_logging()
 logger = logging.getLogger(__name__)
 
 
