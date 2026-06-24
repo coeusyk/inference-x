@@ -178,7 +178,7 @@ Add observability middleware and metrics storage without moving business logic b
 Add a lightweight playground that consumes the existing API rather than introducing UI-specific backend logic where avoidable.
 
 ### Phase 5
-Add hardening, deployment guidance, and article-ready artifacts.
+Add hardening, deployment guidance, and publication-ready artifacts.
 
 ### Phase 6
 Add benchmark runner, hardware profiler, model advisor, and playground Benchmark tab.

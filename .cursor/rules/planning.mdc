@@ -21,4 +21,3 @@
 4. Implement in small steps.
 5. Validate with tests or smoke checks.
 6. Update docs affected by the change.
-7. Add a note to `docs/ARTICLE_NOTES.md` if the change is worth capturing for the article.

@@ -4,9 +4,8 @@
 [![vLLM](https://img.shields.io/badge/inference-vLLM-6E40C9?style=flat-square)](https://docs.vllm.ai)
 [![OpenAI-compatible](https://img.shields.io/badge/API-OpenAI--compatible-412991?style=flat-square&logo=openai&logoColor=white)](https://platform.openai.com/docs/api-reference)
 [![uv](https://img.shields.io/badge/package%20manager-uv-DE5FE9?style=flat-square)](https://docs.astral.sh/uv/)
-[![Tests](https://img.shields.io/badge/tests-233%20passing-22C55E?style=flat-square&logo=pytest&logoColor=white)](./tests)
+[![Tests](https://img.shields.io/badge/tests-249%20passing-22C55E?style=flat-square&logo=pytest&logoColor=white)](./tests)
 [![License: MIT](https://img.shields.io/badge/license-MIT-F59E0B?style=flat-square)](./LICENSE)
-[![Phase 6 complete](https://img.shields.io/badge/phase-6%20complete-0EA5E9?style=flat-square)](#phases)
 
 InferenceX is a self-hosted LLM inference platform built incrementally on top of vLLM.
 It provides an OpenAI-compatible `POST /v1/chat/completions` endpoint, a model registry,
@@ -18,7 +17,6 @@ a single WSL2 machine with one consumer-grade GPU.
 - `docs/ARCHITECTURE.md`
 - `docs/PHASES.md`
 - `docs/DECISIONS.md`
-- `docs/ARTICLE_DRAFT.md`
 - `playground/README.md`
 - `.cursor/rules/`
 

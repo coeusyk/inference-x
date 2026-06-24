@@ -7,15 +7,13 @@ model as an asyncio subprocess.
 from __future__ import annotations
 
 import asyncio
-import json
-import subprocess
 import sys
 from pathlib import Path
 from typing import ClassVar
 
 import httpx
 from textual.app import ComposeResult
-from textual.reactive import reactive
+from textual.containers import Horizontal
 from textual.widget import Widget
 from textual.widgets import Button, DataTable, Label, Select, Static
 
@@ -55,6 +53,10 @@ class BenchmarkTab(Widget):
         height: 3;
         margin-bottom: 1;
     }
+    BenchmarkTab #bench-model-select {
+        width: 1fr;
+        margin-right: 1;
+    }
     BenchmarkTab DataTable {
         margin-bottom: 1;
     }
@@ -70,6 +72,9 @@ class BenchmarkTab(Widget):
     def compose(self) -> ComposeResult:
         yield Label("Hardware", id="hw-label", classes="section-title")
         yield Static("Detecting hardware…", id="hw-info")
+        with Horizontal(id="bench-controls"):
+            yield Select([], id="bench-model-select", prompt="Select model")
+            yield Button("Run Benchmark", id="run-benchmark-btn", variant="primary")
         yield Label("Benchmark Results", id="results-label", classes="section-title")
         yield DataTable(id="results-table")
         yield Label("Advisor Ranking", id="advisor-label", classes="section-title")
@@ -80,6 +85,15 @@ class BenchmarkTab(Widget):
     def on_mount(self) -> None:
         self._setup_tables()
         self.run_worker(self._refresh_data(), exclusive=True)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id != "run-benchmark-btn":
+            return
+        select = self.query_one("#bench-model-select", Select)
+        if select.value is Select.BLANK:
+            self.query_one("#bench-error", Static).update("Select a model first.")
+            return
+        self.run_worker(self.run_benchmark(str(select.value)), exclusive=True)
 
     def _setup_tables(self) -> None:
         results_table = self.query_one("#results-table", DataTable)
@@ -93,6 +107,22 @@ class BenchmarkTab(Widget):
             async with httpx.AsyncClient(timeout=10.0) as client:
                 results_resp = await client.get(f"{self._base_url}/v1/benchmark/results")
                 advise_resp = await client.get(f"{self._base_url}/v1/benchmark/advise")
+                models_resp = await client.get(f"{self._base_url}/v1/models")
+
+            if models_resp.status_code == 200:
+                payload = models_resp.json()
+                model_ids = [
+                    item["id"]
+                    for item in payload.get("data", [])
+                    if isinstance(item, dict) and isinstance(item.get("id"), str)
+                ]
+                select = self.query_one("#bench-model-select", Select)
+                current = select.value if select.value is not Select.BLANK else None
+                select.set_options([(m, m) for m in model_ids])
+                if current and current in model_ids:
+                    select.value = current
+                elif model_ids and select.value is Select.BLANK:
+                    select.value = model_ids[0]
 
             if results_resp.status_code == 200:
                 data = results_resp.json()
@@ -135,6 +165,7 @@ class BenchmarkTab(Widget):
         error = self.query_one("#bench-error", Static)
         status.update(f"Running benchmark for {model_name}…")
         error.update("")
+        self.query_one("#run-benchmark-btn", Button).disabled = True
 
         script = Path(__file__).parent.parent / "scripts" / "benchmark.py"
         cmd = [sys.executable, str(script), "--model", model_name, "--base-url", self._base_url]
@@ -145,7 +176,7 @@ class BenchmarkTab(Widget):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            stdout, stderr = await proc.communicate()
+            _stdout, stderr = await proc.communicate()
             if proc.returncode == 0:
                 status.update(f"Benchmark for {model_name} complete.")
             else:
@@ -160,3 +191,4 @@ class BenchmarkTab(Widget):
             status.update("")
         finally:
             self._running = False
+            self.query_one("#run-benchmark-btn", Button).disabled = False

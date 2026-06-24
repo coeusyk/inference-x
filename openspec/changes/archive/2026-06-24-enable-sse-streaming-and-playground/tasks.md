@@ -10,7 +10,7 @@
 - [x] 2.1 Add `tests/unit/test_streaming.py` for SSE formatting, `[DONE]`, streaming route behavior, and non-streaming JSON behavior.
 - [x] 2.2 Update existing stream guard tests to assert the new streaming behavior.
 - [x] 2.3 Mark DEC-010 superseded and add DEC-023 for SSE streaming.
-- [x] 2.4 Add Phase 5 streaming notes to `docs/ARTICLE_NOTES.md`.
+- [x] 2.4 Document Phase 5 streaming in `docs/DECISIONS.md`.
 
 ## 3. Textual Playground
 
@@ -23,6 +23,6 @@
 
 - [x] 4.1 Add `tests/unit/test_app.py` for helper functions without launching the full Textual app.
 - [x] 4.2 Update `playground/README.md` with interactive launch instructions and shortcuts.
-- [x] 4.3 Add DEC-024 for Textual + httpx interactive playground and update `docs/ARTICLE_NOTES.md`.
+- [x] 4.3 Add DEC-024 for Textual + httpx interactive playground.
 - [x] 4.4 Run `uv run pytest tests/unit/ -v`.
 - [x] 4.5 Launch `uv run python playground/app.py` and confirm startup behavior against the available server.

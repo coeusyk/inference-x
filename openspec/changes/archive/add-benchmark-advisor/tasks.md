@@ -69,5 +69,5 @@
 ## 10. Docs and decisions
 - 10.1 Add DEC-027: Benchmark scoring function design and weight rationale
 - 10.2 Add DEC-028: Hardware profiler fallback chain (pynvml → nvidia-smi → CPU-only)
-- 10.3 Update ARTICLENOTES.md with benchmark findings for the article
+- 10.3 Document benchmark methodology in README or DECISIONS.md
 - 10.4 Archive change to `openspec/changes/archive/` when complete

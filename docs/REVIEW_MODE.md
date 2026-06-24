@@ -1,28 +1,37 @@
 # InferenceX Review Mode
 
-## Verdict
-Promising but incomplete
+Use this mode when reviewing changes before merge or when validating phase exit criteria.
 
-## What's wrong
-- The repo still needs a tighter separation between planning, instructions, and implementation boundaries, or the agent will drift across files too early. [first-principles]
-- The architecture is not yet enforced by contracts, so route, service, and engine layers can still be crossed accidentally as the codebase grows. [known-pattern]
-- The project is at risk of becoming over-scaffolded before the first runnable Phase 1 slice exists. [known-pattern]
+## Verdict (2026-06-24)
 
-## Why it fails
-- If every future feature gets its own folder before Phase 1 works, the repo will look organized while the runtime path remains unproven. [known-pattern]
-- If request/response schemas are not treated as the public boundary, later routing and observability work can break clients silently. [first-principles]
-- If review instructions and build instructions are mixed together, Cursor may optimize for context breadth instead of precise execution. [known-pattern]
+Phases 0-6 complete. Core API, routing, observability, playground, hardening, and benchmark/advisor are implemented and covered by unit tests.
 
-## Improved direction
-- Keep `AGENTS.md` as the root behavior contract, `.cursor/rules/*` as focused Cursor guidance, `docs/ARCHITECTURE.md` as the system map, and OpenSpec as the change-level execution layer. [context-dependent]
-- Make Phase 1 a thin vertical slice: one engine, one API endpoint, one config path, one smoke test. [first-principles]
-- Add contract tests early so the project can grow without accidentally changing public behavior. [known-pattern]
-- Record meaningful findings in `docs/ARTICLE_NOTES.md` throughout the build, not only at the end. [context-dependent]
+## What to verify on each review
 
-## Next action
-Validate the repo against the updated `AGENTS.md`, `docs/ARCHITECTURE.md`, and the first OpenSpec change plan, then check that only the Phase 1 backend slice is in scope. [context-dependent]
+- **API contract:** `POST /v1/chat/completions`, `GET /health`, `GET /v1/models`, benchmark read routes unchanged unless versioned.
+- **Layer boundaries:** Routes stay thin; orchestration in services; inference in engines; routing in `routing/`; metrics in observability middleware only.
+- **Config vs runtime:** Model list from `config/models.yaml`; default model from `INFERENCE_X_DEFAULT_MODEL`; loaded engines from `INFERENCE_X_LOADED_MODELS`. `config/routing.yaml` is documentation-only for the default model name.
+- **Tests:** `uv run pytest tests/unit -v` must pass without a GPU (stub engines via dependency overrides).
+- **Docs:** Contract or behavior changes update `docs/DECISIONS.md` and relevant OpenSpec deltas.
 
-## Open questions
-- Should `AGENTS.md` stay authoritative for all repo behavior, or should `.cursor/rules/*` carry most of the behavioral weight? [context-dependent]
-- Is Phase 1 limited strictly to `/v1/chat/completions` and `/health`, or do you also want `/v1/models` now? [context-dependent]
-- How much of the backend should be generated before the first manual review pass? [context-dependent]
+## Common gaps to watch for
+
+- Bare `python` / `uvicorn` outside `uv run` (missing vLLM in PATH).
+- Second vLLM process on the same GPU (KV cache OOM).
+- Gated models without `HF_TOKEN` or HuggingFace approval.
+- Playground base URLs without `--allow-internal` for localhost/private IPs.
+- Benchmark CLI invoked while the target model is not in the running server's loaded pool.
+
+## Review checklist
+
+1. Read the change proposal or PR summary against `docs/PHASES.md` scope.
+2. Confirm affected routes have unit or contract-style tests.
+3. Run unit tests locally.
+4. For engine or config changes, note whether a smoke test or live benchmark is required.
+5. Ensure no secrets (.env, tokens) in the diff.
+
+## Related docs
+
+- `docs/BUILD_MODE.md` — implementation workflow
+- `docs/ARCHITECTURE.md` — layer map and dependency direction
+- `AGENTS.md` — agent working agreement

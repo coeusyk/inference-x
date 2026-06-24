@@ -74,6 +74,8 @@ class ObservabilityMiddleware(BaseHTTPMiddleware):
         completion_tokens: int | None = None
         total_tokens: int | None = None
 
+        # Streaming chat (SSE) skips token extraction: the body is an event stream,
+        # not a single JSON payload with a usage block — prompt/completion tokens stay None.
         if (
             is_chat
             and status_code == 200

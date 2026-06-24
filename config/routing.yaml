@@ -1,3 +1,4 @@
+# Runtime default comes from INFERENCE_X_DEFAULT_MODEL (not this file); see AppSettings.default_model.
 routing:
   # The model served when no explicit registered model is requested.
   # Must match a 'name' entry in config/models.yaml.

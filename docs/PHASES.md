@@ -18,10 +18,10 @@
 **Goal:** Establish repo structure, documentation skeleton, OpenSpec workflow, and Cursor rules before any code lands.
 
 Exit criteria:
-- [ ] AGENTS.md present and respected by agent
-- [ ] ARCHITECTURE.md, PHASES.md, DECISIONS.md, ARTICLENOTES.md present
-- [ ] OpenSpec initialized with platform spec
-- [ ] config/ scaffolded with models.yaml, routing.yaml, server.yaml, logging.yaml
+- [x] AGENTS.md present and respected by agent
+- [x] ARCHITECTURE.md, PHASES.md, DECISIONS.md present
+- [x] OpenSpec initialized with platform spec
+- [x] config/ scaffolded with models.yaml, routing.yaml, server.yaml, logging.yaml
 
 ---
 
@@ -35,10 +35,10 @@ Deliverables:
 - Settings loader from config/
 
 Exit criteria:
-- [ ] `uv run pytest tests/unit -v` — all pass
-- [ ] Smoke test against real model succeeds
-- [ ] Health returns 503 when engine fails to load
-- [ ] Article notes updated
+- [x] `uv run pytest tests/unit -v` — all pass
+- [x] Smoke test against real model succeeds
+- [x] Health returns 503 when engine fails to load
+- [x] Non-obvious choices recorded in DECISIONS.md where applicable
 
 ---
 
@@ -52,10 +52,10 @@ Deliverables:
 - Routing config in `config/routing.yaml`
 
 Exit criteria:
-- [ ] All Phase 1 tests still pass
-- [ ] Routing logic covered by unit tests
-- [ ] `GET /v1/models` reflects models.yaml
-- [ ] Article notes updated
+- [x] All Phase 1 tests still pass
+- [x] Routing logic covered by unit tests
+- [x] `GET /v1/models` reflects models.yaml
+- [x] Non-obvious choices recorded in DECISIONS.md where applicable
 
 ---
 
@@ -69,10 +69,10 @@ Deliverables:
 - JsonLineExporter (opt-in via INFERENCE_X_METRICS_FILE)
 
 Exit criteria:
-- [ ] All Phase 1–2 tests still pass
-- [ ] 30+ observability-specific unit tests
-- [ ] No change to API request/response contracts
-- [ ] Article notes updated
+- [x] All Phase 1-2 tests still pass
+- [x] 30+ observability-specific unit tests
+- [x] No change to API request/response contracts
+- [x] Non-obvious choices recorded in DECISIONS.md where applicable
 
 ---
 
@@ -89,11 +89,11 @@ Deliverables:
 - `make playground` — single command start
 
 Exit criteria:
-- [ ] `make playground` starts server + UI in one command
-- [ ] Model selection screen shown before main UI
-- [ ] Compare mode works across ≥2 models
-- [ ] Markdown renders correctly in response panel
-- [ ] Article notes updated
+- [x] `make playground` starts server + UI in one command
+- [x] Model selection screen shown before main UI
+- [x] Compare mode works across ≥2 models
+- [x] Markdown renders correctly in response panel
+- [x] Non-obvious choices recorded in DECISIONS.md where applicable
 
 ---
 
@@ -108,14 +108,14 @@ Deliverables:
 - Playground base-URL SSRF guard
 - `make stop` target
 - README complete (install, quickstart, make targets, config reference)
-- ARTICLENOTES.md converted to article draft
+- MIT LICENSE at repo root
 
 Exit criteria:
-- [x] Security audit findings H1–H5 from audit report resolved (DEC-SEC-01: one CVE in transitive dep, accepted)
+- [x] Security audit findings H1-H5 from audit report resolved (DEC-SEC-01: one CVE in transitive dep, accepted)
 - [x] Deferred items (auth, rate limiting, streaming timeout) documented in DECISIONS.md (DEC-DEFER-01/02/03)
-- [x] All unit tests pass (195/195 as of 2026-06-08)
+- [x] All unit tests pass (249/249 as of 2026-06-24)
 - [x] README covers setup from scratch on a fresh WSL2 machine
-- [x] Article draft written (docs/ARTICLE_DRAFT.md)
+- [x] MIT LICENSE present at repo root
 
 ---
 
@@ -183,8 +183,8 @@ tinyllama-chat on their setup. InferenceX should tell them.
 - [x] Advisor scoring function unit-tested with fixture hardware profiles (10 tests: 6GB, 24GB, CPU-only)
 - [x] Benchmark results schema validated with Pydantic (round-trip test passing)
 - [x] Playground benchmark tab shows results and recommendation (BenchmarkTab wired into TabbedContent)
-- [x] Results stored in `docs/benchmarks/` for article inclusion
-- [x] Article notes updated with benchmark methodology and sample output
+- [x] Results stored in `docs/benchmarks/` for reproducible comparison
+- [x] Benchmark methodology documented in DECISIONS.md or README where applicable
 
 ---
 
