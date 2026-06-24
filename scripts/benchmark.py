@@ -27,6 +27,37 @@ if str(_src) not in sys.path:
 import httpx
 
 
+# #region agent log
+def _debug_log(hypothesis_id: str, location: str, message: str, data: dict) -> None:
+    import json
+    import time
+
+    try:
+        with open(
+            "/home/coeusyk/projects/inference-x/.cursor/debug-ba81fc.log",
+            "a",
+            encoding="utf-8",
+        ) as fh:
+            fh.write(
+                json.dumps(
+                    {
+                        "sessionId": "ba81fc",
+                        "hypothesisId": hypothesis_id,
+                        "location": location,
+                        "message": message,
+                        "data": data,
+                        "timestamp": int(time.time() * 1000),
+                    }
+                )
+                + "\n"
+            )
+    except OSError:
+        pass
+
+
+# #endregion
+
+
 def _check_server_reachable(base_url: str) -> bool:
     try:
         with httpx.Client(timeout=5.0) as client:
@@ -78,6 +109,31 @@ def main() -> None:
         )
         sys.exit(1)
 
+    # #region agent log
+    try:
+        with httpx.Client(timeout=5.0) as client:
+            health = client.get(f"{base_url}/health")
+            health_body = health.json() if health.status_code == 200 else {}
+        _debug_log(
+            "A",
+            "scripts/benchmark.py:main",
+            "pre-benchmark health",
+            {
+                "requested_model": args.model,
+                "health_status": health.status_code,
+                "loaded_models": health_body.get("loaded_models"),
+                "engine": health_body.get("engine"),
+            },
+        )
+    except Exception as exc:
+        _debug_log(
+            "C",
+            "scripts/benchmark.py:main",
+            "health probe failed",
+            {"requested_model": args.model, "error": type(exc).__name__, "detail": str(exc)},
+        )
+    # #endregion
+
     suite_path = Path(args.suite)
     if not suite_path.exists():
         print(f"Error: Suite file not found: {suite_path}", file=sys.stderr)
@@ -96,6 +152,18 @@ def main() -> None:
             concurrency=args.concurrency,
         )
     except Exception as exc:
+        # #region agent log
+        _debug_log(
+            "A",
+            "scripts/benchmark.py:main",
+            "benchmark run failed",
+            {
+                "requested_model": args.model,
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            },
+        )
+        # #endregion
         print(f"Error: Benchmark failed: {exc}", file=sys.stderr)
         sys.exit(1)
 

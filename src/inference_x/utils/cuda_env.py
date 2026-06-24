@@ -45,6 +45,43 @@ def _find_venv_cuda_home() -> Path | None:
     return sorted(candidates, key=lambda p: p.name)[-1]
 
 
+def ensure_vllm_process_env() -> None:
+    """Set vLLM worker/process env before any vLLM import (avoids override warnings)."""
+    # vLLM requires spawn on Linux/WSL; set early so it is not logged as an override.
+    prior = os.environ.get("VLLM_WORKER_MULTIPROC_METHOD")
+    os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+    # #region agent log
+    try:
+        import json
+        import time
+
+        with open(
+            "/home/coeusyk/projects/inference-x/.cursor/debug-ba81fc.log",
+            "a",
+            encoding="utf-8",
+        ) as _df:
+            _df.write(
+                json.dumps(
+                    {
+                        "sessionId": "ba81fc",
+                        "runId": "pre-fix",
+                        "hypothesisId": "H1",
+                        "location": "cuda_env.py:ensure_vllm_process_env",
+                        "message": "vLLM worker multiprocessing env",
+                        "data": {
+                            "prior": prior,
+                            "effective": os.environ.get("VLLM_WORKER_MULTIPROC_METHOD"),
+                        },
+                        "timestamp": int(time.time() * 1000),
+                    }
+                )
+                + "\n"
+            )
+    except OSError:
+        pass
+    # #endregion
+
+
 def ensure_cuda_home() -> str | None:
     """Ensure CUDA_HOME (and nvcc on PATH) for FlashInfer JIT in vLLM.
 
@@ -85,6 +122,7 @@ from inference_x.utils.vllm_platform_patch import apply as apply_vllm_platform_p
 
 def ensure_vllm_runtime_env(*, pool_size: int = 1) -> str | None:
     """Apply WSL2-friendly defaults before vLLM engine initialization."""
+    ensure_vllm_process_env()
     apply_vllm_platform_patch()
     cuda_home = ensure_cuda_home()
 

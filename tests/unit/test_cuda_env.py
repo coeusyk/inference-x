@@ -10,6 +10,7 @@ import pytest
 from inference_x.utils.cuda_env import (
     _find_venv_cuda_home,
     ensure_cuda_home,
+    ensure_vllm_process_env,
     ensure_vllm_runtime_env,
 )
 
@@ -48,6 +49,12 @@ def test_ensure_cuda_home_respects_existing(monkeypatch, _clear_cuda_env):
     monkeypatch.setenv("CUDA_HOME", "/custom/cuda")
     assert ensure_cuda_home() == "/custom/cuda"
     assert os.environ["CUDA_HOME"] == "/custom/cuda"
+
+
+def test_ensure_vllm_process_env_sets_spawn(monkeypatch, _clear_cuda_env):
+    monkeypatch.delenv("VLLM_WORKER_MULTIPROC_METHOD", raising=False)
+    ensure_vllm_process_env()
+    assert os.environ["VLLM_WORKER_MULTIPROC_METHOD"] == "spawn"
 
 
 def test_ensure_vllm_runtime_env_disables_flashinfer_on_wsl(monkeypatch, _clear_cuda_env):

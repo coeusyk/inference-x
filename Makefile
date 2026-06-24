@@ -36,7 +36,7 @@ help:
 .PHONY: playground
 playground:
 	@echo "Starting InferenceX server in background..."
-	uv run uvicorn inference_x.api.main:app --host 127.0.0.1 --port 8000 &
+	VLLM_WORKER_MULTIPROC_METHOD=spawn uv run uvicorn inference_x.api.main:app --host 127.0.0.1 --port 8000 &
 	@echo "Waiting for server to be ready..."
 	@until curl -sf http://localhost:8000/health > /dev/null; do sleep 1; done
 	@echo "Server ready. Launching playground..."

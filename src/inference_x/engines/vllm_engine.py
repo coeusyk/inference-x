@@ -194,11 +194,14 @@ def _map_vllm_init_error(model_name: str, model_path: str, exc: Exception) -> Ru
             "Lower gpu_memory_utilization in config/models.yaml, stop other GPU "
             "processes (e.g. a previous ./scripts/dev.sh serve), or use a smaller model."
         )
-    if "cache blocks" in lower or "kv cache" in lower:
+    if "cache blocks" in lower or "kv cache" in lower or "no available memory for the cache" in lower:
         return RuntimeError(
             f"GPU memory insufficient for KV cache loading {model_name}. "
-            "When running multiple models on one GPU, load fewer models or "
-            "lower gpu_memory_utilization / max_model_len in config/models.yaml."
+            "On ≤6 GiB GPUs, load one model: "
+            "INFERENCE_X_LOADED_MODELS=qwen2.5-0.5b ./scripts/dev.sh serve. "
+            "For a single model, raise gpu_memory_utilization (e.g. 0.85) and/or "
+            "lower max_model_len (e.g. 2048) in config/models.yaml. "
+            "Stop other GPU processes (nvidia-smi) before retrying."
         )
     if "not found" in lower:
         return RuntimeError(
@@ -258,8 +261,10 @@ class VLLMEngine(BaseEngine):
         *,
         pool_size: int = 1,
         pool_models: list[str] | None = None,
+        pool_configs: list[dict[str, Any]] | None = None,
         engine_index: int = 0,
         free_vram_gib: float | None = None,
+        total_vram_gib: float | None = None,
     ) -> None:
         _load_vllm()
         if not _VLLM_AVAILABLE:
@@ -272,8 +277,10 @@ class VLLMEngine(BaseEngine):
             model_config,
             pool_size=pool_size,
             pool_models=pool_models,
+            pool_configs=pool_configs,
             engine_index=engine_index,
             free_vram_gib=free_vram_gib,
+            total_vram_gib=total_vram_gib or _probe_cuda_vram().get("total_gib") or 8.0,
         )
         required = {"name", "model_path"}
         missing = required - model_config.keys()

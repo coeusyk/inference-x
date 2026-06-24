@@ -30,18 +30,23 @@ def _build_engine_pool(config_dir: str, loaded_models: tuple[str, ...]) -> Engin
     """Build an EnginePool loading one VLLMEngine per model in *loaded_models*."""
     registry = _build_registry(config_dir)
     pool_size = len(loaded_models)
-    validate_pool_fits(list(loaded_models))
+    free_gib, total_gib = probe_gpu_memory_gib()
+    total_vram = total_gib if total_gib is not None else 8.0
+    pool_configs = [registry.get(m).model_dump() for m in loaded_models]
+    validate_pool_fits(pool_configs, total_vram_gib=total_vram)
     engines: dict = {}
     for idx, model_name in enumerate(loaded_models):
-        free_gib, _total_gib = probe_gpu_memory_gib()
+        free_gib, total_gib = probe_gpu_memory_gib()
         model_config = registry.get(model_name)
         logger.info("Loading engine for model=%s (pool_size=%d)", model_name, pool_size)
         engines[model_name] = VLLMEngine(
             model_config.model_dump(),
             pool_size=pool_size,
             pool_models=list(loaded_models),
+            pool_configs=pool_configs,
             engine_index=idx,
             free_vram_gib=free_gib,
+            total_vram_gib=total_gib,
         )
     return EnginePool(engines)
 

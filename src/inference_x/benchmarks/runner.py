@@ -19,6 +19,36 @@ from inference_x.benchmarks.hardware import profile_hardware
 from inference_x.benchmarks.schemas import BenchmarkResult, HardwareProfile, PromptResult
 
 
+# #region agent log
+def _debug_log(hypothesis_id: str, location: str, message: str, data: dict) -> None:
+    import time
+
+    try:
+        with open(
+            "/home/coeusyk/projects/inference-x/.cursor/debug-ba81fc.log",
+            "a",
+            encoding="utf-8",
+        ) as fh:
+            fh.write(
+                json.dumps(
+                    {
+                        "sessionId": "ba81fc",
+                        "hypothesisId": hypothesis_id,
+                        "location": location,
+                        "message": message,
+                        "data": data,
+                        "timestamp": int(time.time() * 1000),
+                    }
+                )
+                + "\n"
+            )
+    except OSError:
+        pass
+
+
+# #endregion
+
+
 def _load_suite(suite_path: str) -> tuple[str, list[dict]]:
     """Return (suite_version, prompts_list) from a suite JSON file."""
     data = json.loads(Path(suite_path).read_text(encoding="utf-8"))
@@ -44,29 +74,57 @@ def _run_prompt_stream(
     ttft_ms: Optional[float] = None
     t_start = time.perf_counter()
 
-    with client.stream(
-        "POST",
-        f"{base_url}/v1/chat/completions",
-        json=payload,
-        timeout=httpx.Timeout(10.0, read=120.0),
-    ) as response:
-        response.raise_for_status()
-        for line in response.iter_lines():
-            if not line.startswith("data:"):
-                continue
-            data = line.removeprefix("data:").strip()
-            if not data or data == "[DONE]":
-                continue
-            try:
-                chunk = json.loads(data)
-                delta = (chunk.get("choices") or [{}])[0].get("delta", {})
-                content = delta.get("content", "")
-                if content:
-                    if ttft_ms is None:
-                        ttft_ms = (time.perf_counter() - t_start) * 1000
-                    tokens_generated += len(content.split())
-            except (json.JSONDecodeError, IndexError):
-                continue
+    try:
+        with client.stream(
+            "POST",
+            f"{base_url}/v1/chat/completions",
+            json=payload,
+            timeout=httpx.Timeout(10.0, read=120.0),
+        ) as response:
+            # #region agent log
+            _debug_log(
+                "A",
+                "benchmarks/runner.py:_run_prompt_stream",
+                "stream response opened",
+                {
+                    "model_name": model_name,
+                    "prompt_label": prompt_label,
+                    "http_status": response.status_code,
+                },
+            )
+            # #endregion
+            response.raise_for_status()
+            for line in response.iter_lines():
+                if not line.startswith("data:"):
+                    continue
+                data = line.removeprefix("data:").strip()
+                if not data or data == "[DONE]":
+                    continue
+                try:
+                    chunk = json.loads(data)
+                    delta = (chunk.get("choices") or [{}])[0].get("delta", {})
+                    content = delta.get("content", "")
+                    if content:
+                        if ttft_ms is None:
+                            ttft_ms = (time.perf_counter() - t_start) * 1000
+                        tokens_generated += len(content.split())
+                except (json.JSONDecodeError, IndexError):
+                    continue
+    except Exception as exc:
+        # #region agent log
+        _debug_log(
+            "A",
+            "benchmarks/runner.py:_run_prompt_stream",
+            "stream request failed",
+            {
+                "model_name": model_name,
+                "prompt_label": prompt_label,
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            },
+        )
+        # #endregion
+        raise
 
     total_latency_ms = (time.perf_counter() - t_start) * 1000
     if ttft_ms is None:
