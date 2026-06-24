@@ -23,11 +23,19 @@ dev = [
     "pip-audit>=2.10.0",
     "pytest>=8.0.0",
     "pytest-asyncio>=0.25.0",
+    "httpx2>=2.0",
 ]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-filterwarnings = ["ignore::DeprecationWarning:starlette"]
+filterwarnings = [
+    "ignore::DeprecationWarning:starlette",
+    "ignore::starlette.exceptions.StarletteDeprecationWarning",
+    # SWIG bindings in torch/vllm (Python 3.13+)
+    "ignore:builtin type .* has no __module__ attribute:DeprecationWarning",
+    # WSL / CPU-only test hosts without NVML
+    "ignore:Can't initialize NVML:UserWarning",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/inference_x"]

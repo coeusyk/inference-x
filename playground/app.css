@@ -184,3 +184,19 @@ Screen {
 .hidden {
     display: none;
 }
+
+/* ── Tabs + benchmark panel ──────────────────────────────────────────── */
+
+#main-tabs {
+    height: 1fr;
+}
+
+#tab-chat,
+#tab-benchmark {
+    height: 1fr;
+}
+
+#benchmark-panel {
+    height: 1fr;
+    width: 100%;
+}

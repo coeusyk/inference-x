@@ -13,8 +13,7 @@ from typing import ClassVar
 
 import httpx
 from textual.app import ComposeResult
-from textual.containers import Horizontal
-from textual.widget import Widget
+from textual.containers import Horizontal, Vertical
 from textual.widgets import Button, DataTable, Label, Select, Static
 
 
@@ -30,24 +29,31 @@ def _hw_text(hw: dict) -> str:
     return f"CPU only  |  {hw.get('cpu_cores', '?')} cores  |  RAM: {hw.get('ram_total_gb', 0):.0f} GB"
 
 
-class BenchmarkTab(Widget):
+class BenchmarkTab(Vertical):
     """Benchmark results and advisor panel for the playground TUI."""
 
     DEFAULT_CSS: ClassVar[str] = """
     BenchmarkTab {
+        height: 1fr;
+        width: 100%;
         padding: 1;
     }
+    BenchmarkTab .section-title {
+        text-style: bold;
+        color: #7aa884;
+        margin-top: 1;
+    }
     BenchmarkTab #hw-info {
-        color: $text-muted;
+        color: #7f8795;
         margin-bottom: 1;
     }
     BenchmarkTab #bench-status {
         margin: 1 0;
-        color: $success;
+        color: #7aa884;
     }
     BenchmarkTab #bench-error {
         margin: 1 0;
-        color: $error;
+        color: #d06c75;
     }
     BenchmarkTab #bench-controls {
         height: 3;
@@ -58,6 +64,8 @@ class BenchmarkTab(Widget):
         margin-right: 1;
     }
     BenchmarkTab DataTable {
+        height: auto;
+        max-height: 12;
         margin-bottom: 1;
     }
     """
@@ -155,6 +163,10 @@ class BenchmarkTab(Widget):
 
         except (httpx.HTTPError, KeyError, ValueError):
             self.query_one("#hw-info", Static).update("Server not reachable — start server first")
+
+    def reload_data(self) -> None:
+        """Reload benchmark data (call after the inference server is ready)."""
+        self.run_worker(self._refresh_data(), exclusive=True)
 
     async def run_benchmark(self, model_name: str) -> None:
         """Launch benchmark.py for *model_name* as a subprocess and refresh on completion."""

@@ -128,6 +128,105 @@ async def test_stream_chat_tokens_skips_blank_and_non_data_lines(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_wait_for_model_available_immediately(monkeypatch):
+    model = "qwen2.5-0.5b"
+
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return {"loaded_models": [model]}
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def get(self, url: str):
+            return _Resp()
+
+    monkeypatch.setattr(pg_streaming.httpx, "AsyncClient", lambda **kwargs: _Client())
+    assert await pg_streaming.wait_for_model("http://test", model, timeout_s=10) is True
+
+
+@pytest.mark.asyncio
+async def test_wait_for_model_available_after_two_polls(monkeypatch):
+    model = "qwen2.5-0.5b"
+    calls = {"n": 0}
+
+    class _Resp:
+        def __init__(self, loaded: list[str]):
+            self.status_code = 200
+            self._loaded = loaded
+
+        def json(self):
+            return {"loaded_models": self._loaded}
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def get(self, url: str):
+            calls["n"] += 1
+            loaded = [] if calls["n"] < 2 else [model]
+            return _Resp(loaded)
+
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(pg_streaming.httpx, "AsyncClient", lambda **kwargs: _Client())
+    monkeypatch.setattr(pg_streaming.asyncio, "sleep", fake_sleep)
+
+    assert await pg_streaming.wait_for_model(
+        "http://test", model, timeout_s=60, poll_interval_s=2.0
+    ) is True
+    assert calls["n"] == 2
+    assert sleeps == [2.0]
+
+
+@pytest.mark.asyncio
+async def test_wait_for_model_times_out(monkeypatch):
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return {"loaded_models": ["other-model"]}
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def get(self, url: str):
+            return _Resp()
+
+    clock = {"t": 0.0}
+
+    def fake_monotonic() -> float:
+        return clock["t"]
+
+    async def fake_sleep(seconds: float) -> None:
+        clock["t"] += seconds
+
+    monkeypatch.setattr(pg_streaming.httpx, "AsyncClient", lambda **kwargs: _Client())
+    monkeypatch.setattr(pg_streaming.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(pg_streaming.time, "monotonic", fake_monotonic)
+
+    assert await pg_streaming.wait_for_model(
+        "http://test", "missing", timeout_s=5, poll_interval_s=2.0
+    ) is False
+
+
+@pytest.mark.asyncio
 async def test_stream_chat_tokens_raises_on_http_error(monkeypatch):
     fake_client = _FakeAsyncClient(_FakeStreamResponse([], status_code=500))
 

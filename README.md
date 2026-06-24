@@ -4,7 +4,7 @@
 [![vLLM](https://img.shields.io/badge/inference-vLLM-6E40C9?style=flat-square)](https://docs.vllm.ai)
 [![OpenAI-compatible](https://img.shields.io/badge/API-OpenAI--compatible-412991?style=flat-square&logo=openai&logoColor=white)](https://platform.openai.com/docs/api-reference)
 [![uv](https://img.shields.io/badge/package%20manager-uv-DE5FE9?style=flat-square)](https://docs.astral.sh/uv/)
-[![Tests](https://img.shields.io/badge/tests-255%20passing-22C55E?style=flat-square&logo=pytest&logoColor=white)](./tests)
+[![Tests](https://img.shields.io/badge/tests-261%20passing-22C55E?style=flat-square&logo=pytest&logoColor=white)](./tests)
 [![License: MIT](https://img.shields.io/badge/license-MIT-F59E0B?style=flat-square)](./LICENSE)
 
 InferenceX is a self-hosted LLM inference platform built incrementally on top of vLLM.
@@ -115,25 +115,61 @@ Without a token, startup fails immediately with a short message instead of a Hug
 
 ---
 
-## Quick start (WSL2)
+## Quick start
+
+### Interactive use (server starts after model pick)
+
+`make chat` and `make playground` launch the TUI first. After you choose a model, the
+server starts automatically with `INFERENCE_X_LOADED_MODELS` set to your selection.
+You do **not** need to run `scripts/dev.sh serve` first.
 
 ```bash
-# Terminal 1 — start server with one model
+# Daily-driver: multi-turn chat CLI
+make chat
+```
+
+```bash
+# Benchmark + compare TUI
+make playground
+
+# Side-by-side model comparison (loads both models after launch)
+make playground-compare MODEL_A=qwen2.5-0.5b MODEL_B=tinyllama-chat
+```
+
+While the model loads, a loading screen is shown. Server logs go to:
+
+```bash
+tail -f logs/playground-server.log
+```
+
+### Server-only / API / benchmarks
+
+Use `scripts/dev.sh serve` when you want a headless API server only. This is **required**
+before running benchmarks (`make benchmark`, `make benchmark-all`, `make advise`) or
+direct API calls from a second terminal.
+
+```bash
+# Terminal 1 — start server only (required for benchmarks and direct API access)
 INFERENCE_X_DEFAULT_MODEL=qwen2.5-0.5b ./scripts/dev.sh serve
+```
 
-# Terminal 2 — smoke test
-uv run python scripts/smoke_test.py
-
-# Or call the API directly
+```bash
+# Terminal 2 — API smoke test
 curl -s http://localhost:8000/health
 curl -s http://localhost:8000/v1/models
 curl -s -X POST http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"qwen2.5-0.5b","messages":[{"role":"user","content":"Hello"}]}'
-curl -s http://localhost:8000/v1/benchmark/advise
 ```
 
-### Loading multiple models (for compare mode)
+```bash
+# Benchmarks (server must already be running)
+make benchmark MODEL=qwen2.5-0.5b
+make benchmark-all
+make advise
+```
+
+To load multiple models for compare mode or benchmarks across models:
 
 ```bash
 INFERENCE_X_LOADED_MODELS=qwen2.5-0.5b,tinyllama-chat ./scripts/dev.sh serve
@@ -147,23 +183,25 @@ simultaneously. VRAM is split automatically between them.
 
 ## Commands
 
-Run `make help` for a full list of make targets and common CLI invocations.
+Run `make help` for a full list of make targets.
 
-```bash
-make help              # Show all available commands
+**Interactive (self-contained — no manual server start):**
 
-# Server & playground
-make chat              # Start server + Claude-style chat CLI (daily driver)
-make playground        # Start server + Textual TUI (Chat + Benchmark tabs)
-make playground-compare MODEL_A=qwen2.5-0.5b MODEL_B=tinyllama-chat
-make client            # Batch CLI runner (rich terminal output)
-make stop              # Stop background uvicorn process
+| Command | Description |
+|---------|-------------|
+| `make chat` | Start server + Claude-style chat CLI |
+| `make playground` | Start server + Textual TUI (Chat + Benchmark tabs) |
+| `make playground-compare MODEL_A=… MODEL_B=…` | Compare mode |
+| `make stop` | Stop background uvicorn process |
 
-# Benchmarks (server must be running in another terminal)
-make benchmark MODEL=qwen2.5-0.5b
-make benchmark-all
-make advise
-```
+**Server / API / benchmarks (start `scripts/dev.sh serve` first):**
+
+| Command | Description |
+|---------|-------------|
+| `make benchmark MODEL=<name>` | Run standard prompt suite for one model |
+| `make benchmark-all` | Benchmark qwen2.5-0.5b + tinyllama-chat |
+| `make advise` | Print ranked model advisor report |
+| `make client` | Batch CLI runner (rich terminal output) |
 
 ---
 
@@ -196,10 +234,13 @@ The benchmark runner measures throughput (tokens/sec), time-to-first-token (TTFT
 latency percentiles (p50/p95/p99), and peak VRAM delta per model. The model advisor
 ranks results against your hardware profile (GPU VRAM, CPU, RAM).
 
-**Prerequisites:** server running with the target model loaded.
+**Prerequisites:** a running server with the target model loaded. Start the server
+separately via `./scripts/dev.sh serve` (or restart with `make stop` then serve again).
+`make chat` / `make playground` start their own background server but are not used for
+the benchmark CLI workflow below.
 
 ```bash
-# Terminal 1
+# Terminal 1 — server must be running (not started by make benchmark)
 INFERENCE_X_DEFAULT_MODEL=qwen2.5-0.5b ./scripts/dev.sh serve
 
 # Terminal 2

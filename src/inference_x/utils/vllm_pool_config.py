@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from functools import lru_cache
 from typing import Any
 
@@ -11,6 +12,7 @@ logger = logging.getLogger(__name__)
 _POOL_GPU_HEADROOM = 0.92
 _BYTES_PER_PARAM = 2  # bf16/fp16 weights (vLLM dtype=auto typical)
 _RUNTIME_HEADROOM_GIB = 0.35  # fragmentation, activations, graph capture slack
+_CUDAGRAPH_OVERHEAD_GIB = 0.45  # vLLM 0.21+ CUDA graph memory profiling reserve
 _FREE_VRAM_SAFETY = 0.98
 _DEFAULT_WEIGHT_GIB = 1.5
 _DEFAULT_KV_GIB = 0.4
@@ -59,14 +61,28 @@ def _parameter_count_from_arch(config: dict[str, Any]) -> int:
     return layers * per_layer + vocab * hidden
 
 
+def _params_from_name_or_path(model_path: str) -> int | None:
+    """Parse parameter count hints from repo ids like ``Qwen2.5-0.5B`` or ``opt-125m``."""
+    match = re.search(r"(\d+(?:\.\d+)?)([mMbB])\b", model_path)
+    if not match:
+        return None
+    value = float(match.group(1))
+    unit = match.group(2).lower()
+    if unit == "m":
+        return int(value * 1_000_000)
+    return int(value * 1_000_000_000)
+
+
 def estimate_weight_gib(model_path: str) -> float:
     """Estimate model weight VRAM from HuggingFace config (GiB)."""
     config = _hf_config_dict(model_path)
-    if not config:
-        return _DEFAULT_WEIGHT_GIB
-    params = config.get("num_parameters") or config.get("n_params")
+    params = _params_from_name_or_path(model_path)
+    if params is None and config:
+        params = config.get("num_parameters") or config.get("n_params")
+        if not params:
+            params = _parameter_count_from_arch(config)
     if not params:
-        params = _parameter_count_from_arch(config)
+        return _DEFAULT_WEIGHT_GIB
     return (int(params) * _BYTES_PER_PARAM) / (1024**3)
 
 
@@ -88,11 +104,12 @@ def estimate_kv_cache_gib(model_path: str, max_model_len: int) -> float:
 
 
 def estimate_engine_footprint_gib(model_path: str, max_model_len: int) -> float:
-    """Total GiB budget for weights + KV cache + runtime headroom."""
+    """Total GiB budget for weights + KV cache + vLLM runtime/CUDA-graph overhead."""
     return (
         estimate_weight_gib(model_path)
         + estimate_kv_cache_gib(model_path, max_model_len)
         + _RUNTIME_HEADROOM_GIB
+        + _CUDAGRAPH_OVERHEAD_GIB
     )
 
 
@@ -210,17 +227,28 @@ def _single_engine_utilization(
     model_path = str(config.get("model_path", ""))
     max_model_len = int(config.get("max_model_len") or 2048)
     user_cap = _user_util_cap(config)
-
+    weights_floor = _weights_only_utilization(model_path, total_vram_gib)
     footprint_util = _minimum_utilization(model_path, max_model_len, total_vram_gib)
-    util = footprint_util
 
+    max_from_free: float | None = None
     if free_vram_gib is not None and total_vram_gib > 0:
-        util = min(util, (_FREE_VRAM_SAFETY * free_vram_gib) / total_vram_gib)
+        max_from_free = (_FREE_VRAM_SAFETY * free_vram_gib) / total_vram_gib
+        weight_gib = estimate_weight_gib(model_path)
+        if weight_gib > free_vram_gib * _FREE_VRAM_SAFETY:
+            raise ValueError(
+                f"Only {free_vram_gib:.1f} GiB VRAM free but model {config.get('name')} "
+                f"needs ~{weight_gib:.1f} GiB for weights. Stop other GPU processes "
+                "(orphaned VLLM::EngineCore from prior runs) or choose a smaller model."
+            )
 
+    util = footprint_util
+    if max_from_free is not None:
+        util = min(util, max_from_free)
     if user_cap is not None:
         util = min(util, user_cap)
-
-    util = max(util, _weights_only_utilization(model_path, total_vram_gib))
+    util = max(util, weights_floor)
+    if max_from_free is not None:
+        util = min(util, max_from_free)
     return round(min(util, _POOL_GPU_HEADROOM), 4)
 
 

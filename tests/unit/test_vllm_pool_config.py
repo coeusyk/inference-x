@@ -60,6 +60,36 @@ def test_single_model_computes_utilization(fixed_footprints):
     assert scaled["gpu_memory_utilization"] <= 0.92
 
 
+def test_single_model_respects_free_vram_cap(fixed_footprints):
+    cfg = _qwen_cfg()
+    scaled = scale_model_config_for_pool(
+        cfg,
+        pool_size=1,
+        total_vram_gib=6.0,
+        free_vram_gib=2.4,
+    )
+    util = scaled["gpu_memory_utilization"]
+    assert util * 6.0 <= 2.4 * 0.98 + 0.05
+    assert util >= 0.33
+
+
+def test_single_model_raises_when_free_vram_too_low(fixed_footprints):
+    cfg = _tiny_cfg()
+    with pytest.raises(ValueError, match="VRAM free"):
+        scale_model_config_for_pool(
+            cfg,
+            pool_size=1,
+            total_vram_gib=6.0,
+            free_vram_gib=1.0,
+        )
+
+
+def test_estimate_weight_from_model_name():
+    pool._hf_config_dict.cache_clear()
+    weight = pool.estimate_weight_gib("Qwen/Qwen2.5-0.5B-Instruct")
+    assert 0.7 < weight < 1.2
+
+
 def test_single_model_respects_user_cap(fixed_footprints):
     cfg = {
         "name": "a",
@@ -96,7 +126,7 @@ def test_two_model_pool_uses_weight_aware_share(fixed_footprints):
     )
 
     assert q_scaled["gpu_memory_utilization"] < t_scaled["gpu_memory_utilization"]
-    assert q_scaled["gpu_memory_utilization"] == pytest.approx(0.2, abs=0.02)
+    assert q_scaled["gpu_memory_utilization"] == pytest.approx(0.175, abs=0.03)
     assert t_scaled["gpu_memory_utilization"] >= 0.35
     assert q_scaled["max_model_len"] == 2048
 

@@ -21,10 +21,14 @@ try:
     from streaming import stream_chat_tokens
     from startup_screen import ModelSelectScreen
     from url_validation import validate_base_url
+    from loading_screen import LoadingScreen
+    from server_control import ensure_models_loaded
 except ImportError:
     from playground.streaming import stream_chat_tokens  # type: ignore[no-redef]
     from playground.startup_screen import ModelSelectScreen  # type: ignore[no-redef]
     from playground.url_validation import validate_base_url  # type: ignore[no-redef]
+    from playground.loading_screen import LoadingScreen  # type: ignore[no-redef]
+    from playground.server_control import ensure_models_loaded  # type: ignore[no-redef]
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -152,11 +156,39 @@ class ChatApp(App[None]):
         await self._post_select_init()
 
     async def _post_select_init(self) -> None:
-        """Health check + header update after model is known."""
+        """Ensure server loads the chosen model, then enable input."""
+        input_widget = self.query_one("#input", Input)
+        if not self._model:
+            self.exit()
+            return
+
+        loading = LoadingScreen("Preparing your model…")
+        await self.push_screen(loading)
+        ok = await ensure_models_loaded(
+            self.base_url,
+            [self._model],
+            on_status=loading.set_message,
+            on_log=loading.append_log,
+        )
+        if ok:
+            self.pop_screen()
+        else:
+            try:
+                from log_feed import extract_error_summary
+            except ImportError:
+                from playground.log_feed import extract_error_summary
+
+            loading.finish_failed(extract_error_summary())
+            await loading.wait_for_ack()
+
         await self._sync_health()
+        if not ok:
+            self._render_header(status="Failed to load model — see logs/playground-server.log")
+            return
+
         self._render_header()
-        self.query_one("#input", Input).disabled = False
-        self.query_one("#input", Input).focus()
+        input_widget.disabled = False
+        input_widget.focus()
 
     async def _sync_health(self) -> None:
         try:
@@ -171,19 +203,24 @@ class ChatApp(App[None]):
 
     # ── Header ────────────────────────────────────────────────────────────
 
-    def _render_header(self) -> None:
+    def _render_header(self, *, status: str | None = None) -> None:
         model_str = self._model or "—"
-        health_str = "● healthy" if self._healthy else "● offline"
-        health_class = "healthy" if self._healthy else "offline"
+        if status:
+            health_str = f"● {status}"
+            health_class = "offline" if "not available" in status.lower() else ""
+        else:
+            health_str = "● healthy" if self._healthy else "● offline"
+            health_class = "healthy" if self._healthy else "offline"
         label = self.query_one("#header-bar", Label)
         label.update(
             f"[bold #7aa884]InferenceX Chat[/]  "
             f"[#7f8795]{self.base_url}[/]  "
             f"[#596275]{model_str}[/]  "
-            f"[{('#7aa884' if self._healthy else '#d06c75')}]{health_str}[/]"
+            f"[{('#7aa884' if self._healthy and not status else '#d06c75')}]{health_str}[/]"
         )
         label.remove_class("healthy", "offline")
-        label.add_class(health_class)
+        if health_class:
+            label.add_class(health_class)
 
     # ── Send flow ─────────────────────────────────────────────────────────
 

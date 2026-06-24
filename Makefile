@@ -6,8 +6,8 @@ help:
 	@echo "InferenceX — available commands"
 	@echo ""
 	@echo "Server & playground"
-	@echo "  make chat                    Start server + Claude-style chat CLI"
-	@echo "  make playground              Start server + Textual TUI (Chat tab)"
+	@echo "  make chat                    Chat CLI (server starts after model pick)"
+	@echo "  make playground              Playground TUI (server starts after model pick)"
 	@echo "  make playground-compare      Compare mode: MODEL_A=... MODEL_B=..."
 	@echo "  make client                  Batch CLI (playground/client.py)"
 	@echo "  make stop                    Stop background uvicorn process"
@@ -34,40 +34,21 @@ help:
 	@echo "API endpoints: POST /v1/chat/completions  GET /health  GET /v1/models"
 	@echo "               GET /v1/benchmark/results  GET /v1/benchmark/advise"
 
-# Start server + Claude-style chat CLI
+# Start server + Claude-style chat CLI (server starts after model selection in TUI)
 .PHONY: chat
 chat:
-	@echo "Starting InferenceX server in background..."
-	@mkdir -p logs
-	@VLLM_WORKER_MULTIPROC_METHOD=spawn uv run uvicorn inference_x.api.main:app --host 127.0.0.1 --port 8000 \
-		>> logs/playground-server.log 2>&1 &
-	@echo "  Server logs → tail -f logs/playground-server.log"
-	@echo "Waiting for server to be ready..."
-	@until curl -sf http://localhost:8000/health > /dev/null; do sleep 1; done
-	@echo "Server ready. Launching chat..."
+	@echo "Launching chat (server starts after you pick a model)…"
 	uv run python playground/chat.py --allow-internal
 
 # Start server + Textual playground in one command
 .PHONY: playground
 playground:
-	@echo "Starting InferenceX server in background..."
-	@mkdir -p logs
-	@VLLM_WORKER_MULTIPROC_METHOD=spawn uv run uvicorn inference_x.api.main:app --host 127.0.0.1 --port 8000 \
-		>> logs/playground-server.log 2>&1 &
-	@echo "  Server logs → tail -f logs/playground-server.log"
-	@echo "Waiting for server to be ready..."
-	@until curl -sf http://localhost:8000/health > /dev/null; do sleep 1; done
-	@echo "Server ready. Launching playground..."
+	@echo "Launching playground (server starts after you pick a model)…"
 	uv run python playground/app.py --allow-internal
 
-# Compare mode
+# Compare mode — app loads both models after launch
 .PHONY: playground-compare
 playground-compare:
-	@mkdir -p logs
-	@VLLM_WORKER_MULTIPROC_METHOD=spawn uv run uvicorn inference_x.api.main:app --host 127.0.0.1 --port 8000 \
-		>> logs/playground-server.log 2>&1 &
-	@echo "  Server logs → tail -f logs/playground-server.log"
-	@until curl -sf http://localhost:8000/health > /dev/null; do sleep 1; done
 	uv run python playground/app.py --allow-internal --compare $(MODEL_A) $(MODEL_B)
 
 # Batch CLI runner
@@ -78,7 +59,8 @@ client:
 # Stop background server
 .PHONY: stop
 stop:
-	pkill -f "uvicorn inference_x.api.main:app" || true
+	pkill -f '[u]vicorn inference_x.api.main:app' || true
+	pkill -f 'VLLM::Engine[C]ore' || true
 
 # Benchmark a single model (server must be running)
 .PHONY: benchmark

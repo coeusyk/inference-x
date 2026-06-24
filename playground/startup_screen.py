@@ -7,6 +7,11 @@ from textual.containers import Center, Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Label, RadioButton, RadioSet, Static
 
+try:
+    from model_registry import list_registered_models
+except ImportError:
+    from playground.model_registry import list_registered_models
+
 
 class ModelSelectScreen(ModalScreen[str]):
     """Modal that fetches /v1/models and lets the operator pick one.
@@ -98,23 +103,42 @@ class ModelSelectScreen(ModalScreen[str]):
                     yield Button("Cancel", id="btn-cancel")
 
     async def on_mount(self) -> None:
-        try:
-            async with httpx.AsyncClient(timeout=8.0) as client:
-                resp = await client.get(f"{self.base_url}/v1/models")
-                resp.raise_for_status()
-                data = resp.json()
-                models = [
-                    item["id"]
-                    for item in data.get("data", [])
-                    if isinstance(item, dict) and isinstance(item.get("id"), str)
-                ]
-        except Exception as exc:
-            self._show_fallback(f"Could not reach server: {exc}")
-            return
+        models = list_registered_models()
+        server_ok = False
+        if models:
+            try:
+                async with httpx.AsyncClient(timeout=3.0) as client:
+                    resp = await client.get(f"{self.base_url}/health")
+                    server_ok = resp.status_code == 200
+            except Exception:
+                server_ok = False
+        else:
+            try:
+                async with httpx.AsyncClient(timeout=8.0) as client:
+                    resp = await client.get(f"{self.base_url}/v1/models")
+                    resp.raise_for_status()
+                    data = resp.json()
+                    models = [
+                        item["id"]
+                        for item in data.get("data", [])
+                        if isinstance(item, dict) and isinstance(item.get("id"), str)
+                    ]
+                    server_ok = True
+            except Exception as exc:
+                self._show_fallback(f"Could not load models: {exc}")
+                return
 
         if not models:
-            self._show_fallback("Server returned no models.")
+            self._show_fallback("No models found in config/models.yaml.")
             return
+
+        subtitle = self.query_one("#select-subtitle", Label)
+        if server_ok:
+            subtitle.update(f"{self.base_url}  ·  server running")
+        else:
+            subtitle.update(
+                f"{self.base_url}  ·  server will start after you choose a model"
+            )
 
         self._models = models
         loading = self.query_one("#select-loading", Static)
@@ -124,7 +148,6 @@ class ModelSelectScreen(ModalScreen[str]):
         for model in models:
             await radio.mount(RadioButton(model))
 
-        # Pre-select initial_model if provided, otherwise first entry.
         if self.initial_model and self.initial_model in models:
             self._selected_index = models.index(self.initial_model)
         else:

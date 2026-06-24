@@ -17,10 +17,14 @@ try:
     from url_validation import validate_base_url
     from startup_screen import ModelSelectScreen
     from benchmark_tab import BenchmarkTab
+    from loading_screen import LoadingScreen
+    from server_control import ensure_models_loaded
 except ImportError:
     from playground.url_validation import validate_base_url
     from playground.startup_screen import ModelSelectScreen
     from playground.benchmark_tab import BenchmarkTab
+    from playground.loading_screen import LoadingScreen
+    from playground.server_control import ensure_models_loaded
 
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -286,9 +290,9 @@ class InferenceXApp(App[None]):
         yield Static(self._help_text(), id="help-overlay", classes="hidden")
 
     async def on_mount(self) -> None:
-        self.query_one("#prompt-input", TextArea).placeholder = (
-            "Enter a prompt and press Ctrl+Enter to send…"
-        )
+        prompt_input = self.query_one("#prompt-input", TextArea)
+        prompt_input.placeholder = "Enter a prompt and press Ctrl+Enter to send…"
+        prompt_input.disabled = True
         if not self.compare:
             self.query_one("#panel-b", ResponsePanel).display = False
 
@@ -298,7 +302,7 @@ class InferenceXApp(App[None]):
         self.run_worker(self._startup_flow(), exclusive=True)
 
     async def _startup_flow(self) -> None:
-        """Model selection screen + initial server sync."""
+        """Model selection screen + server start for chosen model(s)."""
         if not self.compare:
             selected = await self.push_screen_wait(
                 ModelSelectScreen(
@@ -306,9 +310,11 @@ class InferenceXApp(App[None]):
                     initial_model=self.models[0] if self.models else None,
                 )
             )
-            if selected:
-                self.models = [selected]
-                self.current_model_index = 0
+            if not selected:
+                self.exit()
+                return
+            self.models = [selected]
+            self.current_model_index = 0
         else:
             self.query_one("#model-selector", Select).display = False
             compare_label = self.query_one("#model-compare-label", Static)
@@ -317,10 +323,41 @@ class InferenceXApp(App[None]):
                 f"[bold]{self.compare[0]}[/bold] vs [bold]{self.compare[1]}[/bold]"
             )
 
+        models_to_load = list(self.compare) if self.compare else [self._active_model()]
+
+        loading = LoadingScreen("Preparing your model…")
+        await self.push_screen(loading)
+        ok = await ensure_models_loaded(
+            self.base_url,
+            models_to_load,
+            on_status=loading.set_message,
+            on_log=loading.append_log,
+        )
+        if ok:
+            self.pop_screen()
+        else:
+            try:
+                from log_feed import extract_error_summary
+            except ImportError:
+                from playground.log_feed import extract_error_summary
+
+            loading.finish_failed(extract_error_summary())
+            await loading.wait_for_ack()
+
         await self._refresh_server_state()
         self._render_header()
         self._render_model_selector()
+
+        if not ok:
+            self._set_status(
+                "Failed to load selected model(s) — see logs/playground-server.log",
+                kind="error",
+            )
+            return
+
+        self.query_one("#prompt-input", TextArea).disabled = False
         self._set_status("Ready", kind="success")
+        self.query_one("#benchmark-panel", BenchmarkTab).reload_data()
 
     async def _refresh_server_state(self) -> None:
         try:
@@ -401,6 +438,7 @@ class InferenceXApp(App[None]):
         self.in_flight = True
         prompt_input = self.query_one("#prompt-input", TextArea)
         prompt_input.disabled = True
+        prompt_input.load_text("")
         self._set_status("Streaming…", kind="progress")
 
         await self._refresh_server_state()
