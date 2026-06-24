@@ -1,0 +1,80 @@
+/* ── Base ─────────────────────────────────────────────────────────────── */
+
+Screen {
+    background: #0f1117;
+    color: #d7dce5;
+}
+
+/* ── Header ──────────────────────────────────────────────────────────── */
+
+#header-bar {
+    height: 1;
+    padding: 0 1;
+    background: #161a23;
+    color: #7f8795;
+}
+
+#header-bar.healthy {
+    color: #7aa884;
+}
+
+#header-bar.offline {
+    color: #d06c75;
+}
+
+/* ── History scroll ──────────────────────────────────────────────────── */
+
+#history {
+    height: 1fr;
+    padding: 0 1;
+}
+
+/* ── Message bubbles ─────────────────────────────────────────────────── */
+
+.bubble {
+    margin: 1 0 0 0;
+    width: 100%;
+}
+
+.bubble-user {
+    align: right top;
+}
+
+.bubble-assistant {
+    align: left top;
+}
+
+/* User bubble — plain dim text, right-aligned */
+.bubble-text-user {
+    width: auto;
+    max-width: 80%;
+    padding: 0 1;
+    color: #7f8795;
+    text-align: right;
+}
+
+/* Assistant bubble — full-width markdown */
+.bubble-markdown {
+    width: 100%;
+    color: #d7dce5;
+    padding: 0 0 0 1;
+}
+
+/* ── Input bar ───────────────────────────────────────────────────────── */
+
+#input {
+    height: 3;
+    margin: 0 1 1 1;
+    border: round #343b49;
+    background: #161a23;
+    color: #c9d1e3;
+}
+
+#input:focus {
+    border: round #7aa884;
+}
+
+#input.-disabled {
+    border: round #343b49;
+    color: #596275;
+}

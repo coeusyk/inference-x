@@ -6,6 +6,7 @@ help:
 	@echo "InferenceX — available commands"
 	@echo ""
 	@echo "Server & playground"
+	@echo "  make chat                    Start server + Claude-style chat CLI"
 	@echo "  make playground              Start server + Textual TUI (Chat tab)"
 	@echo "  make playground-compare      Compare mode: MODEL_A=... MODEL_B=..."
 	@echo "  make client                  Batch CLI (playground/client.py)"
@@ -24,6 +25,7 @@ help:
 	@echo ""
 	@echo "Examples"
 	@echo "  INFERENCE_X_LOADED_MODELS=qwen2.5-0.5b,tinyllama-chat ./scripts/dev.sh serve"
+	@echo "  make chat"
 	@echo "  make playground"
 	@echo "  make benchmark MODEL=qwen2.5-0.5b"
 	@echo "  uv run python playground/app.py --allow-internal"
@@ -32,11 +34,27 @@ help:
 	@echo "API endpoints: POST /v1/chat/completions  GET /health  GET /v1/models"
 	@echo "               GET /v1/benchmark/results  GET /v1/benchmark/advise"
 
+# Start server + Claude-style chat CLI
+.PHONY: chat
+chat:
+	@echo "Starting InferenceX server in background..."
+	@mkdir -p logs
+	@VLLM_WORKER_MULTIPROC_METHOD=spawn uv run uvicorn inference_x.api.main:app --host 127.0.0.1 --port 8000 \
+		>> logs/playground-server.log 2>&1 &
+	@echo "  Server logs → tail -f logs/playground-server.log"
+	@echo "Waiting for server to be ready..."
+	@until curl -sf http://localhost:8000/health > /dev/null; do sleep 1; done
+	@echo "Server ready. Launching chat..."
+	uv run python playground/chat.py --allow-internal
+
 # Start server + Textual playground in one command
 .PHONY: playground
 playground:
 	@echo "Starting InferenceX server in background..."
-	VLLM_WORKER_MULTIPROC_METHOD=spawn uv run uvicorn inference_x.api.main:app --host 127.0.0.1 --port 8000 &
+	@mkdir -p logs
+	@VLLM_WORKER_MULTIPROC_METHOD=spawn uv run uvicorn inference_x.api.main:app --host 127.0.0.1 --port 8000 \
+		>> logs/playground-server.log 2>&1 &
+	@echo "  Server logs → tail -f logs/playground-server.log"
 	@echo "Waiting for server to be ready..."
 	@until curl -sf http://localhost:8000/health > /dev/null; do sleep 1; done
 	@echo "Server ready. Launching playground..."
@@ -45,7 +63,10 @@ playground:
 # Compare mode
 .PHONY: playground-compare
 playground-compare:
-	uv run uvicorn inference_x.api.main:app --host 127.0.0.1 --port 8000 &
+	@mkdir -p logs
+	@VLLM_WORKER_MULTIPROC_METHOD=spawn uv run uvicorn inference_x.api.main:app --host 127.0.0.1 --port 8000 \
+		>> logs/playground-server.log 2>&1 &
+	@echo "  Server logs → tail -f logs/playground-server.log"
 	@until curl -sf http://localhost:8000/health > /dev/null; do sleep 1; done
 	uv run python playground/app.py --allow-internal --compare $(MODEL_A) $(MODEL_B)
 

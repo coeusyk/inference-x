@@ -48,38 +48,7 @@ def _find_venv_cuda_home() -> Path | None:
 def ensure_vllm_process_env() -> None:
     """Set vLLM worker/process env before any vLLM import (avoids override warnings)."""
     # vLLM requires spawn on Linux/WSL; set early so it is not logged as an override.
-    prior = os.environ.get("VLLM_WORKER_MULTIPROC_METHOD")
     os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
-    # #region agent log
-    try:
-        import json
-        import time
-
-        with open(
-            "/home/coeusyk/projects/inference-x/.cursor/debug-ba81fc.log",
-            "a",
-            encoding="utf-8",
-        ) as _df:
-            _df.write(
-                json.dumps(
-                    {
-                        "sessionId": "ba81fc",
-                        "runId": "pre-fix",
-                        "hypothesisId": "H1",
-                        "location": "cuda_env.py:ensure_vllm_process_env",
-                        "message": "vLLM worker multiprocessing env",
-                        "data": {
-                            "prior": prior,
-                            "effective": os.environ.get("VLLM_WORKER_MULTIPROC_METHOD"),
-                        },
-                        "timestamp": int(time.time() * 1000),
-                    }
-                )
-                + "\n"
-            )
-    except OSError:
-        pass
-    # #endregion
 
 
 def ensure_cuda_home() -> str | None:

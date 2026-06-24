@@ -4,7 +4,7 @@
 [![vLLM](https://img.shields.io/badge/inference-vLLM-6E40C9?style=flat-square)](https://docs.vllm.ai)
 [![OpenAI-compatible](https://img.shields.io/badge/API-OpenAI--compatible-412991?style=flat-square&logo=openai&logoColor=white)](https://platform.openai.com/docs/api-reference)
 [![uv](https://img.shields.io/badge/package%20manager-uv-DE5FE9?style=flat-square)](https://docs.astral.sh/uv/)
-[![Tests](https://img.shields.io/badge/tests-249%20passing-22C55E?style=flat-square&logo=pytest&logoColor=white)](./tests)
+[![Tests](https://img.shields.io/badge/tests-255%20passing-22C55E?style=flat-square&logo=pytest&logoColor=white)](./tests)
 [![License: MIT](https://img.shields.io/badge/license-MIT-F59E0B?style=flat-square)](./LICENSE)
 
 InferenceX is a self-hosted LLM inference platform built incrementally on top of vLLM.
@@ -153,6 +153,7 @@ Run `make help` for a full list of make targets and common CLI invocations.
 make help              # Show all available commands
 
 # Server & playground
+make chat              # Start server + Claude-style chat CLI (daily driver)
 make playground        # Start server + Textual TUI (Chat + Benchmark tabs)
 make playground-compare MODEL_A=qwen2.5-0.5b MODEL_B=tinyllama-chat
 make client            # Batch CLI runner (rich terminal output)

@@ -282,3 +282,17 @@ Use this document to capture non-obvious design decisions as the project evolves
 - Context: The playground needed a better first-run experience: the operator had to know a model name before launching. The UI also lacked polish for model switching, response rendering, and quick-glance stats.
 - Decision: Add `playground/startup_screen.py` — a `ModalScreen[str]` that fetches `/v1/models` on mount and presents a `RadioSet` for selection before the main TUI renders. On error or empty list, falls back to a manual `Input`. Six UI changes: (1) startup model-select screen pushed via `push_screen_wait` in `on_mount`; (2) response area already uses `Markdown` — confirmed correct; (3) header replaced with `Horizontal` containing title / URL / health `Label` widgets and a `Rule` separator; (4) model selector in prompt bar replaced with Textual `Select` widget; (5) status bar extended with per-request token-count and latency columns; (6) empty-state message in each `ResponsePanel` hidden when first token arrives, shown on clear. `--model` flag retained as pre-selection hint for the startup screen. Tab key removed from `cycle_model` binding to avoid focus-navigation conflict.
 - Consequences: Launching without `--compare` now requires an interactive model selection step; `--compare` skips the screen. No env-var reading for model selection in the playground (the `--model` flag and server-provided model list are the only sources). `test_app.py` unchanged — the startup screen only runs inside `app.run()`.
+
+### DEC-029
+- Date: 2026-06-24
+- Status: accepted
+- Context: The Claude-style chat CLI uses `Markdown.get_stream()` / `MarkdownStream` for efficient token rendering. The prior `textual>=0.60` constraint predates Textual 1.0 versioning and would allow 0.x releases that lack this API.
+- Decision: Pin `textual>=8.2,<9` in `pyproject.toml`.
+- Consequences: Playground TUIs require Textual 8.x. Lockfile resolves to 8.2.7 in the current environment.
+
+### DEC-030
+- Date: 2026-06-24
+- Status: accepted
+- Context: `make playground` and `make chat` start uvicorn in the background on the same TTY as the Textual alternate-screen UI. Server INFO/WARNING logs paint over the TUI after launch.
+- Decision: Redirect background uvicorn stdout/stderr to `logs/playground-server.log` in Makefile targets only (`playground`, `playground-compare`, `chat`). No server-side env hook or logging.yaml changes — `./scripts/dev.sh serve` keeps console logging.
+- Consequences: Operators tail `logs/playground-server.log` for server diagnostics during TUI sessions. Foreground dev server behavior unchanged.

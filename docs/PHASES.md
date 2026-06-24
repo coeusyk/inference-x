@@ -81,6 +81,7 @@ Exit criteria:
 
 Deliverables:
 - Textual-based playground (`playground/app.py`)
+- Claude-style chat CLI (`playground/chat.py`) with multi-turn history and `make chat`
 - ModelSelectScreen — interactive model picker on startup (replaces env var)
 - Side-by-side model compare mode
 - Markdown rendering for model responses
@@ -113,7 +114,7 @@ Deliverables:
 Exit criteria:
 - [x] Security audit findings H1-H5 from audit report resolved (DEC-SEC-01: one CVE in transitive dep, accepted)
 - [x] Deferred items (auth, rate limiting, streaming timeout) documented in DECISIONS.md (DEC-DEFER-01/02/03)
-- [x] All unit tests pass (249/249 as of 2026-06-24)
+- [x] All unit tests pass (255/255 as of 2026-06-24)
 - [x] README covers setup from scratch on a fresh WSL2 machine
 - [x] MIT LICENSE present at repo root
 

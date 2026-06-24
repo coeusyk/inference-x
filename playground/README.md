@@ -2,9 +2,12 @@
 
 Python playground tools for interacting with, comparing, and benchmarking
 InferenceX models. The batch CLI uses [rich](https://github.com/Textualize/rich)
-for polished terminal output. The interactive TUI uses
-[Textual](https://github.com/Textualize/textual) with **Chat** and **Benchmark**
-tabs and streams tokens live over SSE.
+for polished terminal output. Two Textual TUIs are available:
+
+- **`playground/chat.py`** — Claude-style daily-driver chat (multi-turn history, bottom input, `make chat`)
+- **`playground/app.py`** — benchmark/compare tool (Chat tab + Benchmark tab, `make playground`)
+
+Both stream tokens live over SSE.
 
 Run `make help` from the repo root for all available commands.
 
@@ -24,10 +27,14 @@ Run `make help` from the repo root for all available commands.
 ## Quick start
 
 ```bash
-# From the repo root — easiest path
+# Daily-driver chat CLI (recommended)
+make chat
+
+# Full playground (benchmark + compare tabs)
 make playground
 
 # Or manually:
+uv run python playground/chat.py --allow-internal
 uv run python playground/app.py --allow-internal
 
 # Pre-select a model on the startup screen
@@ -65,7 +72,28 @@ uv run python playground/client.py --list-models
 
 ---
 
-## Interactive Textual app
+## Chat CLI (`playground/chat.py`)
+
+Daily-driver Claude-style interface with scrollable multi-turn history and a bottom input bar.
+
+```bash
+make chat
+# or
+uv run python playground/chat.py --allow-internal
+uv run python playground/chat.py --allow-internal --model qwen2.5-0.5b
+```
+
+### Shortcuts
+
+- `Enter` — send message
+- `Ctrl+N` — new conversation (clears history)
+- `Ctrl+C` — quit
+
+Server logs from `make chat` are written to `logs/playground-server.log` so they do not overlap the TUI.
+
+---
+
+## Interactive Textual app (`playground/app.py`)
 
 Launch:
 

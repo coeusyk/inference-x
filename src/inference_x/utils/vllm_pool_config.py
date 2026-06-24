@@ -333,45 +333,6 @@ def scale_model_config_for_pool(
             scaled["max_model_len"] = min(int(scaled["max_model_len"]), 2048)
 
     scaled["gpu_memory_utilization"] = util
-    # #region agent log
-    try:
-        import json
-        import time
-
-        model_path = str(scaled.get("model_path", ""))
-        with open(
-            "/home/coeusyk/projects/inference-x/.cursor/debug-ba81fc.log",
-            "a",
-            encoding="utf-8",
-        ) as _df:
-            _df.write(
-                json.dumps(
-                    {
-                        "sessionId": "ba81fc",
-                        "runId": "pre-fix",
-                        "hypothesisId": "H2",
-                        "location": "vllm_pool_config.py:scale_model_config_for_pool",
-                        "message": "computed GPU memory settings",
-                        "data": {
-                            "model": scaled.get("name"),
-                            "pool_size": pool_size,
-                            "engine_index": engine_index,
-                            "utilization": util,
-                            "weight_gib": estimate_weight_gib(model_path),
-                            "kv_gib": estimate_kv_cache_gib(
-                                model_path, int(scaled.get("max_model_len") or 2048)
-                            ),
-                            "total_vram_gib": total_vram_gib,
-                            "free_vram_gib": free_vram_gib,
-                        },
-                        "timestamp": int(time.time() * 1000),
-                    }
-                )
-                + "\n"
-            )
-    except OSError:
-        pass
-    # #endregion
     logger.info(
         "GPU memory for model=%s: utilization=%.3f (total=%.1f GiB, free=%s)",
         scaled.get("name"),
