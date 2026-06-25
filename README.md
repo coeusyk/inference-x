@@ -4,7 +4,7 @@
 [![vLLM](https://img.shields.io/badge/inference-vLLM-6E40C9?style=flat-square)](https://docs.vllm.ai)
 [![OpenAI-compatible](https://img.shields.io/badge/API-OpenAI--compatible-412991?style=flat-square&logo=openai&logoColor=white)](https://platform.openai.com/docs/api-reference)
 [![uv](https://img.shields.io/badge/package%20manager-uv-DE5FE9?style=flat-square)](https://docs.astral.sh/uv/)
-[![Tests](https://img.shields.io/badge/tests-273%20passing-22C55E?style=flat-square&logo=pytest&logoColor=white)](./tests)
+[![Tests](https://img.shields.io/badge/tests-286%20passing-22C55E?style=flat-square&logo=pytest&logoColor=white)](./tests)
 [![License: MIT](https://img.shields.io/badge/license-MIT-F59E0B?style=flat-square)](./LICENSE)
 
 InferenceX is a self-hosted LLM inference platform built incrementally on top of vLLM.
@@ -138,7 +138,9 @@ make playground-compare MODEL_A=qwen2.5-0.5b MODEL_B=tinyllama-chat
 ```
 
 While the model loads, a loading screen shows startup phases, step progress, and a
-live tail of `logs/playground-server.log`. Server logs also go to:
+live tail of `logs/playground-server.log`. On failure, the banner and log feed show an
+actionable error summary (e.g. insufficient VRAM) parsed from the server log — not a
+generic fallback. Server logs also go to:
 
 ```bash
 tail -f logs/playground-server.log
@@ -233,8 +235,15 @@ Key environment variables:
 ## Benchmark suite
 
 The benchmark runner measures throughput (tokens/sec), time-to-first-token (TTFT),
-latency percentiles (p50/p95/p99), and peak VRAM delta per model. The model advisor
-ranks results against your hardware profile (GPU VRAM, CPU, RAM).
+latency percentiles (p50/p95/p99), and **VRAM footprint** per model (`peak_vram_delta_gb`:
+total GPU memory minus the minimum free VRAM observed before and after the run). This
+works when the model is already loaded on the server — the common workflow. Each result
+JSON also stores a `hardware` snapshot (GPU name, VRAM total/free, CPU, RAM) from run time.
+
+The model advisor ranks results against your **current** hardware profile. It skips
+results whose saved `hardware` does not match the current GPU (with a warning) and emits
+a soft warning for legacy results that lack a `hardware` field — re-run
+`make benchmark MODEL=…` to refresh them.
 
 **Prerequisites:** a running server with the target model loaded. Start the server
 separately via `./scripts/dev.sh serve` (or restart with `make stop` then serve again).
@@ -248,7 +257,7 @@ INFERENCE_X_DEFAULT_MODEL=qwen2.5-0.5b ./scripts/dev.sh serve
 # Terminal 2
 make benchmark MODEL=qwen2.5-0.5b    # writes docs/benchmarks/results-<model>-<timestamp>.json
 make benchmark-all                   # benchmarks qwen2.5-0.5b and tinyllama-chat
-make advise                          # ranked recommendation table in terminal
+make advise                          # ranked table + WARNING lines for skipped/legacy results
 ```
 
 Optional hardware profiling deps (improves VRAM accuracy on WSL2):
@@ -262,7 +271,7 @@ uv sync --extra hardware   # installs nvidia-ml-py + psutil
 | Endpoint | Description |
 |----------|-------------|
 | `GET /v1/benchmark/results` | Stored benchmark results + current hardware profile |
-| `GET /v1/benchmark/advise` | Ranked advisor output + hardware profile |
+| `GET /v1/benchmark/advise` | Ranked advisor output, current hardware, and `warnings` |
 
 Benchmarks run from the CLI (`make benchmark`, `make advise`) or API — not from the
 compare playground TUI. Use `make chat` for daily single-model chat and `make playground`

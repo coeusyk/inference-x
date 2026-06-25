@@ -120,8 +120,9 @@ uv run python playground/app.py --allow-internal
 
 1. **Model selection screen** — pick two models from `config/models.yaml` (or the
    server registry when it is already running). Continue loads both models.
-2. **Loading screen** — phase title, step indicators (Server → Model), and live tail of
-   `logs/playground-server.log` while the server starts.
+2. **Loading screen** — phase title, step indicators (Server → Model → Ready), and live tail of
+   `logs/playground-server.log` while the server starts. On failure, an error banner shows a
+   parsed summary from the server log (VRAM OOM, vLLM errors, etc.).
 3. **Compare UI** — stream the same prompt to both models side-by-side with Markdown
    rendering; per-panel titles show elapsed time and state; usage footers show token
    counts on completion.
@@ -142,8 +143,11 @@ is up (or after `make playground` has started it):
 
 ```bash
 make benchmark MODEL=qwen2.5-0.5b
-make advise
+make advise    # prints WARNING: lines for skipped or legacy results
 ```
+
+Each benchmark JSON includes a `hardware` snapshot. Re-run benchmarks after changing GPU
+or moving result files between machines so `make advise` ranks against matching hardware.
 
 ---
 

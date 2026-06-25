@@ -63,6 +63,56 @@ def test_extract_error_summary_from_tail(tmp_path: Path):
     assert "Cannot fit model on GPU" in summary
 
 
+def test_extract_error_summary_vllm_kv_cache_negative(tmp_path: Path):
+    log = tmp_path / "server.log"
+    log.write_text(
+        "\n".join(
+            [
+                "2026-06-24 08:00:01 [INFO] inference_x: starting",
+                "(EngineCore pid=1) ERROR 06-24 08:10:40 [gpu_worker.py:99] "
+                "Available KV cache memory: -0.12 GiB",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    summary = lf.extract_error_summary(log)
+    assert "No KV cache memory" in summary
+    assert "see log lines above" not in summary
+
+
+def test_extract_error_summary_insufficient_gpu_memory_line(tmp_path: Path):
+    log = tmp_path / "server.log"
+    log.write_text(
+        "2026-06-24 08:19:14 [CRITICAL] inference_x.api.main: "
+        "Startup initialization failed: Insufficient GPU memory to start qwen2.5-0.5b.\n",
+        encoding="utf-8",
+    )
+    summary = lf.extract_error_summary(log)
+    assert "Insufficient GPU memory" in summary
+
+
+def test_extract_error_summary_fallback_message(tmp_path: Path):
+    log = tmp_path / "server.log"
+    log.write_text("2026-06-24 08:00:01 [INFO] inference_x: still starting\n", encoding="utf-8")
+    summary = lf.extract_error_summary(log)
+    assert summary == "Startup failed — see logs/playground-server.log for details"
+
+
+def test_extract_error_summary_timeout_on_loading_weights(tmp_path: Path):
+    log = tmp_path / "server.log"
+    log.write_text(
+        "\n".join(
+            [
+                "2026-06-24 08:00:01 [INFO] inference_x: starting",
+                "2026-06-24 08:00:04 [INFO] inference_x.engines: Loading weights for model=tiny",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    summary = lf.extract_error_summary(log)
+    assert "timed out" in summary.lower()
+
+
 def test_prepare_log_session_overwrites(tmp_path: Path):
     log = tmp_path / "server.log"
     log.write_text("stale content\n", encoding="utf-8")

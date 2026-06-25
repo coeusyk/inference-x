@@ -34,6 +34,7 @@ class BenchmarkResult(BaseModel):
     p99_latency_ms: float = 0.0
     mean_throughput_tps: float = 0.0
     peak_vram_delta_gb: float = 0.0
+    hardware: Optional[HardwareProfile] = None
 
 
 class AdvisorResult(BaseModel):
@@ -44,3 +45,8 @@ class AdvisorResult(BaseModel):
     ttft_ms: float
     vram_gb: float
     recommendation_str: str
+
+
+class AdvisorReport(BaseModel):
+    ranked: list[AdvisorResult]
+    warnings: list[str] = Field(default_factory=list)

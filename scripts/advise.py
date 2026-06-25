@@ -17,7 +17,7 @@ _src = Path(__file__).parent.parent / "src"
 if str(_src) not in sys.path:
     sys.path.insert(0, str(_src))
 
-from inference_x.benchmarks.advisor import ModelAdvisor
+from inference_x.benchmarks.advisor import ModelAdvisor, cold_start_margin
 from inference_x.benchmarks.hardware import profile_hardware
 from inference_x.benchmarks.storage import ResultStore
 
@@ -38,12 +38,23 @@ def main() -> None:
 
     hardware = profile_hardware()
     advisor = ModelAdvisor()
-    ranked = advisor.rank(hardware, list(latest.values()))
+    report = advisor.rank(hardware, list(latest.values()))
+    ranked = report.ranked
+
+    if report.warnings:
+        print("Warnings:", file=sys.stderr)
+        for warning in report.warnings:
+            print(f"  WARNING: {warning}", file=sys.stderr)
+        print(file=sys.stderr)
 
     print("=== InferenceX Model Advisor ===\n")
     print(f"Hardware: {hardware.gpu_name or 'CPU only'}")
     if hardware.has_gpu:
         print(f"  VRAM: {hardware.vram_free_gb:.1f} GB free / {hardware.vram_total_gb:.1f} GB total")
+        print(
+            f"  Cold-start margin: {cold_start_margin():.2f}× "
+            f"(override via INFERENCEX_COLD_START_MARGIN)"
+        )
     print(f"  CPU cores: {hardware.cpu_cores}  RAM: {hardware.ram_total_gb:.1f} GB\n")
 
     print(f"{'Rank':<5} {'Model':<25} {'Score':<8} {'Viable':<8} {'Recommendation'}")

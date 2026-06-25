@@ -88,7 +88,8 @@ Deliverables:
 - **Compare playground** — `playground/app.py` + `make playground` (two models side-by-side)
 - **Batch CLI** — `playground/client.py` (rich terminal output, compare across servers)
 - `ModelSelectScreen` — single-model (`chat.py`) or two-model compare (`app.py`) picker
-- `LoadingScreen` — phase titles, step progress, live tail of `logs/playground-server.log`
+- `LoadingScreen` — phase titles, step progress, live tail of `logs/playground-server.log`;
+  actionable error summary on startup failure
 - Markdown rendering for streamed responses
 - Per-panel usage footers in compare mode
 
@@ -141,14 +142,18 @@ tinyllama-chat on their setup. InferenceX should tell them.
 **6.1 — Benchmark runner** (`scripts/benchmark.py`)
 - Runs a fixed prompt suite against one or more loaded models
 - Measures: tokens/sec (throughput), time-to-first-token (TTFT), p50/p95/p99 latency,
-  peak VRAM usage (via `nvidia-smi` or `pynvml`), requests/sec at concurrency 1/4/8
+  VRAM footprint (`peak_vram_delta_gb` = total − min free VRAM before/after; works when
+  the model is already loaded on the server)
 - Saves results to `docs/benchmarks/results-{model}-{date}.json`
 - Invoked via `make benchmark MODEL=qwen2.5-0.5b` or `make benchmark-all`
 
 **6.2 — Benchmark results schema** (`src/inference_x/benchmarks/schemas.py`)
-- `BenchmarkResult` dataclass: model name, hardware snapshot, prompt suite id,
-  metrics dict, timestamp
+- `BenchmarkResult`: model name, prompt suite id, per-prompt metrics, timestamp,
+  `peak_vram_delta_gb`, optional `hardware` snapshot (`HardwareProfile`)
+- `AdvisorReport`: ranked `AdvisorResult` list plus `warnings` (hardware mismatch skips,
+  legacy results without `hardware`)
 - Hardware snapshot captured at run time: GPU name, VRAM total/free, CPU cores, RAM total
+- Legacy JSON without `hardware` deserialises with `hardware: null` (no migration)
 
 **6.3 — Hardware profiler** (`src/inference_x/benchmarks/hardware.py`)
 - Detects GPU via `pynvml` or falls back to `nvidia-smi` subprocess
@@ -157,16 +162,19 @@ tinyllama-chat on their setup. InferenceX should tell them.
 
 **6.4 — Model advisor** (`src/inference_x/benchmarks/advisor.py`)
 - Takes a `HardwareProfile` and a set of `BenchmarkResult` records
+- Skips results whose saved `hardware` mismatches current GPU/VRAM (warning only)
+- Soft-warns on legacy results with `hardware: null` but still ranks them
 - Applies a scoring function across: throughput, TTFT, VRAM headroom, quantization fit
-- Returns a ranked list with plain-language reasoning per model:
+- Returns `AdvisorReport` with ranked list and plain-language reasoning per model:
   `"qwen2.5-0.5b is fastest on your hardware (42 tok/s, 3.1GB VRAM). Use for chat."`
   `"llama3-8b requires 7.2GB VRAM — exceeds your free headroom of 5.1GB. Skip for now."`
 - Does not make network calls; advice is purely local from observed results
 
 **6.5 — Advisor CLI surface**
-- `make advise` — runs advisor against latest benchmark results, prints report to terminal
+- `make advise` — runs advisor against latest benchmark results; prints `WARNING:` lines
+  to stderr when results are skipped or lack hardware provenance
 - `GET /v1/benchmark/results` — returns stored results as JSON (read-only)
-- `GET /v1/benchmark/advise` — returns advisor output as JSON
+- `GET /v1/benchmark/advise` — returns advisor output as JSON (includes `warnings`)
 
 **6.6 — Benchmark CLI and API** (playground TUI integration removed 2026-06)
 - `make benchmark` / `make benchmark-all` — run prompt suite via `scripts/benchmark.py`
@@ -195,6 +203,11 @@ tinyllama-chat on their setup. InferenceX should tell them.
 - [x] Benchmark CLI and API routes implemented; playground uses CLI only (no Benchmark tab)
 - [x] Results stored in `docs/benchmarks/` for reproducible comparison
 - [x] Benchmark methodology documented in DECISIONS.md or README where applicable
+
+**Post-phase note (2026-06-25):** Benchmark results now persist `hardware` at run time;
+advisor skips cross-machine mismatches. `peak_vram_delta_gb` measures VRAM footprint
+(not a naive before−after free-VRAM delta, which read 0 when the model was pre-loaded).
+Loading-screen failures surface actionable errors from `logs/playground-server.log`.
 
 ---
 

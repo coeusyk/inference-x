@@ -110,6 +110,8 @@ def _shorten_vllm_message(message: str, *, max_len: int = 66) -> str | None:
         return "WSL detected (pin_memory off)"
     if "No available memory for the cache blocks" in message:
         return "No KV cache memory — increase GPU budget"
+    if "Free memory on device" in message:
+        return message.split("Free memory on device", 1)[-1].strip()[:66] or "Insufficient GPU memory"
     return None
 
 
@@ -158,8 +160,16 @@ def format_log_line(line: str, *, max_len: int = 66) -> str | None:
     return None
 
 
-def extract_error_summary(log_path: Path = DEFAULT_LOG_PATH, *, tail_lines: int = 80) -> str:
+def extract_error_summary(log_path: Path = DEFAULT_LOG_PATH, *, tail_lines: int = 120) -> str:
     """Return a one-line error summary from the end of the server log."""
+    _fallback = "Startup failed — see logs/playground-server.log for details"
+    _vllm_failure_patterns = (
+        "No KV cache",
+        "Free memory on device",
+        "No available memory",
+        "Application startup failed",
+    )
+
     if not log_path.is_file():
         return "Server log not found — check logs/playground-server.log"
 
@@ -168,23 +178,75 @@ def extract_error_summary(log_path: Path = DEFAULT_LOG_PATH, *, tail_lines: int 
     except OSError:
         return "Could not read server log"
 
-    for line in reversed(lines[-tail_lines:]):
+    tail = lines[-tail_lines:]
+
+    for line in reversed(tail):
         structured = _STRUCTURED_RE.match(line.strip())
         if structured and structured.group(1) in ("CRITICAL", "ERROR"):
             rest = structured.group(2)
             _, _, message = rest.partition(": ")
-            if "Startup initialization failed:" in (message or rest):
-                return (message or rest).split("Startup initialization failed:", 1)[-1].strip()[:200]
-            return (message or rest)[:200]
+            msg = message or rest
+            if "Startup initialization failed:" in msg:
+                return msg.split("Startup initialization failed:", 1)[-1].strip()[:200]
 
-    for line in reversed(lines[-tail_lines:]):
+    for line in reversed(tail):
+        structured = _STRUCTURED_RE.match(line.strip())
+        if structured and structured.group(1) in ("CRITICAL", "ERROR"):
+            rest = structured.group(2)
+            _, _, message = rest.partition(": ")
+            msg = message or rest
+            short = _shorten_logger_message(msg, max_len=200)
+            if short:
+                return short[:200]
+            return msg[:200]
+
+    for line in reversed(tail):
         stripped = line.strip()
         if "RuntimeError:" in stripped:
             return stripped.split("RuntimeError:", 1)[-1].strip()[:200]
         if "ValueError:" in stripped:
             return stripped.split("ValueError:", 1)[-1].strip()[:200]
+        if "Insufficient GPU memory" in stripped:
+            idx = stripped.find("Insufficient GPU memory")
+            return stripped[idx:][:200]
 
-    return "Model failed to load — see log lines above"
+    for line in reversed(tail):
+        stripped = line.strip()
+        vllm = _VLLM_RE.match(stripped)
+        if vllm:
+            level, msg = vllm.group(1), vllm.group(2)
+            if level == "ERROR" or any(p in msg for p in _vllm_failure_patterns):
+                short = _shorten_vllm_message(msg, max_len=200)
+                if short:
+                    return short[:200]
+                if "ValueError:" in msg:
+                    return msg.split("ValueError:", 1)[-1].strip()[:200]
+                return msg[:200]
+        if any(p in stripped for p in _vllm_failure_patterns):
+            short = _shorten_vllm_message(stripped, max_len=200)
+            if short:
+                return short[:200]
+            return stripped[:200]
+
+    last_structured_info: str | None = None
+    for line in tail:
+        structured = _STRUCTURED_RE.match(line.strip())
+        if structured and structured.group(1) == "INFO":
+            rest = structured.group(2)
+            _, _, message = rest.partition(": ")
+            last_structured_info = message or rest
+
+    if last_structured_info and last_structured_info.startswith("Loading weights"):
+        return "Model load timed out — weights still downloading or GPU OOM during load"
+
+    for line in reversed(tail):
+        vllm = _VLLM_RE.match(line.strip())
+        if vllm and vllm.group(1) == "INFO":
+            msg = vllm.group(2)
+            if "Starting to load model" in msg or "Loading weights" in msg:
+                return "Model load timed out — weights still downloading or GPU OOM during load"
+
+    return _fallback
 
 
 def startup_failed_in_log(log_path: Path = DEFAULT_LOG_PATH) -> bool:
