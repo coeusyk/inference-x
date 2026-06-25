@@ -107,22 +107,10 @@ def test_fetch_models_returns_empty_list_on_error_status():
 def test_active_model_in_compare_mode_ignores_stale_index():
     app = InferenceXApp(
         base_url="http://testserver",
-        model="qwen2.5-0.5b",
         compare=("qwen2.5-0.5b", "tinyllama-chat"),
     )
-    app.current_model_index = 4
-    app.models = ["opt-125m", "qwen2.5-0.5b", "tinyllama-chat", "qwen2.5-1.5b", "llama3-8b"]
 
-    assert app._active_model() == "qwen2.5-0.5b"
-
-
-def test_active_model_clamps_out_of_range_index():
-    app = InferenceXApp(base_url="http://testserver", model="qwen2.5-0.5b")
-    app.models = ["qwen2.5-0.5b", "tinyllama-chat"]
-    app.current_model_index = 9
-
-    assert app._active_model() == "qwen2.5-0.5b"
-    assert app.current_model_index == 0
+    assert app.compare == ("qwen2.5-0.5b", "tinyllama-chat")
 
 
 def test_validate_base_url_accepts_public_host():

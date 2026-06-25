@@ -119,8 +119,9 @@ Without a token, startup fails immediately with a short message instead of a Hug
 
 ### Interactive use (server starts after model pick)
 
-`make chat` and `make playground` launch the TUI first. After you choose a model, the
-server starts automatically with `INFERENCE_X_LOADED_MODELS` set to your selection.
+`make chat` and `make playground` launch the TUI first. After you choose model(s), the
+server starts automatically with `INFERENCE_X_LOADED_MODELS` set to your selection
+(one model for chat, two for compare).
 You do **not** need to run `scripts/dev.sh serve` first.
 
 ```bash
@@ -129,10 +130,10 @@ make chat
 ```
 
 ```bash
-# Benchmark + compare TUI
+# Compare two models side-by-side (+ Benchmark tab)
 make playground
 
-# Side-by-side model comparison (loads both models after launch)
+# Pre-selected compare pair (skips the two-model picker)
 make playground-compare MODEL_A=qwen2.5-0.5b MODEL_B=tinyllama-chat
 ```
 
@@ -189,10 +190,10 @@ Run `make help` for a full list of make targets.
 
 | Command | Description |
 |---------|-------------|
-| `make chat` | Start server + Claude-style chat CLI |
-| `make playground` | Start server + Textual TUI (Chat + Benchmark tabs) |
-| `make playground-compare MODEL_A=… MODEL_B=…` | Compare mode |
-| `make stop` | Stop background uvicorn process |
+| `make chat` | Start server + Claude-style multi-turn chat CLI (single model) |
+| `make playground` | Compare two models side-by-side (+ Benchmark tab) |
+| `make playground-compare MODEL_A=… MODEL_B=…` | Compare with preset models (skips picker) |
+| `make stop` | Stop background uvicorn and vLLM worker processes |
 
 **Server / API / benchmarks (start `scripts/dev.sh serve` first):**
 

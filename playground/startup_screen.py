@@ -13,10 +13,10 @@ except ImportError:
     from playground.model_registry import list_registered_models
 
 
-class ModelSelectScreen(ModalScreen[str]):
-    """Modal that fetches /v1/models and lets the operator pick one.
+class ModelSelectScreen(ModalScreen[str | tuple[str, str]]):
+    """Modal for picking one model (chat) or two models (compare).
 
-    Dismisses with the selected model name string.
+    Dismisses with a model name string or ``(model_a, model_b)`` tuple.
     Exits the app if the user cancels.
     """
 
@@ -31,6 +31,10 @@ class ModelSelectScreen(ModalScreen[str]):
         border: round #596275;
         background: #161a23;
         padding: 1 2;
+    }
+
+    ModelSelectScreen.compare #select-panel {
+        width: 70;
     }
 
     #select-title {
@@ -52,10 +56,17 @@ class ModelSelectScreen(ModalScreen[str]):
         padding-bottom: 1;
     }
 
-    #model-radio {
+    #model-radio,
+    #model-a-radio,
+    #model-b-radio {
         border: none;
         padding: 0;
         background: transparent;
+    }
+
+    .compare-label {
+        color: #7aa884;
+        margin-top: 1;
     }
 
     #model-input {
@@ -78,19 +89,42 @@ class ModelSelectScreen(ModalScreen[str]):
 
     BINDINGS = [("escape", "cancel", "Cancel")]
 
-    def __init__(self, base_url: str, initial_model: str | None = None) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        initial_model: str | None = None,
+        *,
+        mode: str = "single",
+        initial_compare: tuple[str, str] | None = None,
+    ) -> None:
         super().__init__()
         self.base_url = base_url.rstrip("/")
         self.initial_model = initial_model
+        self.mode = mode
+        self.initial_compare = initial_compare
         self._models: list[str] = []
         self._selected_index: int = 0
 
     def compose(self) -> ComposeResult:
+        title = "InferenceX Compare" if self.mode == "compare" else "InferenceX Chat"
+        if self.mode == "compare":
+            self.add_class("compare")
         with Center():
             with Vertical(id="select-panel"):
-                yield Label("InferenceX Playground", id="select-title")
-                yield Label(self.base_url, id="select-subtitle")
-                yield RadioSet(id="model-radio")
+                yield Label(title, id="select-title")
+                subtitle = (
+                    "Select two models to compare"
+                    if self.mode == "compare"
+                    else self.base_url
+                )
+                yield Label(subtitle, id="select-subtitle")
+                if self.mode == "compare":
+                    yield Label("Model A", classes="compare-label")
+                    yield RadioSet(id="model-a-radio")
+                    yield Label("Model B", classes="compare-label")
+                    yield RadioSet(id="model-b-radio")
+                else:
+                    yield RadioSet(id="model-radio")
                 yield Static("Fetching available models…", id="select-loading")
                 yield Label("", id="select-error", classes="hidden")
                 yield Input(
@@ -99,7 +133,7 @@ class ModelSelectScreen(ModalScreen[str]):
                     classes="hidden",
                 )
                 with Horizontal(id="select-actions"):
-                    yield Button("Connect", variant="primary", id="btn-confirm")
+                    yield Button("Continue", variant="primary", id="btn-confirm")
                     yield Button("Cancel", id="btn-cancel")
 
     async def on_mount(self) -> None:
@@ -133,7 +167,14 @@ class ModelSelectScreen(ModalScreen[str]):
             return
 
         subtitle = self.query_one("#select-subtitle", Label)
-        if server_ok:
+        if self.mode == "compare":
+            if server_ok:
+                subtitle.update(f"{self.base_url}  ·  server running")
+            else:
+                subtitle.update(
+                    f"{self.base_url}  ·  server will start after you choose models"
+                )
+        elif server_ok:
             subtitle.update(f"{self.base_url}  ·  server running")
         else:
             subtitle.update(
@@ -143,6 +184,26 @@ class ModelSelectScreen(ModalScreen[str]):
         self._models = models
         loading = self.query_one("#select-loading", Static)
         loading.display = False
+
+        if self.mode == "compare":
+            if len(models) < 2:
+                self._show_fallback("Need at least two models in config/models.yaml.")
+                return
+            radio_a = self.query_one("#model-a-radio", RadioSet)
+            radio_b = self.query_one("#model-b-radio", RadioSet)
+            for model in models:
+                await radio_a.mount(RadioButton(model))
+                await radio_b.mount(RadioButton(model))
+            idx_a, idx_b = 0, min(1, len(models) - 1)
+            if self.initial_compare:
+                a, b = self.initial_compare
+                if a in models and b in models and a != b:
+                    idx_a = models.index(a)
+                    idx_b = models.index(b)
+            self._select_radio(radio_a, idx_a)
+            self._select_radio(radio_b, idx_b)
+            radio_a.focus()
+            return
 
         radio = self.query_one("#model-radio", RadioSet)
         for model in models:
@@ -166,8 +227,14 @@ class ModelSelectScreen(ModalScreen[str]):
         except Exception:
             pass
 
+    def _select_radio(self, radio: RadioSet, index: int) -> None:
+        for i, node in enumerate(radio.children):
+            if isinstance(node, RadioButton):
+                node.value = i == index
+
     def on_radio_set_changed(self, event: RadioSet.Changed) -> None:
-        self._selected_index = event.index
+        if event.radio_set.id == "model-radio":
+            self._selected_index = event.index
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn-confirm":
@@ -179,9 +246,31 @@ class ModelSelectScreen(ModalScreen[str]):
         self._confirm()
 
     def _confirm(self) -> None:
-        if self._models and self._selected_index < len(self._models):
-            self.dismiss(self._models[self._selected_index])
+        if self.mode == "compare":
+            if len(self._models) < 2:
+                return
+            radio_a = self.query_one("#model-a-radio", RadioSet)
+            radio_b = self.query_one("#model-b-radio", RadioSet)
+            idx_a = radio_a.pressed_index
+            idx_b = radio_b.pressed_index
+            if idx_a < 0 or idx_b < 0:
+                return
+            model_a = self._models[idx_a]
+            model_b = self._models[idx_b]
+            if model_a == model_b:
+                err = self.query_one("#select-error", Label)
+                err.update("Choose two different models.")
+                err.remove_class("hidden")
+                return
+            self.dismiss((model_a, model_b))
             return
+
+        if self._models:
+            radio = self.query_one("#model-radio", RadioSet)
+            idx = radio.pressed_index
+            if 0 <= idx < len(self._models):
+                self.dismiss(self._models[idx])
+                return
         manual = self.query_one("#model-input", Input)
         if manual.value.strip():
             self.dismiss(manual.value.strip())

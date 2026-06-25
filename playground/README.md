@@ -4,12 +4,23 @@ Python playground tools for interacting with, comparing, and benchmarking
 InferenceX models. The batch CLI uses [rich](https://github.com/Textualize/rich)
 for polished terminal output. Two Textual TUIs are available:
 
-- **`playground/chat.py`** — Claude-style daily-driver chat (multi-turn history, bottom input, `make chat`)
-- **`playground/app.py`** — benchmark/compare tool (Chat tab + Benchmark tab, `make playground`)
+- **`playground/chat.py`** — Claude-style daily-driver chat (multi-turn history, `make chat`)
+- **`playground/app.py`** — compare and benchmark tool (side-by-side compare + Benchmark tab, `make playground`)
 
 Both stream tokens live over SSE.
 
 Run `make help` from the repo root for all available commands.
+
+---
+
+## Which tool to use?
+
+| Goal | Command |
+|------|---------|
+| Chat with a model | `make chat` |
+| Compare two models | `make playground` |
+| Run benchmarks | `make benchmark` |
+| Batch prompts / scripted runs | `python playground/client.py` |
 
 ---
 
@@ -30,18 +41,16 @@ Run `make help` from the repo root for all available commands.
 # Daily-driver chat CLI (recommended)
 make chat
 
-# Full playground (benchmark + compare tabs)
+# Compare two models side-by-side
 make playground
 
 # Or manually:
 uv run python playground/chat.py --allow-internal
 uv run python playground/app.py --allow-internal
 
-# Pre-select a model on the startup screen
-uv run python playground/app.py --allow-internal --model qwen2.5-0.5b
-
-# Side-by-side compare mode (skips model selection screen)
+# Pre-select two models (skips the compare picker)
 uv run python playground/app.py --allow-internal --compare qwen2.5-0.5b tinyllama-chat
+make playground-compare MODEL_A=qwen2.5-0.5b MODEL_B=tinyllama-chat
 
 # Single prompt to the default model
 uv run python playground/client.py --allow-internal "What is the capital of France?"
@@ -93,7 +102,10 @@ Server logs from `make chat` are written to `logs/playground-server.log` so they
 
 ---
 
-## Interactive Textual app (`playground/app.py`)
+## Interactive compare app (`playground/app.py`)
+
+Compare-only TUI with **Compare** and **Benchmark** tabs. For single-model chat,
+use `make chat` instead.
 
 Launch:
 
@@ -105,20 +117,19 @@ uv run python playground/app.py --allow-internal
 
 ### Startup flow
 
-1. **Model selection screen** — fetches `GET /v1/models` and shows a radio list.
-   Confirm to enter the main UI. On server error, a manual text input fallback appears.
-2. **Chat tab** — stream completions with Markdown rendering, model `Select` widget,
-   token/latency status bar.
+1. **Model selection screen** — pick two models from `config/models.yaml` (or the
+   server registry when it is already running). Continue loads both models.
+2. **Compare tab** — stream the same prompt to both models side-by-side with Markdown
+   rendering and a token/latency status bar.
 3. **Benchmark tab** — hardware profile, throughput table, advisor rankings, and a
    "Run Benchmark" button (launches `scripts/benchmark.py` for the selected model).
 
 The header shows server URL and health (`● healthy` / `● offline`).
 
-### Chat tab shortcuts
+### Compare tab shortcuts
 
-- `Ctrl+Enter` submits the prompt.
+- `Ctrl+Enter` submits the prompt to both models.
 - `Enter` inserts a newline.
-- `Ctrl+M` cycles models in single-model mode.
 - `Ctrl+L` clears response panels.
 - `F1` toggles the help overlay.
 - `q` or `Ctrl+C` quits.
@@ -145,8 +156,7 @@ make advise
 | Flag | Default | Description |
 |---|---|---|
 | `--base-url URL` | `http://localhost:8000` | Server base URL |
-| `--model NAME` | `qwen2.5-0.5b` | Pre-select model on startup screen |
-| `--compare A B` | — | Compare mode; skips startup screen |
+| `--compare A B` | — | Pre-select two models; skips compare picker |
 | `--allow-internal` | off | Allow loopback/private URLs (required for localhost) |
 
 ---

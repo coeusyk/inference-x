@@ -6,9 +6,9 @@ help:
 	@echo "InferenceX — available commands"
 	@echo ""
 	@echo "Server & playground"
-	@echo "  make chat                    Chat CLI (server starts after model pick)"
-	@echo "  make playground              Playground TUI (server starts after model pick)"
-	@echo "  make playground-compare      Compare mode: MODEL_A=... MODEL_B=..."
+	@echo "  make chat                    Start the Claude-style multi-turn chat CLI (single model)"
+	@echo "  make playground              Compare two models side-by-side in the interactive playground"
+	@echo "  make playground-compare      Compare with preset models: MODEL_A=... MODEL_B=..."
 	@echo "  make client                  Batch CLI (playground/client.py)"
 	@echo "  make stop                    Stop background uvicorn process"
 	@echo ""
@@ -40,13 +40,13 @@ chat:
 	@echo "Launching chat (server starts after you pick a model)…"
 	uv run python playground/chat.py --allow-internal
 
-# Start server + Textual playground in one command
+# Compare two models side-by-side in the interactive playground
 .PHONY: playground
 playground:
-	@echo "Launching playground (server starts after you pick a model)…"
+	@echo "Launching compare playground (pick two models, server starts after selection)…"
 	uv run python playground/app.py --allow-internal
 
-# Compare mode — app loads both models after launch
+# Compare with preset models (skips the two-model picker)
 .PHONY: playground-compare
 playground-compare:
 	uv run python playground/app.py --allow-internal --compare $(MODEL_A) $(MODEL_B)

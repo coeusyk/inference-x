@@ -95,41 +95,14 @@ Screen {
 /* ── Prompt bar ──────────────────────────────────────────────────────── */
 
 #prompt-bar {
-    height: 9;
-    padding: 0 1;
-}
-
-#model-select-area {
-    width: 28;
-    height: 100%;
-    padding: 0 0 0 0;
-}
-
-#model-label {
-    height: 1;
-    padding: 0 1;
-    color: #7f8795;
-}
-
-#model-selector {
-    width: 26;
-    color: #c9d1e3;
-}
-
-#model-compare-label {
     height: 3;
-    padding: 1;
-    border: round #343b49;
-    color: #c9d1e3;
-    text-style: bold;
-    width: 26;
+    padding: 0 1;
+    width: 1fr;
 }
 
 #prompt-input {
     width: 1fr;
-    height: 100%;
     border: round #343b49;
-    margin-left: 1;
 }
 
 /* ── Status bar ──────────────────────────────────────────────────────── */
@@ -156,18 +129,6 @@ Screen {
     color: #d1a65a;
 }
 
-.stat-label {
-    width: auto;
-    color: #596275;
-    padding: 0 0 0 2;
-}
-
-.stat-value {
-    width: auto;
-    color: #c9d1e3;
-    padding: 0 1 0 1;
-}
-
 /* ── Help overlay ────────────────────────────────────────────────────── */
 
 #help-overlay {
@@ -183,20 +144,4 @@ Screen {
 
 .hidden {
     display: none;
-}
-
-/* ── Tabs + benchmark panel ──────────────────────────────────────────── */
-
-#main-tabs {
-    height: 1fr;
-}
-
-#tab-chat,
-#tab-benchmark {
-    height: 1fr;
-}
-
-#benchmark-panel {
-    height: 1fr;
-    width: 100%;
 }
