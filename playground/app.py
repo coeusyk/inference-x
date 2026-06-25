@@ -187,9 +187,14 @@ class ResponsePanel(Vertical):
 
     def _title_text(self) -> str:
         if self.started_at is None:
-            return f"{self.model}  ready"
-        state = "done" if self.completed else "streaming"
-        return f"{self.model}  {self.elapsed_seconds():.1f}s  {state}"
+            return f"[bold #c9d1e3]{self.model}[/]  [#596275]ready[/]"
+        state = "done" if self.completed else "streaming…"
+        state_color = "#7aa884" if self.completed else "#d1a65a"
+        return (
+            f"[bold #c9d1e3]{self.model}[/]  "
+            f"[#7f8795]{self.elapsed_seconds():.1f}s[/]  "
+            f"[{state_color}]{state}[/]"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -274,6 +279,9 @@ class InferenceXApp(App[None]):
 
         loading = LoadingScreen("Preparing your model…")
         await self.push_screen(loading)
+        painted = asyncio.Event()
+        loading.call_after_refresh(painted.set)
+        await painted.wait()
         ok = await ensure_models_loaded(
             self.base_url,
             models_to_load,

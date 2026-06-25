@@ -12,6 +12,7 @@ Launch via:
 from __future__ import annotations
 
 import argparse
+import asyncio
 import sys
 from pathlib import Path
 
@@ -164,6 +165,9 @@ class ChatApp(App[None]):
 
         loading = LoadingScreen("Preparing your model…")
         await self.push_screen(loading)
+        painted = asyncio.Event()
+        loading.call_after_refresh(painted.set)
+        await painted.wait()
         ok = await ensure_models_loaded(
             self.base_url,
             [self._model],
