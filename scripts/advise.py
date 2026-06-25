@@ -38,7 +38,14 @@ def main() -> None:
 
     hardware = profile_hardware()
     advisor = ModelAdvisor()
-    ranked = advisor.rank(hardware, list(latest.values()))
+    report = advisor.rank(hardware, list(latest.values()))
+    ranked = report.ranked
+
+    if report.warnings:
+        print("Warnings:", file=sys.stderr)
+        for warning in report.warnings:
+            print(f"  WARNING: {warning}", file=sys.stderr)
+        print(file=sys.stderr)
 
     print("=== InferenceX Model Advisor ===\n")
     print(f"Hardware: {hardware.gpu_name or 'CPU only'}")

@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from inference_x.api.main import app
 from inference_x.benchmarks.schemas import (
+    AdvisorReport,
     AdvisorResult,
     BenchmarkResult,
     HardwareProfile,
@@ -118,7 +119,7 @@ class TestBenchmarkAdviseRoute:
         ):
             mock_store.latest_per_model.return_value = {}
             mock_hw.return_value = _hw()
-            mock_advisor.rank.return_value = []
+            mock_advisor.rank.return_value = AdvisorReport(ranked=[], warnings=[])
             resp = client.get("/v1/benchmark/advise")
         assert resp.status_code == 200
         body = resp.json()
@@ -134,13 +135,34 @@ class TestBenchmarkAdviseRoute:
         ):
             mock_store.latest_per_model.return_value = {"test-model": _result()}
             mock_hw.return_value = _hw()
-            mock_advisor.rank.return_value = [_advisor_result()]
+            mock_advisor.rank.return_value = AdvisorReport(
+                ranked=[_advisor_result()],
+                warnings=[],
+            )
             resp = client.get("/v1/benchmark/advise")
         assert resp.status_code == 200
         body = resp.json()
         assert len(body["ranked"]) == 1
         assert body["ranked"][0]["model_name"] == "test-model"
         assert body["ranked"][0]["viable"] is True
+
+    def test_returns_warnings_when_advisor_reports_mismatch(self, client: TestClient):
+        with (
+            patch("inference_x.api.routes.benchmark._store") as mock_store,
+            patch("inference_x.api.routes.benchmark.profile_hardware") as mock_hw,
+            patch("inference_x.api.routes.benchmark._advisor") as mock_advisor,
+        ):
+            mock_store.latest_per_model.return_value = {"other-gpu": _result("other-gpu")}
+            mock_hw.return_value = _hw()
+            mock_advisor.rank.return_value = AdvisorReport(
+                ranked=[],
+                warnings=["Skipped other-gpu — benchmark was run on RTX 4090 (24.0 GB)"],
+            )
+            resp = client.get("/v1/benchmark/advise")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["warnings"]
+        assert "Skipped other-gpu" in body["warnings"][0]
 
     def test_generated_at_is_iso_string(self, client: TestClient):
         with (
@@ -150,7 +172,7 @@ class TestBenchmarkAdviseRoute:
         ):
             mock_store.latest_per_model.return_value = {}
             mock_hw.return_value = _hw()
-            mock_advisor.rank.return_value = []
+            mock_advisor.rank.return_value = AdvisorReport(ranked=[], warnings=[])
             resp = client.get("/v1/benchmark/advise")
         body = resp.json()
         assert isinstance(body["generated_at"], str)

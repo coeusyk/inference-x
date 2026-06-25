@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from inference_x.benchmarks.schemas import BenchmarkResult, PromptResult
+from inference_x.benchmarks.schemas import BenchmarkResult, HardwareProfile, PromptResult
 from inference_x.benchmarks.storage import ResultStore
 
 
@@ -77,6 +77,37 @@ class TestResultStoreRoundTrip:
         assert loaded.p50_latency_ms == 800.0
         assert len(loaded.prompt_results) == 1
         assert loaded.prompt_results[0].prompt_label == "q1"
+
+    def test_result_serialises_hardware(self, tmp_path: Path, make_hardware):
+        store = ResultStore()
+        hw = make_hardware()
+        original = _make_result()
+        original.hardware = hw
+        store.save(original, output_dir=str(tmp_path))
+        loaded = store.all_results(output_dir=str(tmp_path))[0]
+        assert loaded.hardware is not None
+        assert loaded.hardware.gpu_name == hw.gpu_name
+        assert loaded.hardware.vram_total_gb == hw.vram_total_gb
+
+    def test_result_without_hardware_deserialises(self, tmp_path: Path):
+        store = ResultStore()
+        legacy = {
+            "model_name": "legacy-model",
+            "suite_version": "abc123",
+            "timestamp": "2026-06-08T12:00:00+00:00",
+            "concurrency": 1,
+            "prompt_results": [],
+            "p50_latency_ms": 0.0,
+            "p95_latency_ms": 0.0,
+            "p99_latency_ms": 0.0,
+            "mean_throughput_tps": 10.0,
+            "peak_vram_delta_gb": 1.0,
+        }
+        path = tmp_path / "results-legacy-model-2026-06-08T12-00-00.json"
+        path.write_text(json.dumps(legacy), encoding="utf-8")
+        loaded = store.all_results(output_dir=str(tmp_path))[0]
+        assert loaded.hardware is None
+        assert loaded.model_name == "legacy-model"
 
     def test_output_dir_created_if_absent(self, tmp_path: Path):
         store = ResultStore()

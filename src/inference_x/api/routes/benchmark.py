@@ -30,6 +30,7 @@ class BenchmarkAdviseResponse(BaseModel):
     ranked: list[AdvisorResult]
     hardware: HardwareProfile
     generated_at: str
+    warnings: list[str] = []
 
 
 @router.get("/results", response_model=BenchmarkResultsResponse)
@@ -45,9 +46,10 @@ def get_benchmark_advise() -> BenchmarkAdviseResponse:
     """Return a ranked advisor recommendation based on stored results."""
     latest = _store.latest_per_model()
     hardware = profile_hardware()
-    ranked = _advisor.rank(hardware, list(latest.values()))
+    report = _advisor.rank(hardware, list(latest.values()))
     return BenchmarkAdviseResponse(
-        ranked=ranked,
+        ranked=report.ranked,
         hardware=hardware,
         generated_at=datetime.now(timezone.utc).isoformat(),
+        warnings=report.warnings,
     )

@@ -94,6 +94,18 @@ def _percentile(data: list[float], p: float) -> float:
     return sorted_data[f] + (sorted_data[c] - sorted_data[f]) * (k - f)
 
 
+def _peak_vram_footprint_gb(before: HardwareProfile, after: HardwareProfile) -> float:
+    """VRAM footprint from GPU snapshots (works when model is already loaded).
+
+    Uses total minus minimum free VRAM seen before/after the run. A simple
+    free-before minus free-after delta is ~0 when the server already holds weights.
+    """
+    if not before.has_gpu:
+        return 0.0
+    min_free = min(before.vram_free_gb, after.vram_free_gb)
+    return max(0.0, before.vram_total_gb - min_free)
+
+
 class BenchmarkRunner:
     """Runs a fixed prompt suite against a model and returns a BenchmarkResult."""
 
@@ -126,10 +138,7 @@ class BenchmarkRunner:
         latencies = [r.total_latency_ms for r in prompt_results]
         throughputs = [r.tokens_per_sec for r in prompt_results]
 
-        peak_vram_delta = max(
-            0.0,
-            hardware_before.vram_free_gb - hardware_after.vram_free_gb,
-        ) if hardware_before.has_gpu else 0.0
+        peak_vram_delta = _peak_vram_footprint_gb(hardware_before, hardware_after)
 
         return BenchmarkResult(
             model_name=model_name,
@@ -142,4 +151,5 @@ class BenchmarkRunner:
             p99_latency_ms=round(_percentile(latencies, 99), 2),
             mean_throughput_tps=round(statistics.mean(throughputs) if throughputs else 0.0, 2),
             peak_vram_delta_gb=round(peak_vram_delta, 2),
+            hardware=hardware_before,
         )

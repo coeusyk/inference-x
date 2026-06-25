@@ -235,8 +235,6 @@ class LoadingScreen(ModalScreen[None]):
         except Exception:
             pass
 
-        self.append_log(f"✗ {message[:66]}")
-
         try:
             log_scroll = self.query_one("#loading-log-scroll", VerticalScroll)
             log_scroll.display = had_real_logs

@@ -64,9 +64,11 @@ This layer lives under `src/inferencex/observability/`.
 
 The benchmark layer measures inference performance and recommends models for local hardware:
 - hardware profiling (`benchmarks/hardware.py`) — GPU VRAM via pynvml or nvidia-smi
-- benchmark runner (`benchmarks/runner.py`) — streaming HTTP against `/v1/chat/completions`
+- benchmark runner (`benchmarks/runner.py`) — streaming HTTP against `/v1/chat/completions`;
+  records VRAM footprint and a per-run `hardware` snapshot in each result
 - result storage (`benchmarks/storage.py`) — JSON files under `docs/benchmarks/`
-- model advisor (`benchmarks/advisor.py`) — weighted scoring with VRAM viability gate
+- model advisor (`benchmarks/advisor.py`) — weighted scoring with VRAM viability gate;
+  skips hardware-mismatched results; returns `AdvisorReport` with warnings
 
 This layer lives under `src/inference_x/benchmarks/`. It does not call vLLM directly;
 the benchmark CLI requires a running server.
@@ -181,5 +183,5 @@ Add a lightweight playground that consumes the existing API rather than introduc
 Add hardening, deployment guidance, and publication-ready artifacts.
 
 ### Phase 6
-Add benchmark runner, hardware profiler, model advisor, and playground Benchmark tab.
-Additive API: `GET /v1/benchmark/results`, `GET /v1/benchmark/advise`.
+Add benchmark runner, hardware profiler, and model advisor (CLI + read-only API).
+Additive API: `GET /v1/benchmark/results`, `GET /v1/benchmark/advise` (includes `warnings`).

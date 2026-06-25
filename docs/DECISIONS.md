@@ -296,3 +296,44 @@ Use this document to capture non-obvious design decisions as the project evolves
 - Context: `make playground` and `make chat` start uvicorn in the background on the same TTY as the Textual alternate-screen UI. Server INFO/WARNING logs paint over the TUI after launch.
 - Decision: Redirect background uvicorn stdout/stderr to `logs/playground-server.log` in Makefile targets only (`playground`, `playground-compare`, `chat`). No server-side env hook or logging.yaml changes — `./scripts/dev.sh serve` keeps console logging.
 - Consequences: Operators tail `logs/playground-server.log` for server diagnostics during TUI sessions. Foreground dev server behavior unchanged.
+
+### DEC-031
+- Date: 2026-06-25
+- Status: accepted
+- Context: Saved benchmark results lacked a `hardware` field, so `make advise` could score
+  desktop VRAM deltas against a laptop's current free VRAM. Legacy JSON in `docs/benchmarks/`
+  had no provenance.
+- Decision: Add optional `hardware: HardwareProfile` to `BenchmarkResult` (default `None` for
+  legacy files). Persist `hardware_before` from `BenchmarkRunner.run()`. Return `AdvisorReport`
+  (`ranked` + `warnings`) from `ModelAdvisor.rank()`: skip results when saved hardware
+  mismatches current GPU name (substring match) or VRAM total (>0.5 GB tolerance); soft-warn
+  when `hardware` is null but still rank. Expose `warnings` on `GET /v1/benchmark/advise` and
+  print `WARNING:` lines in `scripts/advise.py`.
+- Consequences: Cross-machine result files are omitted from rankings with a clear warning.
+  Operators should re-run `make benchmark MODEL=…` after hardware changes. Scoring weights
+  unchanged.
+
+### DEC-032
+- Date: 2026-06-25
+- Status: accepted
+- Context: `peak_vram_delta_gb` used `max(0, free_before − free_after)`. When the server
+  already held model weights, free VRAM barely changed during the run → reported 0.00 GB
+  despite ~3 GB in use. Advisor then treated `vram_used = 0` and passed the VRAM gate.
+- Decision: Compute footprint as `vram_total − min(free_before, free_after)` via
+  `_peak_vram_footprint_gb()` in `runner.py`. Keep the JSON field name `peak_vram_delta_gb`
+  for backward compatibility with stored results and the advisor API.
+- Consequences: Pre-loaded model workflow reports realistic VRAM usage (~3 GB for
+  qwen2.5-0.5b on 6 GB GPU). Cold-load runs still capture footprint when free VRAM drops.
+
+### DEC-033
+- Date: 2026-06-25
+- Status: accepted
+- Context: Playground loading screen showed a generic "Model failed to load — see log lines
+  above" while the real error (vLLM OOM, insufficient VRAM) lived only in
+  `logs/playground-server.log`. `extract_error_summary()` matched too few line patterns.
+- Decision: Broaden `playground/log_feed.py` `extract_error_summary()` (120-line tail, vLLM
+  ERROR patterns, timeout heuristic for stuck weight loads). Fallback text:
+  `Startup failed — see logs/playground-server.log for details`. Remove duplicate error
+  line in `LoadingScreen.set_error()` (log tailer already surfaces it).
+- Consequences: Failure banner and RichLog show actionable summaries when parseable;
+  operators still tail the full log file for stack traces.

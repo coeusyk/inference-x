@@ -21,6 +21,7 @@ Phases 0-6 complete. Core API, routing, observability, playground, hardening, an
 - Gated models without `HF_TOKEN` or HuggingFace approval.
 - Playground base URLs without `--allow-internal` for localhost/private IPs.
 - Benchmark CLI invoked while the target model is not in the running server's loaded pool.
+- `make advise` with result JSON from another machine (skipped with warning unless hardware matches).
 
 ## Review checklist
 

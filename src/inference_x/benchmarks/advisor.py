@@ -12,11 +12,35 @@ CPU-only hardware (has_gpu=False) skips the VRAM gate and sets vram_headroom = 1
 """
 from __future__ import annotations
 
-from inference_x.benchmarks.schemas import AdvisorResult, BenchmarkResult, HardwareProfile
+from inference_x.benchmarks.schemas import (
+    AdvisorReport,
+    AdvisorResult,
+    BenchmarkResult,
+    HardwareProfile,
+)
 
 
 def _safe_div(a: float, b: float, fallback: float = 0.0) -> float:
     return a / b if b > 0 else fallback
+
+
+def _hardware_matches(saved: HardwareProfile, current: HardwareProfile) -> bool:
+    saved_name = (saved.gpu_name or "").lower()
+    current_name = (current.gpu_name or "").lower()
+    if saved_name and current_name:
+        if saved_name not in current_name and current_name not in saved_name:
+            return False
+    elif saved_name != current_name:
+        return False
+    if abs(saved.vram_total_gb - current.vram_total_gb) > 0.5:
+        return False
+    return True
+
+
+def _format_gpu_label(hw: HardwareProfile) -> str:
+    if hw.gpu_name:
+        return f"{hw.gpu_name} ({hw.vram_total_gb:.1f} GB)"
+    return "CPU only"
 
 
 class ModelAdvisor:
@@ -26,18 +50,43 @@ class ModelAdvisor:
         self,
         hardware: HardwareProfile,
         results: list[BenchmarkResult],
-    ) -> list[AdvisorResult]:
+    ) -> AdvisorReport:
         if not results:
-            return []
+            return AdvisorReport(ranked=[], warnings=[])
 
-        max_throughput = max(r.mean_throughput_tps for r in results)
+        warnings: list[str] = []
+        eligible: list[BenchmarkResult] = []
+
+        for result in results:
+            if result.hardware is None:
+                warnings.append(
+                    f"No hardware recorded for {result.model_name} — "
+                    f"re-run `make benchmark MODEL={result.model_name}`"
+                )
+                eligible.append(result)
+                continue
+            if not _hardware_matches(result.hardware, hardware):
+                saved = _format_gpu_label(result.hardware)
+                current = _format_gpu_label(hardware)
+                warnings.append(
+                    f"Skipped {result.model_name} — benchmark was run on {saved}, "
+                    f"current GPU is {current}. "
+                    f"Re-run `make benchmark MODEL={result.model_name}` to get fresh results."
+                )
+                continue
+            eligible.append(result)
+
+        if not eligible:
+            return AdvisorReport(ranked=[], warnings=warnings)
+
+        max_throughput = max(r.mean_throughput_tps for r in eligible)
         max_ttft = max(
-            (r.prompt_results[0].ttft_ms if r.prompt_results else 0.0) for r in results
+            (r.prompt_results[0].ttft_ms if r.prompt_results else 0.0) for r in eligible
         )
 
         advisor_results: list[AdvisorResult] = []
 
-        for result in results:
+        for result in eligible:
             throughput = result.mean_throughput_tps
             ttft = result.prompt_results[0].ttft_ms if result.prompt_results else 0.0
             vram_used = result.peak_vram_delta_gb
@@ -100,4 +149,4 @@ class ModelAdvisor:
 
         # Sort by score descending (viable first implicitly since non-viable = 0)
         advisor_results.sort(key=lambda r: r.score, reverse=True)
-        return advisor_results
+        return AdvisorReport(ranked=advisor_results, warnings=warnings)
