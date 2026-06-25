@@ -5,7 +5,7 @@ InferenceX models. The batch CLI uses [rich](https://github.com/Textualize/rich)
 for polished terminal output. Two Textual TUIs are available:
 
 - **`playground/chat.py`** — Claude-style daily-driver chat (multi-turn history, `make chat`)
-- **`playground/app.py`** — compare and benchmark tool (side-by-side compare + Benchmark tab, `make playground`)
+- **`playground/app.py`** — compare-only tool (side-by-side compare, `make playground`)
 
 Both stream tokens live over SSE.
 
@@ -104,8 +104,9 @@ Server logs from `make chat` are written to `logs/playground-server.log` so they
 
 ## Interactive compare app (`playground/app.py`)
 
-Compare-only TUI with **Compare** and **Benchmark** tabs. For single-model chat,
-use `make chat` instead.
+Compare-only TUI: two response panels, single-line prompt `Input`, and a one-line status
+bar. For single-model chat, use `make chat` instead. For benchmarks, use
+`make benchmark` / `make advise` from the CLI.
 
 Launch:
 
@@ -119,32 +120,27 @@ uv run python playground/app.py --allow-internal
 
 1. **Model selection screen** — pick two models from `config/models.yaml` (or the
    server registry when it is already running). Continue loads both models.
-2. **Compare tab** — stream the same prompt to both models side-by-side with Markdown
-   rendering and a token/latency status bar.
-3. **Benchmark tab** — hardware profile, throughput table, advisor rankings, and a
-   "Run Benchmark" button (launches `scripts/benchmark.py` for the selected model).
+2. **Loading screen** — phase title, step indicators (Server → Model), and live tail of
+   `logs/playground-server.log` while the server starts.
+3. **Compare UI** — stream the same prompt to both models side-by-side with Markdown
+   rendering; per-panel titles show elapsed time and state; usage footers show token
+   counts on completion.
 
 The header shows server URL and health (`● healthy` / `● offline`).
 
-### Compare tab shortcuts
+### Compare shortcuts
 
-- `Ctrl+Enter` submits the prompt to both models.
-- `Enter` inserts a newline.
+- `Enter` submits the prompt to both models.
 - `Ctrl+L` clears response panels.
 - `F1` toggles the help overlay.
 - `q` or `Ctrl+C` quits.
 
-### Benchmark tab
+### Benchmarks (CLI only)
 
-Requires at least one prior benchmark run (`make benchmark MODEL=<name>`) or use
-the in-tab "Run Benchmark" button while the server is running. Results are read from
-`docs/benchmarks/` and `GET /v1/benchmark/advise`.
+Benchmarks are not in the compare TUI. Run from a second terminal while the server
+is up (or after `make playground` has started it):
 
 ```bash
-# Terminal 1: server
-./scripts/dev.sh serve
-
-# Terminal 2: run benchmark from CLI or playground Benchmark tab
 make benchmark MODEL=qwen2.5-0.5b
 make advise
 ```

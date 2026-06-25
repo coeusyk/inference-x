@@ -3,7 +3,8 @@
 
 Daily-driver interface: scrollable turn history, bottom input bar, SSE
 streaming via Markdown.get_stream().  Sends full conversation history on
-every request (true multi-turn), unlike the single-turn Chat tab in app.py.
+every request (true multi-turn). Compare and daily chat are separate entry points:
+`make chat` for single-model use, `make playground` for side-by-side evaluation.
 
 Launch via:
     make chat

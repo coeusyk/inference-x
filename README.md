@@ -4,7 +4,7 @@
 [![vLLM](https://img.shields.io/badge/inference-vLLM-6E40C9?style=flat-square)](https://docs.vllm.ai)
 [![OpenAI-compatible](https://img.shields.io/badge/API-OpenAI--compatible-412991?style=flat-square&logo=openai&logoColor=white)](https://platform.openai.com/docs/api-reference)
 [![uv](https://img.shields.io/badge/package%20manager-uv-DE5FE9?style=flat-square)](https://docs.astral.sh/uv/)
-[![Tests](https://img.shields.io/badge/tests-261%20passing-22C55E?style=flat-square&logo=pytest&logoColor=white)](./tests)
+[![Tests](https://img.shields.io/badge/tests-273%20passing-22C55E?style=flat-square&logo=pytest&logoColor=white)](./tests)
 [![License: MIT](https://img.shields.io/badge/license-MIT-F59E0B?style=flat-square)](./LICENSE)
 
 InferenceX is a self-hosted LLM inference platform built incrementally on top of vLLM.
@@ -130,14 +130,15 @@ make chat
 ```
 
 ```bash
-# Compare two models side-by-side (+ Benchmark tab)
+# Compare two models side-by-side
 make playground
 
 # Pre-selected compare pair (skips the two-model picker)
 make playground-compare MODEL_A=qwen2.5-0.5b MODEL_B=tinyllama-chat
 ```
 
-While the model loads, a loading screen is shown. Server logs go to:
+While the model loads, a loading screen shows startup phases, step progress, and a
+live tail of `logs/playground-server.log`. Server logs also go to:
 
 ```bash
 tail -f logs/playground-server.log
@@ -191,7 +192,7 @@ Run `make help` for a full list of make targets.
 | Command | Description |
 |---------|-------------|
 | `make chat` | Start server + Claude-style multi-turn chat CLI (single model) |
-| `make playground` | Compare two models side-by-side (+ Benchmark tab) |
+| `make playground` | Compare two models side-by-side (interactive TUI) |
 | `make playground-compare MODEL_A=… MODEL_B=…` | Compare with preset models (skips picker) |
 | `make stop` | Stop background uvicorn and vLLM worker processes |
 
@@ -263,8 +264,9 @@ uv sync --extra hardware   # installs nvidia-ml-py + psutil
 | `GET /v1/benchmark/results` | Stored benchmark results + current hardware profile |
 | `GET /v1/benchmark/advise` | Ranked advisor output + hardware profile |
 
-**Playground:** the Textual TUI includes a **Benchmark** tab with hardware info,
-throughput table, advisor recommendations, and a "Run Benchmark" button.
+Benchmarks run from the CLI (`make benchmark`, `make advise`) or API — not from the
+compare playground TUI. Use `make chat` for daily single-model chat and `make playground`
+for side-by-side model comparison.
 
 **Prompt suite:** `benchmarks/prompts/standard.json` — 10 fixed prompts (factual,
 generation, code, reasoning, chat). Results are comparable across runs via
