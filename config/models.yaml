@@ -1,33 +1,32 @@
 models:
+  # gpu_memory_utilization is optional (auto-sized from GPU VRAM + model config).
+  # Set it only as a ceiling when you want to cap vLLM below the computed value.
+
   # Tiny base model - text completion only, NOT for instruction following
   - name: opt-125m
     engine: vllm
     model_path: facebook/opt-125m
-    gpu_memory_utilization: 0.5
     max_model_len: 2048
 
   # Small instruction-tuned models (ungated, good for dev/testing)
   - name: qwen2.5-0.5b
     engine: vllm
     model_path: Qwen/Qwen2.5-0.5B-Instruct
-    gpu_memory_utilization: 0.5
     max_model_len: 4096
 
   - name: tinyllama-chat
     engine: vllm
     model_path: TinyLlama/TinyLlama-1.1B-Chat-v1.0
-    gpu_memory_utilization: 0.5
     max_model_len: 2048
 
   - name: qwen2.5-1.5b
     engine: vllm
     model_path: Qwen/Qwen2.5-1.5B-Instruct
-    gpu_memory_utilization: 0.6
     max_model_len: 8192
 
-  # Production model (requires HuggingFace auth: `huggingface-cli login`)
+  # Gated on HuggingFace (gated: true is a documentation hint; access is checked at startup)
   - name: llama3-8b
     engine: vllm
     model_path: meta-llama/Meta-Llama-3-8B-Instruct
-    gpu_memory_utilization: 0.9
     max_model_len: 4096
+    gated: true

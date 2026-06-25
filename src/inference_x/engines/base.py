@@ -1,0 +1,26 @@
+from abc import ABC, abstractmethod
+from collections.abc import AsyncGenerator
+
+from inference_x.schemas.chat import ChatCompletionRequest, ChatCompletionResponse
+
+
+class BaseEngine(ABC):
+    """Stable engine contract. All inference implementations must satisfy this interface.
+
+    The rest of the system depends on this interface, not on concrete implementations.
+    Adding a second engine in a future phase must not require changes here.
+    """
+
+    @abstractmethod
+    async def generate(self, request: ChatCompletionRequest) -> ChatCompletionResponse:
+        """Run inference for a chat completion request and return a typed response."""
+
+    @abstractmethod
+    async def generate_stream(
+        self, request: ChatCompletionRequest
+    ) -> AsyncGenerator[str, None]:
+        """Run inference and yield raw text chunks as they are generated."""
+
+    @abstractmethod
+    def is_healthy(self) -> bool:
+        """Return True if the engine is loaded and ready to serve requests."""

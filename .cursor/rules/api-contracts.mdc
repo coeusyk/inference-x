@@ -1,0 +1,27 @@
+# API contract rules
+
+- Treat request and response schemas as public contracts.
+- Avoid breaking field names or response structure after an endpoint is introduced.
+- If a contract must change, introduce a new version or clearly isolate the change behind a new endpoint.
+- Keep OpenAI-compatible behavior where planned for `/v1/chat/completions`.
+- Ensure error responses are consistent and predictable.
+- Add or update contract tests whenever endpoint behavior changes.
+
+## Phase 1 contract
+
+Required endpoints:
+- `POST /v1/chat/completions`
+- `GET /health`
+
+Phase 1 expectations:
+- one configured vLLM-backed model
+- typed request validation
+- typed response formatting
+- clear error handling for configuration, model load, and inference failures
+
+## Contract design rules
+
+- Prefer additive change over breaking change.
+- Keep optional fields optional; do not make them required later without versioning.
+- Return machine-readable status information where useful.
+- Document examples in `README.md` or `docs/ARCHITECTURE.md` when endpoints stabilize.

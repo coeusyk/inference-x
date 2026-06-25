@@ -1,0 +1,53 @@
+# Backend Python rules
+
+## Stack assumptions
+
+- Python 3.11+
+- FastAPI for HTTP APIs
+- Pydantic for schemas
+- vLLM as the first engine implementation
+- Development on Windows via WSL2 Ubuntu
+
+## Code style
+
+- Use type hints on all public functions, methods, and class attributes where practical.
+- Prefer small classes and focused functions.
+- Keep route handlers limited to validation, dependency resolution, and response formatting.
+- Put orchestration in services and engine-specific logic in engine modules.
+- Prefer explicit imports over wildcard imports.
+- Raise domain-specific exceptions or HTTP errors deliberately; do not swallow exceptions.
+
+## FastAPI conventions
+
+- Define routes under `src/inference_x/api/routes/`.
+- Define shared dependencies in `src/inference_x/api/deps.py`.
+- Define error mapping in `src/inference_x/api/errors.py`.
+- Keep endpoint contracts stable once introduced.
+- Prefer versioned endpoints under `/v1`.
+
+## Schema conventions
+
+- Put request and response models in `src/inference_x/schemas/`.
+- Separate transport schemas from engine internals when complexity grows.
+- Keep field names aligned with OpenAI-compatible formats where intended.
+- Validate config-derived values before use.
+
+## Engine conventions
+
+- Define a base engine interface in `src/inference_x/engines/base.py`.
+- Implement vLLM-specific behavior in `src/inference_x/engines/vllm_engine.py`.
+- Keep prompt formatting and request adaptation outside route handlers.
+- Expose health-check capability from each engine implementation.
+
+## Testing conventions
+
+- Unit tests go in `tests/unit/`.
+- Integration tests go in `tests/integration/`.
+- Contract tests go in `tests/contract/`.
+- Mock vLLM where possible in unit tests; reserve real-engine execution for explicit integration tests.
+
+## Operational rules
+
+- Read model and server settings from YAML or environment-backed settings.
+- Do not hardcode model identifiers, ports, file paths, or GPU values in core logic.
+- Log structured events for engine startup, request handling, latency, and failures.

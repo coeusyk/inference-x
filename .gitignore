@@ -6,3 +6,9 @@
 *.egg-info
 
 __pycache__/
+.pytest_cache/
+logs/
+
+# Private writing — not for the public repo
+docs/ARTICLE_DRAFT.md
+docs/ARTICLE_NOTES.md

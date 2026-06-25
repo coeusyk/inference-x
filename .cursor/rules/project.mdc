@@ -1,0 +1,52 @@
+# InferenceX project rules
+
+- Treat InferenceX as a backend-first, layered LLM inference platform.
+- Preserve stable public API contracts once introduced.
+- Add new capabilities by adding modules, not by rewriting unrelated files.
+- Keep route handlers thin; put business logic in services.
+- Use typed schemas for requests, responses, and internal DTOs.
+- Prefer dependency injection over direct global imports.
+- Make behavior config-driven where possible, especially for models, routing, and logging.
+- Do not begin UI-heavy work before backend phase goals are complete.
+- When architecture changes, update `docs/ARCHITECTURE.md`, `docs/PHASES.md`, and any affected OpenSpec change docs in the same task.
+- Favor incremental edits that preserve previous working behavior.
+
+## Repo boundaries
+
+- `src/inference_x/api/` exposes HTTP endpoints and request validation.
+- `src/inference_x/services/` orchestrates application logic.
+- `src/inference_x/engines/` contains inference engine interfaces and implementations.
+- `src/inference_x/routing/` contains model selection logic and policies.
+- `src/inference_x/observability/` contains middleware, metrics, and exporters.
+- `src/inference_x/schemas/` contains Pydantic models only.
+- `config/` stores YAML configuration files; avoid hardcoding deploy-specific values.
+
+## Path Handling
+
+- Never use absolute paths anywhere in generated code, config files, scripts, or documentation.
+- This project runs on different machines (Windows WSL2, Linux) where home directories and
+  project roots differ. An absolute path that works on one machine will silently break on another.
+- Always use paths relative to the project root or the file being edited.
+- For Python code, resolve paths at runtime using `Path(__file__).parent` or
+  `Path(__file__).resolve().parent` anchored to a known file in the module tree.
+- For config files (YAML, TOML), use relative paths from the config file's own location,
+  or use a placeholder like `./models/` that the application resolves at startup.
+- For shell scripts and the Makefile, use `$(shell pwd)` or `$(CURDIR)` — never hardcode
+  a path like `/home/user/` or `/mnt/c/`.
+- If a path must be configurable (e.g., model weights directory), expose it as an environment
+  variable with a sensible relative default, not a hardcoded absolute path.
+
+## Working style
+
+- Before making a non-trivial change, restate the task, list affected files, and propose an ordered plan.
+- Edit one conceptual area at a time.
+- Prefer small, reviewable patches over broad refactors.
+- If scope expands, stop and propose a new plan before continuing.
+- When introducing a new module, add a minimal docstring describing its responsibility.
+
+## Quality bar
+
+- New API work should include schema validation and at least one test.
+- New engine or routing logic should be covered by unit tests with mocks or fixtures.
+- Avoid dead code, placeholder TODOs, and commented-out implementations in committed changes.
+- Keep naming explicit and consistent with the architecture docs.

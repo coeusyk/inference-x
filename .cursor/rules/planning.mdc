@@ -1,0 +1,23 @@
+# Planning rules
+
+- For any task beyond a small localized edit, write a short execution plan first.
+- The plan must include: goal, affected files, ordered steps, and validation approach.
+- Group edits by concern: schemas, services, routes, tests, docs.
+- Complete one concern before moving to the next when possible.
+- If a task touches contracts, docs and tests must be updated in the same work batch.
+- Prefer finishing a thin vertical slice over partially scaffolding many modules.
+
+## Phase discipline
+
+- Follow `docs/PHASES.md` as the default execution order.
+- Do not start a later phase before the current phase exit criteria are met unless explicitly instructed.
+- Record architectural changes in `docs/DECISIONS.md` when a non-obvious design choice is made.
+
+## Implementation rhythm
+
+1. Read relevant architecture and phase docs.
+2. Restate the task in repo terms.
+3. Propose the file-level plan.
+4. Implement in small steps.
+5. Validate with tests or smoke checks.
+6. Update docs affected by the change.
