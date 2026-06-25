@@ -1,5 +1,9 @@
 # InferenceX — Phases
 
+**All phases 0–6 are complete (2026-06).** This file is the historical milestone record
+and phase-gating rules. New work uses OpenSpec (`openspec/changes/`) — do not add features
+here without a new phase section and exit criteria.
+
 ## Status
 
 | Phase | Name | Status |
@@ -77,24 +81,27 @@ Exit criteria:
 ---
 
 ## Phase 4 — Playground and Evaluation
-**Goal:** Interactive terminal UI to send prompts, compare models, and see metrics.
+**Goal:** Interactive terminal tools to chat, compare models, and run batch prompts.
 
 Deliverables:
-- Textual-based playground (`playground/app.py`)
-- Claude-style chat CLI (`playground/chat.py`) with multi-turn history and `make chat`
-- ModelSelectScreen — interactive model picker on startup (replaces env var)
-- Side-by-side model compare mode
-- Markdown rendering for model responses
-- Status bar with token counts and latency
-- `playground/client.py` — headless CLI batch runner
-- `make playground` — single command start
+- **Daily-driver chat** — `playground/chat.py` + `make chat` (multi-turn history, SSE streaming)
+- **Compare playground** — `playground/app.py` + `make playground` (two models side-by-side)
+- **Batch CLI** — `playground/client.py` (rich terminal output, compare across servers)
+- `ModelSelectScreen` — single-model (`chat.py`) or two-model compare (`app.py`) picker
+- `LoadingScreen` — phase titles, step progress, live tail of `logs/playground-server.log`
+- Markdown rendering for streamed responses
+- Per-panel usage footers in compare mode
 
 Exit criteria:
-- [x] `make playground` starts server + UI in one command
+- [x] `make chat` starts server + single-model chat CLI
+- [x] `make playground` starts server + compare UI (two models)
 - [x] Model selection screen shown before main UI
-- [x] Compare mode works across ≥2 models
-- [x] Markdown renders correctly in response panel
+- [x] Compare mode streams the same prompt to ≥2 models
+- [x] Markdown renders correctly in response panels
 - [x] Non-obvious choices recorded in DECISIONS.md where applicable
+
+**Post-phase note (2026-06):** Benchmark UI was briefly in `app.py` but removed; benchmarks
+stay CLI-only (`make benchmark`, `make advise`). Chat and compare are separate entry points.
 
 ---
 
@@ -114,7 +121,7 @@ Deliverables:
 Exit criteria:
 - [x] Security audit findings H1-H5 from audit report resolved (DEC-SEC-01: one CVE in transitive dep, accepted)
 - [x] Deferred items (auth, rate limiting, streaming timeout) documented in DECISIONS.md (DEC-DEFER-01/02/03)
-- [x] All unit tests pass (255/255 as of 2026-06-24)
+- [x] All unit tests pass (273/273 as of 2026-06-25)
 - [x] README covers setup from scratch on a fresh WSL2 machine
 - [x] MIT LICENSE present at repo root
 
@@ -161,10 +168,12 @@ tinyllama-chat on their setup. InferenceX should tell them.
 - `GET /v1/benchmark/results` — returns stored results as JSON (read-only)
 - `GET /v1/benchmark/advise` — returns advisor output as JSON
 
-**6.6 — Playground integration**
-- New "Benchmark" tab in Textual playground
-- Shows hardware profile, per-model throughput bars, and advisor recommendation
-- "Run benchmark" button triggers benchmark runner for selected model
+**6.6 — Benchmark CLI and API** (playground TUI integration removed 2026-06)
+- `make benchmark` / `make benchmark-all` — run prompt suite via `scripts/benchmark.py`
+- `make advise` — ranked report via `scripts/advise.py`
+- `GET /v1/benchmark/results` and `GET /v1/benchmark/advise` — read-only JSON APIs
+- A Benchmark tab existed briefly in `playground/app.py`; removed in favor of CLI-only
+  workflows to keep the compare TUI focused
 
 **6.7 — Benchmark prompt suite** (`benchmarks/prompts/`)
 - `standard.json` — 10 prompts covering: short factual, long generation, code, reasoning
@@ -183,7 +192,7 @@ tinyllama-chat on their setup. InferenceX should tell them.
 - [x] Hardware profiler correctly reads GPU name and VRAM on WSL2 with CUDA (pynvml → nvidia-smi → CPU-only chain)
 - [x] Advisor scoring function unit-tested with fixture hardware profiles (10 tests: 6GB, 24GB, CPU-only)
 - [x] Benchmark results schema validated with Pydantic (round-trip test passing)
-- [x] Playground benchmark tab shows results and recommendation (BenchmarkTab wired into TabbedContent)
+- [x] Benchmark CLI and API routes implemented; playground uses CLI only (no Benchmark tab)
 - [x] Results stored in `docs/benchmarks/` for reproducible comparison
 - [x] Benchmark methodology documented in DECISIONS.md or README where applicable
 
