@@ -6,11 +6,13 @@ Scoring weights:
   20% VRAM headroom — model must fit in available free VRAM
   10% quantization  — placeholder (currently 1.0 for all models, reserved for INT8/FP8)
 
-A model with peak_vram_delta_gb > hardware.vram_free_gb is hard-gated:
-  score = 0, viable = False regardless of other metrics.
+A model whose effective VRAM requirement (warm footprint × cold-start margin) exceeds
+hardware.vram_free_gb is hard-gated: score = 0, viable = False regardless of other metrics.
 CPU-only hardware (has_gpu=False) skips the VRAM gate and sets vram_headroom = 1.0.
 """
 from __future__ import annotations
+
+import os
 
 from inference_x.benchmarks.schemas import (
     AdvisorReport,
@@ -18,6 +20,18 @@ from inference_x.benchmarks.schemas import (
     BenchmarkResult,
     HardwareProfile,
 )
+
+COLD_START_MARGIN: float = 1.20
+
+
+def cold_start_margin() -> float:
+    """Return the cold-start VRAM multiplier (overridable via env var)."""
+    return float(os.getenv("INFERENCEX_COLD_START_MARGIN", str(COLD_START_MARGIN)))
+
+
+def effective_vram_required_gb(footprint_gb: float) -> float:
+    """VRAM required at cold load, given a warm benchmark footprint."""
+    return footprint_gb * cold_start_margin()
 
 
 def _safe_div(a: float, b: float, fallback: float = 0.0) -> float:
@@ -41,6 +55,12 @@ def _format_gpu_label(hw: HardwareProfile) -> str:
     if hw.gpu_name:
         return f"{hw.gpu_name} ({hw.vram_total_gb:.1f} GB)"
     return "CPU only"
+
+
+def _format_vram_requirement(footprint_gb: float) -> str:
+    margin = cold_start_margin()
+    required = effective_vram_required_gb(footprint_gb)
+    return f"{footprint_gb:.2f} GB footprint × {margin:.2f} = {required:.2f} GB required"
 
 
 class ModelAdvisor:
@@ -90,13 +110,14 @@ class ModelAdvisor:
             throughput = result.mean_throughput_tps
             ttft = result.prompt_results[0].ttft_ms if result.prompt_results else 0.0
             vram_used = result.peak_vram_delta_gb
+            effective_required = effective_vram_required_gb(vram_used)
 
-            # Hard gate: if VRAM required exceeds free VRAM, mark not viable
-            if hardware.has_gpu and vram_used > hardware.vram_free_gb:
+            # Hard gate: cold-load requirement must fit in free VRAM
+            if hardware.has_gpu and effective_required >= hardware.vram_free_gb:
                 score = 0.0
                 viable = False
                 rec = (
-                    f"{result.model_name} — requires {vram_used:.1f}GB VRAM, "
+                    f"{result.model_name} — {_format_vram_requirement(vram_used)}, "
                     f"only {hardware.vram_free_gb:.1f}GB free. Skip."
                 )
             else:
@@ -115,7 +136,11 @@ class ModelAdvisor:
                     if hardware.vram_free_gb > 0:
                         vram_score = max(
                             0.0,
-                            min(1.0, (hardware.vram_free_gb - vram_used) / hardware.vram_free_gb),
+                            min(
+                                1.0,
+                                (hardware.vram_free_gb - effective_required)
+                                / hardware.vram_free_gb,
+                            ),
                         )
                     else:
                         vram_score = 1.0
@@ -132,7 +157,7 @@ class ModelAdvisor:
 
                 rec = (
                     f"{result.model_name} — {throughput:.0f} tok/s, "
-                    f"{ttft:.0f}ms TTFT, {vram_used:.1f}GB VRAM"
+                    f"{ttft:.0f}ms TTFT, {_format_vram_requirement(vram_used)}"
                 )
 
             advisor_results.append(

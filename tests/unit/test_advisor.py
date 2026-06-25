@@ -118,7 +118,9 @@ class TestModelAdvisorRanking:
         rec = ranked[0].recommendation_str
         assert "qwen" in rec
         assert "tok/s" in rec
-        assert "TTFT" in rec or "ms" in rec
+        assert "footprint" in rec
+        assert "×" in rec
+        assert "required" in rec
 
     def test_recommendation_str_not_viable_format(self):
         results = [
@@ -159,6 +161,29 @@ class TestModelAdvisorRanking:
         ranked = _rank(advisor, _hw(vram_free=6.0, vram_total=8.0), results)
         for r in ranked:
             assert 0.0 <= r.score <= 100.0
+
+
+class TestColdStartMargin:
+    def test_marginal_footprint_not_viable_with_margin(self):
+        """3.0 GB warm footprint × 1.20 = 3.6 GB > 3.3 GB free — must not pass gate."""
+        results = [
+            _make_result("marginal", throughput=40.0, ttft_ms=100.0, peak_vram_delta_gb=3.0),
+        ]
+        advisor = ModelAdvisor()
+        ranked = _rank(advisor, _hw(vram_free=3.3, vram_total=6.0), results)
+        assert ranked[0].viable is False
+        assert ranked[0].score == 0.0
+        assert "3.00 GB footprint × 1.20 = 3.60 GB required" in ranked[0].recommendation_str
+
+    def test_cold_start_margin_env_override(self, monkeypatch):
+        monkeypatch.setenv("INFERENCEX_COLD_START_MARGIN", "1.5")
+        results = [
+            _make_result("tight", throughput=30.0, ttft_ms=100.0, peak_vram_delta_gb=2.0),
+        ]
+        advisor = ModelAdvisor()
+        ranked = _rank(advisor, _hw(vram_free=3.0, vram_total=6.0), results)
+        assert ranked[0].viable is False
+        assert "× 1.50 = 3.00 GB required" in ranked[0].recommendation_str
 
 
 class TestModelAdvisorHardware:

@@ -337,3 +337,21 @@ Use this document to capture non-obvious design decisions as the project evolves
   line in `LoadingScreen.set_error()` (log tailer already surfaces it).
 - Consequences: Failure banner and RichLog show actionable summaries when parseable;
   operators still tail the full log file for stack traces.
+
+### DEC-034
+- Date: 2026-06-25
+- Status: accepted
+- Context: After DEC-032, `peak_vram_delta_gb` reflects warm/steady-state VRAM footprint
+  (model already loaded on the server). The advisor viability gate compared that footprint
+  directly to current free VRAM. Cold vLLM startup allocates weights, KV cache, and CUDA
+  overhead in one burst — typically 15–25% above steady state — so models that fit the warm
+  footprint could still OOM on cold load.
+- Decision: Apply `COLD_START_MARGIN = 1.20` in `advisor.py`:
+  `effective_required = peak_vram_delta_gb × margin`; viable only when
+  `effective_required < vram_free_gb`. Override via `INFERENCEX_COLD_START_MARGIN`.
+  Recommendation strings show `footprint × margin = required`. VRAM headroom scoring uses
+  `effective_required` for consistency with the gate.
+- Consequences: Marginal fits (e.g. 3.0 GB footprint, 3.3 GB free) are correctly marked
+  non-viable (3.6 GB required). Default 1.20 is conservative but not extreme. Measuring
+  true cold-load peak in the benchmark runner (server restart per model) is deferred to a
+  later phase.
