@@ -18,6 +18,7 @@ try:
     from startup_screen import ModelSelectScreen
     from loading_screen import LoadingScreen
     from server_control import ensure_models_loaded, cleanup_playground_server_if_started_sync
+    from scroll_utils import scroll_to_end
 except ImportError:
     from playground.url_validation import validate_base_url
     from playground.startup_screen import ModelSelectScreen
@@ -26,6 +27,7 @@ except ImportError:
         ensure_models_loaded,
         cleanup_playground_server_if_started_sync,
     )
+    from playground.scroll_utils import scroll_to_end
 
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -127,9 +129,13 @@ class ResponsePanel(Vertical):
             self.query_one(".empty-state", Static).display = True
             self.query_one(Markdown).update("")
             self.query_one(".usage", Static).update("")
+            self._response_scroll().release_anchor()
         except Exception:
             pass
         self.refresh_title()
+
+    def _response_scroll(self) -> VerticalScroll:
+        return self.query_one(".response-scroll", VerticalScroll)
 
     def start(self) -> None:
         self.content = ""
@@ -139,6 +145,7 @@ class ResponsePanel(Vertical):
             self.query_one(".empty-state", Static).display = False
             self.query_one(Markdown).update("")
             self.query_one(".usage", Static).update("")
+            self._response_scroll().anchor()
         except Exception:
             pass
         self.refresh_title()
@@ -147,6 +154,7 @@ class ResponsePanel(Vertical):
         self.content += token
         try:
             self.query_one(Markdown).update(self.content)
+            scroll_to_end(self._response_scroll())
         except Exception:
             pass
         self.refresh_title()
@@ -162,6 +170,8 @@ class ResponsePanel(Vertical):
                 f"prompt {prompt_tokens} | completion {completion_tokens} | "
                 f"total {total_tokens} | {elapsed:.1f}s"
             )
+            self._response_scroll().release_anchor()
+            scroll_to_end(self._response_scroll())
         except Exception:
             pass
         self.refresh_title()
@@ -173,6 +183,8 @@ class ResponsePanel(Vertical):
             self.query_one(".empty-state", Static).display = False
             self.query_one(Markdown).update(f"**Error:** {message}")
             self.query_one(".usage", Static).update("")
+            self._response_scroll().release_anchor()
+            scroll_to_end(self._response_scroll())
         except Exception:
             pass
         self.refresh_title()

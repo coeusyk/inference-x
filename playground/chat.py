@@ -25,6 +25,7 @@ try:
     from url_validation import validate_base_url
     from loading_screen import LoadingScreen
     from server_control import ensure_models_loaded, cleanup_playground_server_if_started_sync
+    from scroll_utils import scroll_to_end
 except ImportError:
     from playground.streaming import stream_chat_tokens  # type: ignore[no-redef]
     from playground.startup_screen import ModelSelectScreen  # type: ignore[no-redef]
@@ -34,6 +35,7 @@ except ImportError:
         ensure_models_loaded,
         cleanup_playground_server_if_started_sync,
     )
+    from playground.scroll_utils import scroll_to_end  # type: ignore[no-redef]
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -248,14 +250,16 @@ class ChatApp(App[None]):
         # 1. User bubble
         user_bubble = MessageBubble("user", prompt)
         await history.mount(user_bubble)
+        scroll_to_end(history)
         self._messages = append_turn(self._messages, "user", prompt)
 
         # 2. Empty assistant bubble — will be streamed into
         assistant_bubble = MessageBubble("assistant", "")
         await history.mount(assistant_bubble)
 
-        # 3. Anchor scroll to bottom before streaming begins
+        # 3. Pin history to bottom while tokens stream in
         history.anchor()
+        scroll_to_end(history)
 
         # 4. Stream tokens into the assistant bubble's Markdown widget
         md = assistant_bubble.markdown_widget
@@ -269,6 +273,7 @@ class ChatApp(App[None]):
                 async for token in stream_chat_tokens(self.base_url, payload):
                     await stream.write(token)
                     collected += token
+                    scroll_to_end(history)
             except httpx.HTTPStatusError as exc:
                 error_msg = f"HTTP {exc.response.status_code}: {exc.response.text[:120]}"
             except httpx.ReadTimeout:
@@ -291,6 +296,7 @@ class ChatApp(App[None]):
         else:
             self._messages = append_turn(self._messages, "assistant", collected)
 
+        scroll_to_end(history)
         # 6. Release anchor, re-enable input
         history.release_anchor()
         self._in_flight = False
