@@ -9,18 +9,15 @@
 [![Tests](https://img.shields.io/badge/tests-286%20passing-22C55E?style=flat-square&logo=pytest&logoColor=white)](./tests)
 [![License: MIT](https://img.shields.io/badge/license-MIT-F59E0B?style=flat-square)](./LICENSE)
 
-InferenceX is a self-hosted LLM inference platform built incrementally on top of vLLM.
-It provides an OpenAI-compatible `POST /v1/chat/completions` endpoint, a model registry,
-an observability pipeline, and an interactive Textual playground — all designed to run on
-a single WSL2 machine with one consumer-grade GPU.
+InferenceX is a self-hosted LLM inference platform built incrementally on top of vLLM. It provides an OpenAI-compatible `POST /v1/chat/completions` endpoint, a model registry, an observability pipeline, and an interactive Textual playground — all designed to run on a single WSL2 machine with one consumer-grade GPU.
 
 ## Key docs
 
-- `docs/ARCHITECTURE.md`
-- `docs/PHASES.md`
-- `docs/DECISIONS.md`
-- `playground/README.md`
-- `.cursor/rules/`
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
+- [`docs/PHASES.md`](docs/PHASES.md)
+- [`docs/DECISIONS.md`](docs/DECISIONS.md)
+- [`playground/README.md`](playground/README.md)
+- [`.cursor/rules/`](.cursor/rules/)
 
 ---
 
