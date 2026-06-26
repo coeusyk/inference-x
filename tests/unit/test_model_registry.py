@@ -13,7 +13,7 @@ class TestModelEntry:
     def test_defaults(self):
         e = _entry("m")
         assert e.engine == "vllm"
-        assert e.gpu_memory_utilization is None
+        assert e.gpu_memory_utilization == "auto"
         assert e.max_model_len is None
         assert e.quantization is None
 
@@ -34,6 +34,10 @@ class TestModelEntry:
             ModelEntry(name="x", model_path="p", gpu_memory_utilization=1.5)
         with pytest.raises(Exception):
             ModelEntry(name="x", model_path="p", gpu_memory_utilization=-0.1)
+
+    def test_gpu_memory_utilization_auto(self):
+        e = ModelEntry(name="x", model_path="p", gpu_memory_utilization="auto")
+        assert e.gpu_memory_utilization == "auto"
 
     def test_max_model_len_must_be_positive(self):
         with pytest.raises(Exception):

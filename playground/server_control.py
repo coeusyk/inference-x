@@ -13,6 +13,19 @@ import httpx
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _LOG_PATH = _REPO_ROOT / "logs" / "playground-server.log"
 
+_server_started_by_playground: bool = False
+
+
+def playground_started_server() -> bool:
+    """True when this process started the background uvicorn server."""
+    return _server_started_by_playground
+
+
+def _reset_playground_server_state() -> None:
+    """Clear the started-server flag (for tests)."""
+    global _server_started_by_playground
+    _server_started_by_playground = False
+
 
 async def fetch_loaded_models(base_url: str) -> list[str]:
     """Return ``loaded_models`` from ``GET /health``, or ``[]`` if unreachable."""
@@ -43,6 +56,20 @@ async def stop_playground_server() -> None:
         )
         await proc.wait()
     await asyncio.sleep(1.5)
+
+
+async def cleanup_playground_server_if_started() -> None:
+    """Stop the server when the playground started it (no-op if user attached externally)."""
+    global _server_started_by_playground
+    if not _server_started_by_playground:
+        return
+    await stop_playground_server()
+    _server_started_by_playground = False
+
+
+def cleanup_playground_server_if_started_sync() -> None:
+    """Synchronous wrapper for CLI exit handlers."""
+    asyncio.run(cleanup_playground_server_if_started())
 
 
 async def start_playground_server(
@@ -120,6 +147,7 @@ async def ensure_models_loaded(
     load_timeout_s: int = 600,
 ) -> bool:
     """Start or restart the server so *models* are loaded and ready for inference."""
+    global _server_started_by_playground
     try:
         from log_feed import LogTailer, extract_error_summary, prepare_log_session
     except ImportError:
@@ -158,6 +186,7 @@ async def ensure_models_loaded(
         status(f"Starting server with {', '.join(wanted)}…")
         await stop_playground_server()
         await start_playground_server(wanted)
+        _server_started_by_playground = True
 
         status("Waiting for server to respond…")
         if not await wait_for_health(base_url, log_path=_LOG_PATH):

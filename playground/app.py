@@ -17,12 +17,15 @@ try:
     from url_validation import validate_base_url
     from startup_screen import ModelSelectScreen
     from loading_screen import LoadingScreen
-    from server_control import ensure_models_loaded
+    from server_control import ensure_models_loaded, cleanup_playground_server_if_started_sync
 except ImportError:
     from playground.url_validation import validate_base_url
     from playground.startup_screen import ModelSelectScreen
     from playground.loading_screen import LoadingScreen
-    from playground.server_control import ensure_models_loaded
+    from playground.server_control import (
+        ensure_models_loaded,
+        cleanup_playground_server_if_started_sync,
+    )
 
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -506,7 +509,10 @@ def main() -> None:
         sys.exit(1)
     compare = tuple(args.compare) if args.compare else None
     app = InferenceXApp(base_url=base_url, compare=compare)
-    app.run()
+    try:
+        app.run()
+    finally:
+        cleanup_playground_server_if_started_sync()
 
 
 if __name__ == "__main__":

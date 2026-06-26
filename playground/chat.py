@@ -24,13 +24,16 @@ try:
     from startup_screen import ModelSelectScreen
     from url_validation import validate_base_url
     from loading_screen import LoadingScreen
-    from server_control import ensure_models_loaded
+    from server_control import ensure_models_loaded, cleanup_playground_server_if_started_sync
 except ImportError:
     from playground.streaming import stream_chat_tokens  # type: ignore[no-redef]
     from playground.startup_screen import ModelSelectScreen  # type: ignore[no-redef]
     from playground.url_validation import validate_base_url  # type: ignore[no-redef]
     from playground.loading_screen import LoadingScreen  # type: ignore[no-redef]
-    from playground.server_control import ensure_models_loaded  # type: ignore[no-redef]
+    from playground.server_control import (  # type: ignore[no-redef]
+        ensure_models_loaded,
+        cleanup_playground_server_if_started_sync,
+    )
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -340,7 +343,10 @@ def main() -> None:
         print(f"Error: {url_error}", file=sys.stderr)
         sys.exit(1)
     app = ChatApp(base_url=base_url, model=args.model)
-    app.run()
+    try:
+        app.run()
+    finally:
+        cleanup_playground_server_if_started_sync()
 
 
 if __name__ == "__main__":

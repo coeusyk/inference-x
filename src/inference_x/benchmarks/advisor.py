@@ -70,12 +70,29 @@ class ModelAdvisor:
         self,
         hardware: HardwareProfile,
         results: list[BenchmarkResult],
+        *,
+        model_max_lens: dict[str, int | None] | None = None,
     ) -> AdvisorReport:
         if not results:
             return AdvisorReport(ranked=[], warnings=[])
 
         warnings: list[str] = []
         eligible: list[BenchmarkResult] = []
+
+        def _maybe_warn_max_model_len(result: BenchmarkResult) -> None:
+            if model_max_lens is None:
+                return
+            current_max_model_len = model_max_lens.get(result.model_name)
+            if (
+                result.max_model_len is not None
+                and current_max_model_len is not None
+                and result.max_model_len != current_max_model_len
+            ):
+                warnings.append(
+                    f"{result.model_name}: benchmark used max_model_len="
+                    f"{result.max_model_len}, current config is {current_max_model_len}"
+                    f" — re-run `make benchmark MODEL={result.model_name}` to refresh."
+                )
 
         for result in results:
             if result.hardware is None:
@@ -84,6 +101,7 @@ class ModelAdvisor:
                     f"re-run `make benchmark MODEL={result.model_name}`"
                 )
                 eligible.append(result)
+                _maybe_warn_max_model_len(result)
                 continue
             if not _hardware_matches(result.hardware, hardware):
                 saved = _format_gpu_label(result.hardware)
@@ -95,6 +113,7 @@ class ModelAdvisor:
                 )
                 continue
             eligible.append(result)
+            _maybe_warn_max_model_len(result)
 
         if not eligible:
             return AdvisorReport(ranked=[], warnings=warnings)

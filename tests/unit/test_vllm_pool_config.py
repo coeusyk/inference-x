@@ -101,6 +101,26 @@ def test_single_model_respects_user_cap(fixed_footprints):
     assert scaled["gpu_memory_utilization"] <= 0.25
 
 
+def test_auto_resolves_at_startup(fixed_footprints, monkeypatch):
+    from inference_x.benchmarks.schemas import HardwareProfile
+
+    profile = HardwareProfile(
+        gpu_name="Test GPU",
+        vram_total_gb=8.0,
+        vram_free_gb=6.93,
+        cpu_cores=8,
+        ram_total_gb=16.0,
+        has_gpu=True,
+    )
+    monkeypatch.setattr(pool, "profile_hardware", lambda: profile)
+    monkeypatch.setattr(pool, "suggest_gpu_memory_utilization", lambda: 0.82)
+
+    cfg = _qwen_cfg()
+    cfg["gpu_memory_utilization"] = "auto"
+    scaled = scale_model_config_for_pool(cfg, pool_size=1, total_vram_gib=8.0)
+    assert scaled["gpu_memory_utilization"] == 0.82
+
+
 def test_two_model_pool_uses_weight_aware_share(fixed_footprints):
     qwen = _qwen_cfg()
     tiny = _tiny_cfg()

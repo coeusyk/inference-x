@@ -1,32 +1,35 @@
 models:
-  # gpu_memory_utilization is optional (auto-sized from GPU VRAM + model config).
-  # Set it only as a ceiling when you want to cap vLLM below the computed value.
+  # gpu_memory_utilization: auto — (vram_free - buffer) / vram_total at startup (DEC-035).
+  # max_model_len caps KV cache pre-allocation for lean local inference.
 
-  # Tiny base model - text completion only, NOT for instruction following
   - name: opt-125m
     engine: vllm
     model_path: facebook/opt-125m
-    max_model_len: 2048
+    gpu_memory_utilization: auto
+    max_model_len: 8192
 
-  # Small instruction-tuned models (ungated, good for dev/testing)
   - name: qwen2.5-0.5b
     engine: vllm
     model_path: Qwen/Qwen2.5-0.5B-Instruct
-    max_model_len: 4096
+    gpu_memory_utilization: auto
+    max_model_len: 8192
 
   - name: tinyllama-chat
     engine: vllm
     model_path: TinyLlama/TinyLlama-1.1B-Chat-v1.0
-    max_model_len: 2048
+    gpu_memory_utilization: auto
+    max_model_len: 8192
 
   - name: qwen2.5-1.5b
     engine: vllm
     model_path: Qwen/Qwen2.5-1.5B-Instruct
+    gpu_memory_utilization: auto
     max_model_len: 8192
 
-  # Gated on HuggingFace (gated: true is a documentation hint; access is checked at startup)
+  # fp16 weights ~16 GB — needs quantization on 8 GB GPUs (separate issue)
   - name: llama3-8b
     engine: vllm
     model_path: meta-llama/Meta-Llama-3-8B-Instruct
+    gpu_memory_utilization: auto
     max_model_len: 4096
     gated: true
