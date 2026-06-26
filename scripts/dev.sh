@@ -12,12 +12,17 @@ case "$cmd" in
     uv sync
     ;;
   serve)
+    # Preserve shell/cmdline INFERENCE_X_* before sourcing .env (match Python dotenv override=False).
+    _cli_default_model="${INFERENCE_X_DEFAULT_MODEL:-}"
+    _cli_loaded_models="${INFERENCE_X_LOADED_MODELS:-}"
     if [[ -f "$ROOT/.env" ]]; then
       set -a
       # shellcheck disable=SC1091
       source "$ROOT/.env"
       set +a
     fi
+    [[ -n "$_cli_default_model" ]] && export INFERENCE_X_DEFAULT_MODEL="$_cli_default_model"
+    [[ -n "$_cli_loaded_models" ]] && export INFERENCE_X_LOADED_MODELS="$_cli_loaded_models"
     export INFERENCE_X_DEFAULT_MODEL="${INFERENCE_X_DEFAULT_MODEL:-qwen2.5-0.5b}"
     # WSL2: FlashInfer sampler JIT needs a full CUDA toolkit; use PyTorch fallback.
     export VLLM_USE_FLASHINFER_SAMPLER="${VLLM_USE_FLASHINFER_SAMPLER:-0}"

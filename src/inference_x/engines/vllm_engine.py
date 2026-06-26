@@ -298,6 +298,7 @@ class VLLMEngine(BaseEngine):
         kwargs: dict[str, Any] = {
             "model": self._model_path,
             "dtype": "auto",
+            "trust_remote_code": True,
         }
         if hf_token:
             kwargs["hf_token"] = hf_token
