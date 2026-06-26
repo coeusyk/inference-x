@@ -102,17 +102,10 @@ def test_single_model_respects_user_cap(fixed_footprints):
 
 
 def test_auto_resolves_at_startup(fixed_footprints, monkeypatch):
-    from inference_x.benchmarks.schemas import HardwareProfile
-
-    profile = HardwareProfile(
-        gpu_name="Test GPU",
-        vram_total_gb=8.0,
-        vram_free_gb=6.93,
-        cpu_cores=8,
-        ram_total_gb=16.0,
-        has_gpu=True,
+    monkeypatch.setattr(
+        "inference_x.benchmarks.hardware._vram_for_utilization",
+        lambda: (6.93, 8.0, "torch"),
     )
-    monkeypatch.setattr(pool, "profile_hardware", lambda: profile)
     monkeypatch.setattr(pool, "suggest_gpu_memory_utilization", lambda: 0.82)
 
     cfg = _qwen_cfg()
