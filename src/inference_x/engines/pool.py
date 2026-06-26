@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import logging
+
 from inference_x.engines.base import BaseEngine
+
+logger = logging.getLogger(__name__)
 
 
 class EnginePool:
@@ -46,3 +50,14 @@ class EnginePool:
             name: "ok" if engine.is_healthy() else "unavailable"
             for name, engine in self._engines.items()
         }
+
+    def shutdown(self) -> None:
+        """Shut down every loaded engine and release subprocess resources."""
+        for name, engine in self._engines.items():
+            shutdown_fn = getattr(engine, "shutdown", None)
+            if not callable(shutdown_fn):
+                continue
+            try:
+                shutdown_fn()
+            except Exception as exc:
+                logger.warning("Failed to shut down engine %s: %s", name, exc)

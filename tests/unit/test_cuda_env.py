@@ -53,8 +53,10 @@ def test_ensure_cuda_home_respects_existing(monkeypatch, _clear_cuda_env):
 
 def test_ensure_vllm_process_env_sets_spawn(monkeypatch, _clear_cuda_env):
     monkeypatch.delenv("VLLM_WORKER_MULTIPROC_METHOD", raising=False)
+    monkeypatch.delenv("VLLM_ENABLE_V1_MULTIPROCESSING", raising=False)
     ensure_vllm_process_env()
     assert os.environ["VLLM_WORKER_MULTIPROC_METHOD"] == "spawn"
+    assert os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] == "0"
 
 
 def test_ensure_vllm_runtime_env_disables_flashinfer_on_wsl(monkeypatch, _clear_cuda_env):

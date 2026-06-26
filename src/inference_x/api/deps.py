@@ -116,3 +116,18 @@ def initialize_app() -> None:
         )
 
     logger.info("Engine pool ready: %s", pool.loaded_models())
+
+
+def shutdown_app() -> None:
+    """Release vLLM subprocesses and clear startup singleton caches."""
+    settings = get_settings()
+    if _build_engine_pool.cache_info().currsize:
+        try:
+            pool = _build_engine_pool(settings.config_dir, tuple(settings.loaded_models))
+            pool.shutdown()
+        except Exception as exc:
+            logger.warning("Engine pool shutdown failed: %s", exc)
+    _build_engine_pool.cache_clear()
+    _build_registry.cache_clear()
+    _build_router.cache_clear()
+    logger.info("InferenceX shutdown complete")

@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import queue
+import re
 import threading
 import uuid
 from collections.abc import AsyncGenerator
@@ -206,6 +207,14 @@ def _map_vllm_init_error(model_name: str, model_path: str, exc: Exception) -> Ru
     if "not found" in lower:
         return RuntimeError(
             f"Model not found: {model_path}. Check model_path in config/models.yaml."
+        )
+    if "greater than the derived max_model_len" in lower:
+        limit_match = re.search(r"derived max_model_len \(max_position_embeddings=([\d.]+)", msg)
+        limit_hint = limit_match.group(1).rstrip(".0") if limit_match else "the model limit"
+        return RuntimeError(
+            f"max_model_len in config/models.yaml for {model_name} exceeds the "
+            f"model's position limit ({limit_hint}). Lower max_model_len for "
+            f"{model_name} in config/models.yaml."
         )
     if "nvcc" in lower or "cuda_home" in lower:
         return RuntimeError(
@@ -496,3 +505,20 @@ class VLLMEngine(BaseEngine):
 
     def is_healthy(self) -> bool:
         return self._healthy
+
+    def shutdown(self) -> None:
+        """Stop the vLLM engine subprocess and release multiprocessing resources."""
+        llm = getattr(self, "_llm", None)
+        if llm is None:
+            return
+        self._healthy = False
+        try:
+            with self._engine_lock:
+                llm.llm_engine.engine_core.shutdown()
+        except Exception as exc:
+            logger.warning(
+                "Error shutting down vLLM engine for %s: %s", self._model_name, exc
+            )
+        finally:
+            self._llm = None  # type: ignore[assignment]
+            logger.info("vLLM engine shut down: model=%s", self._model_name)

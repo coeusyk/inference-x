@@ -49,6 +49,7 @@ async def lifespan(app: FastAPI):
         logger.critical("Startup initialization failed: %s", exc, exc_info=True)
         raise
     yield
+    deps.shutdown_app()
 
 
 app = FastAPI(

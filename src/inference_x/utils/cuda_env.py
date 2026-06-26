@@ -49,6 +49,9 @@ def ensure_vllm_process_env() -> None:
     """Set vLLM worker/process env before any vLLM import (avoids override warnings)."""
     # vLLM requires spawn on Linux/WSL; set early so it is not logged as an override.
     os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+    # Embedded offline LLM: in-process engine avoids orphaned multiprocessing
+    # semaphores on Python 3.13 shutdown when vLLM uses a subprocess IPC client.
+    os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
 
 def ensure_cuda_home() -> str | None:

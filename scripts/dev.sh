@@ -27,6 +27,7 @@ case "$cmd" in
     # WSL2: FlashInfer sampler JIT needs a full CUDA toolkit; use PyTorch fallback.
     export VLLM_USE_FLASHINFER_SAMPLER="${VLLM_USE_FLASHINFER_SAMPLER:-0}"
     export VLLM_WORKER_MULTIPROC_METHOD="${VLLM_WORKER_MULTIPROC_METHOD:-spawn}"
+    export VLLM_ENABLE_V1_MULTIPROCESSING="${VLLM_ENABLE_V1_MULTIPROCESSING:-0}"
     # FlashInfer JIT (used by vLLM sampling) needs nvcc; vllm bundles it under site-packages/nvidia/cu*/
     if [[ -z "${CUDA_HOME:-}" && -z "${CUDA_PATH:-}" ]]; then
       _nvcc="$(find .venv/lib -path '*/nvidia/cu*/bin/nvcc' -type f 2>/dev/null | sort | tail -1)"
