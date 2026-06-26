@@ -1,176 +1,164 @@
 # Contributing to InferenceX
 
-InferenceX is a self-hosted LLM inference platform built incrementally. Contributions
-are welcome — bug reports, fixes, documentation improvements, and new features that
-fit the project's scope and phase roadmap.
+InferenceX is a personal learning project, open to contributions that fit its scope:
+self-hosted LLM inference on consumer hardware, with a clean layered API and useful
+developer tooling. Contributions are welcome but the bar is specificity — vague
+proposals or broad refactors without a concrete problem statement will be closed.
 
-***
+---
 
 ## Before you start
 
-Read `docs/ARCHITECTURE.md` and `docs/DECISIONS.md` first. The architecture doc explains
-the layer boundaries (routes → service → engine → vLLM adapter). The decisions doc
-explains *why* things are the way they are — many choices that look unconventional have
-a recorded rationale.
+Read these first:
 
-If you're planning a non-trivial change, open an issue first and describe what you're
-building and why. This avoids duplicate work and ensures the change aligns with the
-current phase.
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — layer responsibilities and boundaries
+- [`docs/DECISIONS.md`](docs/DECISIONS.md) — why the non-obvious choices were made
+- [`docs/PHASES.md`](docs/PHASES.md) — what was built and in what order
+- [`AGENTS.md`](AGENTS.md) — repo working agreement (file boundaries, anti-scope rules)
 
-***
+If your change would violate a decision in `DECISIONS.md` or cross a file boundary in
+`AGENTS.md`, explain why in your proposal before writing any code.
 
-## Development setup
+---
 
-**Requirements:** Python 3.13+, [`uv`](https://docs.astral.sh/uv/), a CUDA-capable GPU,
-and WSL2 or Linux.
+## What fits
+
+- Bug fixes with a clear reproduction case
+- WSL2 / consumer GPU compatibility improvements
+- New model configurations in `config/models.yaml`
+- Observability improvements (new metrics, exporter formats)
+- Playground UX fixes (not full redesigns)
+- Documentation corrections and clarifications
+- Test coverage for untested paths
+
+## What does not fit
+
+- Authentication / multi-user support (DEC-DEFER-01 — out of scope for local-only deployment)
+- Rate limiting (DEC-DEFER-02)
+- Non-vLLM inference backends at this time
+- Breaking changes to the OpenAI-compatible API contract
+- New playground tabs or major UI additions without a prior discussion
+
+If you're unsure, open an issue before writing code.
+
+---
+
+## Setup
 
 ```bash
-git clone https://github.com/coeusyk/inference-x
+git clone https://github.com/coeusyk/inference-x.git
 cd inference-x
 uv sync
-cp .env.example .env          # add HF_TOKEN if using gated models
-./scripts/dev.sh serve        # start the dev server
+cp .env.example .env
+uv run pytest tests/unit -q   # must pass without a GPU
 ```
 
-For hardware-profiling accuracy on WSL2:
+> `uv` is required. Do not use bare `pip` or `python` — vLLM and its CUDA wheels are
+> managed through the `.venv` created by `uv sync`.
 
-```bash
-uv sync --extra hardware      # installs nvidia-ml-py + psutil
-```
+For changes that require a GPU, test on WSL2 Ubuntu. That is the supported runtime.
+Non-WSL2 Linux may work but is not the primary target.
 
-***
+---
 
-## Project structure
+## Making a change
 
-```
-src/inference_x/
-├── api/            # FastAPI routes — no business logic here
-├── core/           # Service layer, engine interface, model registry
-├── engine/         # vLLM adapter and engine pool
-├── benchmarks/     # Runner, advisor, hardware profiler, storage
-├── observability/  # Metrics middleware and ring buffer
-└── playground/     # Textual TUI (chat, compare, loading screen)
+### 1. Open an issue first (for anything non-trivial)
 
-scripts/            # CLI entry points (advise.py, benchmark.py, etc.)
-config/             # models.yaml, logging.yaml
-docs/               # ARCHITECTURE.md, DECISIONS.md, PHASES.md
-tests/unit/         # All tests — mirrors src/ structure
-```
+Describe:
+- What problem you're solving
+- What you tried and why it didn't work
+- What you propose to do
 
-The key constraint: **route handlers must not contain business logic**. Routes call
-services; services call engines. If you find yourself writing conditional logic inside
-a route handler, it belongs in the service layer.
+For bugs: include the exact error, the command that produced it, your GPU model, and
+the output of `nvidia-smi`.
 
-***
+### 2. One concern per pull request
 
-## Making changes
+Keep PRs focused. A bug fix and an unrelated cleanup in the same PR will be asked to
+split. The diff should be readable in one sitting.
 
-### Branching
+### 3. Follow the file boundaries
 
-Branch from `develop`, not `main`. Use a descriptive name:
+From `AGENTS.md`:
 
-```
-feat/cold-start-margin
-fix/advisor-vram-gate
-docs/dec-034-rationale
-```
+| Path | What belongs there |
+|---|---|
+| `src/inference_x/api/` | FastAPI routes, deps, error mapping — nothing else |
+| `src/inference_x/services/` | Orchestration and use-case logic |
+| `src/inference_x/engines/` | Engine interfaces and vLLM implementation |
+| `src/inference_x/routing/` | Model selection policies |
+| `src/inference_x/observability/` | Middleware, metrics, storage, exporters |
+| `src/inference_x/schemas/` | Request/response models only |
+| `src/inference_x/benchmarks/` | Benchmark runner, hardware profiler, advisor |
+| `playground/` | TUI clients only — no server logic |
+| `tests/` | Unit, integration, contract tests |
+| `config/` | Runtime configuration only |
+| `docs/` | Architecture, decisions, phases |
 
-### Code style
+Route handlers must stay thin. Business logic goes in services. If you find yourself
+adding a database call or complex branching to a route handler, it belongs in a service.
 
-The project uses `ruff` for linting and formatting.
+### 4. Tests
 
-```bash
-uv run ruff check .
-uv run ruff format .
-```
+- Unit tests for any new logic in `src/inference_x/`
+- Unit tests do not require a GPU — mock the engine if needed
+- Existing tests must continue to pass: `uv run pytest tests/unit -q`
+- If you're fixing a bug, add a test that would have caught it
 
-Both must pass before opening a pull request.
+The current count is 286 passing. A PR that reduces this number will not be merged
+unless the removed tests were covering deleted code.
 
-### Tests
+### 5. Record non-obvious decisions
 
-All tests live in `tests/unit/`. Run the full suite with:
+If your PR makes a choice that isn't obvious from the code — a tradeoff, a deliberate
+limitation, a rejected alternative — add a `DEC-XXX` entry to `docs/DECISIONS.md`
+using the existing template. This is how the project avoids relitigating settled
+questions.
 
-```bash
-make test
-```
+### 6. Code style
 
-**Every code change needs a test.** The bar:
-- New functions → at least one happy-path and one failure-mode test
-- Bug fixes → a regression test that fails on the old code and passes on the fix
-- New edge cases → assert the exact output string or value, not just `is not None`
+- Python 3.13+ — use modern type hints (`str | None`, not `Optional[str]`)
+- `from __future__ import annotations` at the top of every file
+- No third-party formatters are enforced, but match the surrounding code style
+- Docstrings on public classes and functions; inline comments only for non-obvious logic
+- No `print()` in library code — use the configured logger
 
-The current test count is tracked in the README badge. Update it if your PR changes
-the count.
+---
 
-### Commit messages
-
-Use the conventional commit format:
-
-```
-feat: add cold-start margin to VRAM viability gate
-fix: peak_vram_delta_gb always 0 when model pre-loaded
-docs: add DEC-034 rationale for cold-start multiplier
-test: regression for marginal footprint not viable with margin
-refactor: extract _format_vram_requirement helper
-```
-
-Reference the issue number in the commit body or use `Fixes #N` to auto-close:
+## Pull request checklist
 
 ```
-feat: implement cold-start margin for advisor viability gate
-
-Fixes #3
+[ ] uv run pytest tests/unit -q — all passing
+[ ] No new warnings in pytest output
+[ ] File boundaries respected (see AGENTS.md)
+[ ] Non-obvious decisions recorded in docs/DECISIONS.md
+[ ] PR description explains what changed and why
+[ ] If GPU-dependent: tested on WSL2 with a CUDA GPU
 ```
 
-***
-
-## Pull requests
-
-- Target `develop`
-- Keep PRs focused — one logical change per PR
-- Include a short description of *what* changed and *why*, not just *how*
-- Update `docs/DECISIONS.md` with a `DEC-NNN` entry for any non-obvious design choice
-- Update `docs/PHASES.md` if the change relates to a phase deliverable
-- The README test badge (`tests-NNN passing`) should reflect the new count
-
-PR titles should follow the same conventional commit format as commit messages.
-
-***
-
-## What to contribute
-
-### Good fits
-- Bug fixes with a clear reproduction case
-- New benchmark prompt variants (add to `benchmarks/prompts/`)
-- Additional hardware profiling accuracy improvements
-- Documentation and decision record improvements
-- New models added to `config/models.yaml` with tested `gpu_memory_utilization` values
-- Observability improvements (new metrics, better aggregation)
-
-### Out of scope for now
-- Authentication / rate limiting (deferred — DEC-DEFER-01, DEC-DEFER-02)
-- Multi-GPU support
-- Docker / container packaging
-- Any change that requires modifying the vLLM engine internals directly
-
-If you're unsure whether something fits, open an issue and ask before building.
-
-***
+---
 
 ## Reporting bugs
 
-Open an issue with:
-- What you ran (`make chat`, `make advise`, etc.)
-- What you expected to happen
-- What actually happened (include the full error output or log excerpt)
-- Your hardware (`nvidia-smi` output or equivalent) and OS
+Use GitHub Issues. Include:
 
-For VRAM or model loading issues, include the output of `make advise` — it shows
-your hardware profile and which models are marked viable.
+1. What you ran (exact command)
+2. What you expected
+3. What actually happened (full error output)
+4. Your environment:
+   ```bash
+   uv run python --version
+   nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader
+   uname -r   # kernel version (for WSL2 issues)
+   ```
 
-***
+For vLLM-specific failures, also include the relevant lines from
+`logs/playground-server.log`.
 
-## License
+---
 
-By contributing, you agree that your changes will be licensed under the
-[MIT License](./LICENSE) that covers this project.
+## Questions
+
+Open a GitHub Discussion or file an issue tagged `question`. Response time is
+best-effort — this is a one-person project.
