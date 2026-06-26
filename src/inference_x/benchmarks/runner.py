@@ -17,6 +17,7 @@ import httpx
 
 from inference_x.benchmarks.hardware import profile_hardware
 from inference_x.benchmarks.schemas import BenchmarkResult, HardwareProfile, PromptResult
+from inference_x.services.model_service import ModelRegistry
 
 
 def _load_suite(suite_path: str) -> tuple[str, list[dict]]:
@@ -115,9 +116,16 @@ class BenchmarkRunner:
         suite_path: str,
         base_url: str = "http://127.0.0.1:8000",
         concurrency: int = 1,
+        config_dir: str = "config",
     ) -> BenchmarkResult:
         base_url = base_url.rstrip("/")
         suite_version, prompts = _load_suite(suite_path)
+
+        max_model_len: int | None = None
+        try:
+            max_model_len = ModelRegistry.from_config(config_dir).get(model_name).max_model_len
+        except (FileNotFoundError, ValueError):
+            pass
 
         hardware_before = profile_hardware()
         prompt_results: list[PromptResult] = []
@@ -152,4 +160,5 @@ class BenchmarkRunner:
             mean_throughput_tps=round(statistics.mean(throughputs) if throughputs else 0.0, 2),
             peak_vram_delta_gb=round(peak_vram_delta, 2),
             hardware=hardware_before,
+            max_model_len=max_model_len,
         )

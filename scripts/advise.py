@@ -20,6 +20,7 @@ if str(_src) not in sys.path:
 from inference_x.benchmarks.advisor import ModelAdvisor, cold_start_margin
 from inference_x.benchmarks.hardware import profile_hardware
 from inference_x.benchmarks.storage import ResultStore
+from inference_x.services.model_service import ModelRegistry
 
 
 def main() -> None:
@@ -37,8 +38,17 @@ def main() -> None:
         sys.exit(1)
 
     hardware = profile_hardware()
+    try:
+        registry = ModelRegistry.from_config("config")
+        model_max_lens = {m.name: m.max_model_len for m in registry.all()}
+    except FileNotFoundError:
+        model_max_lens = None
     advisor = ModelAdvisor()
-    report = advisor.rank(hardware, list(latest.values()))
+    report = advisor.rank(
+        hardware,
+        list(latest.values()),
+        model_max_lens=model_max_lens,
+    )
     ranked = report.ranked
 
     if report.warnings:

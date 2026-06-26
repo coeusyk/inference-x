@@ -9,6 +9,11 @@ from textual.containers import Center, Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Label, RichLog, Rule, Static
 
+try:
+    from scroll_utils import scroll_to_end
+except ImportError:
+    from playground.scroll_utils import scroll_to_end
+
 _STEP_NAMES = ("Server", "Model", "Ready")
 
 
@@ -215,6 +220,7 @@ class LoadingScreen(ModalScreen[None]):
                 log.write(f"[#d06c75]{line}[/]")
             else:
                 log.write(f"[#7f8795]{line}[/]")
+            scroll_to_end(self.query_one("#loading-log-scroll", VerticalScroll))
         except Exception:
             pass
 

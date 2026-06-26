@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+from functools import lru_cache
 from typing import Optional
 
 from inference_x.benchmarks.schemas import HardwareProfile
@@ -102,3 +103,46 @@ def profile_hardware() -> HardwareProfile:
         return profile
 
     return _cpu_only_profile()
+
+
+def _probe_torch_vram_gib() -> tuple[float | None, float | None]:
+    """Return (free_gib, total_gib) from the CUDA allocator view, or (None, None)."""
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            free, total = torch.cuda.mem_get_info(0)
+            return free / (1024**3), total / (1024**3)
+    except Exception:
+        pass
+    return None, None
+
+
+def _vram_for_utilization() -> tuple[float, float, str]:
+    """VRAM basis for gpu_memory_utilization sizing (prefer torch — matches vLLM)."""
+    free_gib, total_gib = _probe_torch_vram_gib()
+    if free_gib is not None and total_gib is not None:
+        return free_gib, total_gib, "torch"
+    hw = profile_hardware()
+    if hw.has_gpu:
+        return hw.vram_free_gb, hw.vram_total_gb, "nvml"
+    return 0.0, 0.0, "none"
+
+
+@lru_cache(maxsize=1)
+def suggest_gpu_memory_utilization() -> float:
+    """
+    Compute gpu_memory_utilization as (free_vram - buffer) / total_vram.
+
+    vLLM treats utilization as a fraction of total VRAM, so deriving the fraction
+    from free VRAM ensures the allocation stays within what is actually available.
+    Uses torch.cuda.mem_get_info when available (same view as vLLM); falls back to
+    nvidia-smi/nvml. Clamped to [0.50, 0.95]. Cached for the process lifetime.
+    """
+    buffer = float(os.getenv("INFERENCEX_VRAM_SAFETY_BUFFER_GB", "0.4"))
+    free_gib, total_gib, source = _vram_for_utilization()
+    if source == "none":
+        return 1.0
+    usable_gb = free_gib - buffer
+    utilization = usable_gb / total_gib
+    return round(max(0.50, min(0.95, utilization)), 2)

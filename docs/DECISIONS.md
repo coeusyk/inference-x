@@ -355,3 +355,25 @@ Use this document to capture non-obvious design decisions as the project evolves
   non-viable (3.6 GB required). Default 1.20 is conservative but not extreme. Measuring
   true cold-load peak in the benchmark runner (server restart per model) is deferred to a
   later phase.
+
+### DEC-035
+- Date: 2026-06-25
+- Status: accepted
+- Context: `gpu_memory_utilization=0.90` against total VRAM requires 7.2 GB on an 8 GB card;
+  machines with ~1 GB overhead (driver + desktop) fail immediately even when 6.93 GB is
+  free. vLLM's default `max_model_len` of 32768 pre-allocates ~2 GB KV cache per small
+  model, blocking dual-model use on 6–8 GB GPUs.
+- Decision: `gpu_memory_utilization: auto` computes `(vram_free - buffer) / vram_total` at
+  startup (buffer default 0.4 GB via `INFERENCEX_VRAM_SAFETY_BUFFER_GB`, clamped
+  [0.50, 0.95]). All models default to `auto`. `max_model_len: 8192` for sub-2B models
+  (covers local chat; drops KV cache from ~2 GB to ~0.5 GB); `llama3-8b` uses 4096.
+- Why free-VRAM basis: vLLM's utilization is a fraction of total VRAM — deriving the
+  fraction from free VRAM is the only way to stay within actually available memory.
+  Sizing uses `torch.cuda.mem_get_info` when CUDA is active (same allocator view as
+  vLLM); nvidia-smi is used only as fallback before torch init.
+- Why 8192: ~6000 words of context; sufficient for playground and benchmark use cases;
+  raise per-model in `models.yaml` when longer context is needed.
+- Why 0.4 GB buffer: covers CUDA context growth during inference.
+- Deferred: llama3-8b quantization for 8 GB GPUs; multi-model sequential VRAM profiling.
+- Consequences: Startup logs show resolved utilization with `(free − buffer) / total`
+  breakdown. `BenchmarkResult` stores `max_model_len`; advisor warns on config drift.

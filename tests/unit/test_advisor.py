@@ -229,3 +229,57 @@ class TestModelAdvisorHardware:
         report = advisor.rank(_hw(vram_free=6.0, vram_total=8.0), results)
         assert len(report.ranked) == 1
         assert any("No hardware recorded" in w for w in report.warnings)
+
+
+class TestAdvisorMaxModelLenWarning:
+    def test_warns_on_mismatch(self, make_hardware):
+        hw = make_hardware()
+        results = [
+            BenchmarkResult(
+                model_name="qwen2.5-0.5b",
+                suite_version="test",
+                timestamp="2026-06-08T12:00:00+00:00",
+                mean_throughput_tps=40.0,
+                peak_vram_delta_gb=1.5,
+                hardware=hw,
+                max_model_len=4096,
+                prompt_results=[
+                    PromptResult(
+                        prompt_label="q1",
+                        tokens_generated=20,
+                        ttft_ms=100.0,
+                        total_latency_ms=800.0,
+                        tokens_per_sec=40.0,
+                    )
+                ],
+            ),
+        ]
+        advisor = ModelAdvisor()
+        report = advisor.rank(
+            hw,
+            results,
+            model_max_lens={"qwen2.5-0.5b": 8192},
+        )
+        assert any("max_model_len=4096" in w and "8192" in w for w in report.warnings)
+        assert len(report.ranked) == 1
+
+    def test_no_warning_when_matching(self, make_hardware):
+        hw = make_hardware()
+        results = [
+            BenchmarkResult(
+                model_name="qwen2.5-0.5b",
+                suite_version="test",
+                timestamp="2026-06-08T12:00:00+00:00",
+                mean_throughput_tps=40.0,
+                peak_vram_delta_gb=1.5,
+                hardware=hw,
+                max_model_len=8192,
+            ),
+        ]
+        advisor = ModelAdvisor()
+        report = advisor.rank(
+            hw,
+            results,
+            model_max_lens={"qwen2.5-0.5b": 8192},
+        )
+        assert not any("max_model_len" in w for w in report.warnings)

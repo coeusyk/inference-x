@@ -35,6 +35,7 @@ class BenchmarkResult(BaseModel):
     mean_throughput_tps: float = 0.0
     peak_vram_delta_gb: float = 0.0
     hardware: Optional[HardwareProfile] = None
+    max_model_len: Optional[int] = None
 
 
 class AdvisorResult(BaseModel):

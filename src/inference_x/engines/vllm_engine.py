@@ -303,8 +303,9 @@ class VLLMEngine(BaseEngine):
             kwargs["hf_token"] = hf_token
         if "gpu_memory_utilization" in model_config:
             kwargs["gpu_memory_utilization"] = model_config["gpu_memory_utilization"]
-        if "max_model_len" in model_config:
-            kwargs["max_model_len"] = model_config["max_model_len"]
+        max_model_len = model_config.get("max_model_len")
+        if max_model_len is not None:
+            kwargs["max_model_len"] = max_model_len
         if model_config.get("quantization"):
             kwargs["quantization"] = model_config["quantization"]
         if pool_size > 1:

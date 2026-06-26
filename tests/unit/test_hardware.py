@@ -13,6 +13,7 @@ from inference_x.benchmarks.hardware import (
     _profile_via_nvidia_smi,
     _profile_via_nvml,
     profile_hardware,
+    suggest_gpu_memory_utilization,
 )
 from inference_x.benchmarks.schemas import HardwareProfile
 
@@ -31,6 +32,59 @@ def _make_pynvml_mock(gpu_name: str, total_mib: int, free_mib: int) -> ModuleTyp
     pynvml.nvmlDeviceGetName.return_value = gpu_name
     pynvml.nvmlDeviceGetMemoryInfo.return_value = mem_info
     return pynvml
+
+
+def _hw_profile(
+    *,
+    total: float,
+    free: float,
+    has_gpu: bool = True,
+) -> HardwareProfile:
+    return HardwareProfile(
+        gpu_name="Test GPU" if has_gpu else None,
+        vram_total_gb=total,
+        vram_free_gb=free,
+        cpu_cores=8,
+        ram_total_gb=16.0,
+        has_gpu=has_gpu,
+    )
+
+
+@pytest.fixture(autouse=True)
+def _clear_util_cache():
+    suggest_gpu_memory_utilization.cache_clear()
+    yield
+    suggest_gpu_memory_utilization.cache_clear()
+
+
+@pytest.fixture()
+def mock_hw(monkeypatch):
+    """Patch VRAM probes for suggest_gpu_memory_utilization tests."""
+
+    def _apply(
+        *,
+        total: float = 8.0,
+        free: float = 6.93,
+        has_gpu: bool = True,
+    ) -> HardwareProfile:
+        profile = _hw_profile(total=total, free=free, has_gpu=has_gpu)
+        monkeypatch.setattr(
+            "inference_x.benchmarks.hardware.profile_hardware",
+            lambda: profile,
+        )
+        if has_gpu:
+            monkeypatch.setattr(
+                "inference_x.benchmarks.hardware._probe_torch_vram_gib",
+                lambda: (free, total),
+            )
+        else:
+            monkeypatch.setattr(
+                "inference_x.benchmarks.hardware._probe_torch_vram_gib",
+                lambda: (None, None),
+            )
+        return profile
+
+    return _apply
 
 
 # ---------------------------------------------------------------------------
@@ -156,3 +210,31 @@ class TestProfileHardwareFallbackChain:
             with patch("subprocess.run", side_effect=FileNotFoundError):
                 profile = profile_hardware()
         assert isinstance(profile, HardwareProfile)
+
+
+# ---------------------------------------------------------------------------
+# GPU memory utilization suggestion
+# ---------------------------------------------------------------------------
+
+class TestSuggestGpuMemoryUtilization:
+    def test_normal_case(self, mock_hw):
+        mock_hw(total=8.0, free=6.93)
+        assert suggest_gpu_memory_utilization() == 0.82
+
+    def test_clamp_low(self, mock_hw):
+        mock_hw(total=8.0, free=1.0)
+        assert suggest_gpu_memory_utilization() == 0.50
+
+    def test_clamp_high(self, mock_hw):
+        # (8.0 - 0.4) / 8.0 = 0.95
+        mock_hw(total=8.0, free=8.0)
+        assert suggest_gpu_memory_utilization() == 0.95
+
+    def test_cpu_only(self, mock_hw):
+        mock_hw(total=0.0, free=0.0, has_gpu=False)
+        assert suggest_gpu_memory_utilization() == 1.0
+
+    def test_env_var_buffer(self, mock_hw, monkeypatch):
+        monkeypatch.setenv("INFERENCEX_VRAM_SAFETY_BUFFER_GB", "0.8")
+        mock_hw(total=8.0, free=6.93)
+        assert suggest_gpu_memory_utilization() == 0.77

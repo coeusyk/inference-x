@@ -101,6 +101,19 @@ def test_single_model_respects_user_cap(fixed_footprints):
     assert scaled["gpu_memory_utilization"] <= 0.25
 
 
+def test_auto_resolves_at_startup(fixed_footprints, monkeypatch):
+    monkeypatch.setattr(
+        "inference_x.benchmarks.hardware._vram_for_utilization",
+        lambda: (6.93, 8.0, "torch"),
+    )
+    monkeypatch.setattr(pool, "suggest_gpu_memory_utilization", lambda: 0.82)
+
+    cfg = _qwen_cfg()
+    cfg["gpu_memory_utilization"] = "auto"
+    scaled = scale_model_config_for_pool(cfg, pool_size=1, total_vram_gib=8.0)
+    assert scaled["gpu_memory_utilization"] == 0.82
+
+
 def test_two_model_pool_uses_weight_aware_share(fixed_footprints):
     qwen = _qwen_cfg()
     tiny = _tiny_cfg()

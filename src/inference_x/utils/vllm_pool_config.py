@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 from functools import lru_cache
 from typing import Any
+
+from inference_x.benchmarks.hardware import suggest_gpu_memory_utilization
 
 logger = logging.getLogger(__name__)
 
@@ -132,10 +135,55 @@ def _multi_engine_overhead_gib(total_vram_gib: float) -> float:
     return min(3.35, total_vram_gib * 0.42)
 
 
+def resolve_gpu_memory_utilization(
+    value: str | float,
+    *,
+    model_name: str = "",
+    max_model_len: int | None = None,
+) -> float:
+    """Resolve models.yaml gpu_memory_utilization, including the ``auto`` sentinel."""
+    if value == "auto":
+        buffer = float(os.getenv("INFERENCEX_VRAM_SAFETY_BUFFER_GB", "0.4"))
+        from inference_x.benchmarks.hardware import _vram_for_utilization
+
+        free_gib, total_gib, source = _vram_for_utilization()
+        resolved = suggest_gpu_memory_utilization()
+        max_len_label = (
+            str(max_model_len)
+            if max_model_len is not None
+            else "vLLM default (uncapped)"
+        )
+        if source != "none":
+            logger.info(
+                "Loading %s\n"
+                "  gpu_memory_utilization: auto → %.2f\n"
+                "    (%.2f GB free − %.2f GB buffer) / %.2f GB total [%s]\n"
+                "  max_model_len: %s",
+                model_name or "?",
+                resolved,
+                free_gib,
+                buffer,
+                total_gib,
+                source,
+                max_len_label,
+            )
+        else:
+            logger.info(
+                "Loading %s\n"
+                "  gpu_memory_utilization: auto → %.2f (no GPU detected)\n"
+                "  max_model_len: %s",
+                model_name or "?",
+                resolved,
+                max_len_label,
+            )
+        return resolved
+    return float(value)
+
+
 def _user_util_cap(config: dict[str, Any]) -> float | None:
     """Optional user ceiling from models.yaml (omit to fully auto-size)."""
     raw = config.get("gpu_memory_utilization")
-    if raw is None:
+    if raw is None or raw == "auto":
         return None
     return float(raw)
 
@@ -334,6 +382,16 @@ def scale_model_config_for_pool(
     scaled = dict(config)
     if pool_configs is None:
         pool_configs = [scaled]
+
+    if scaled.get("gpu_memory_utilization") == "auto":
+        max_model_len = scaled.get("max_model_len")
+        util = resolve_gpu_memory_utilization(
+            "auto",
+            model_name=str(scaled.get("name", "")),
+            max_model_len=int(max_model_len) if max_model_len is not None else None,
+        )
+        scaled["gpu_memory_utilization"] = util
+        return scaled
 
     if pool_size <= 1:
         util = _single_engine_utilization(

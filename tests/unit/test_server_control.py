@@ -61,6 +61,7 @@ async def test_ensure_models_loaded_skips_restart_when_already_loaded(monkeypatc
     assert ok is True
     assert calls["restart"] == 0
     assert calls["wait"] == 1
+    assert sc.playground_started_server() is False
 
 
 @pytest.mark.asyncio
@@ -93,3 +94,29 @@ async def test_ensure_models_loaded_restarts_when_model_missing(monkeypatch):
     ok = await sc.ensure_models_loaded("http://test", ["tinyllama-chat"])
     assert ok is True
     assert calls["start"] == [["tinyllama-chat"]]
+    assert sc.playground_started_server() is True
+
+
+@pytest.fixture(autouse=True)
+def _reset_playground_server_flag():
+    sc._reset_playground_server_state()
+    yield
+    sc._reset_playground_server_state()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_stops_only_when_playground_started(monkeypatch):
+    stop_calls: list[str] = []
+
+    async def fake_stop():
+        stop_calls.append("stop")
+
+    monkeypatch.setattr(sc, "stop_playground_server", fake_stop)
+
+    await sc.cleanup_playground_server_if_started()
+    assert stop_calls == []
+
+    sc._server_started_by_playground = True
+    await sc.cleanup_playground_server_if_started()
+    assert stop_calls == ["stop"]
+    assert sc.playground_started_server() is False
