@@ -1,6 +1,9 @@
 models:
   # gpu_memory_utilization: auto — (vram_free - buffer) / vram_total at startup (DEC-035).
   # max_model_len caps KV cache pre-allocation for lean local inference.
+  #
+  # 8 GiB WSL2 ceiling (bf16, max_model_len 8192): dense models up to ~1.5B work reliably.
+  # Larger / hybrid models (Qwen3.5 Mamba, 3B+, 8B) need more VRAM or quantization — not listed here.
 
   - name: opt-125m
     engine: vllm
@@ -31,23 +34,3 @@ models:
     model_path: openbmb/MiniCPM5-1B
     gpu_memory_utilization: auto
     max_model_len: 8192
-
-  - name: qwen2.5-3b
-    engine: vllm
-    model_path: Qwen/Qwen2.5-3B-Instruct
-    gpu_memory_utilization: auto
-    max_model_len: 8192
-
-  - name: minicpm3-4b
-    engine: vllm
-    model_path: openbmb/MiniCPM3-4B
-    gpu_memory_utilization: auto
-    max_model_len: 8192
-
-  # fp16 weights ~16 GB — needs quantization on 8 GB GPUs (separate issue)
-  - name: llama3-8b
-    engine: vllm
-    model_path: meta-llama/Meta-Llama-3-8B-Instruct
-    gpu_memory_utilization: auto
-    max_model_len: 4096
-    gated: true

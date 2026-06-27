@@ -6,7 +6,7 @@
 [![vLLM](https://img.shields.io/badge/inference-vLLM-6E40C9?style=flat-square)](https://docs.vllm.ai)
 [![OpenAI-compatible](https://img.shields.io/badge/API-OpenAI--compatible-412991?style=flat-square&logo=openai&logoColor=white)](https://platform.openai.com/docs/api-reference)
 [![uv](https://img.shields.io/badge/package%20manager-uv-DE5FE9?style=flat-square)](https://docs.astral.sh/uv/)
-[![Tests](https://img.shields.io/badge/tests-286%20passing-22C55E?style=flat-square&logo=pytest&logoColor=white)](./tests)
+[![Tests](https://img.shields.io/badge/tests-302%20passing-22C55E?style=flat-square&logo=pytest&logoColor=white)](./tests)
 [![License: MIT](https://img.shields.io/badge/license-MIT-F59E0B?style=flat-square)](./LICENSE)
 
 InferenceX is a self-hosted LLM inference platform built incrementally on top of vLLM. It provides an OpenAI-compatible `POST /v1/chat/completions` endpoint, a model registry, an observability pipeline, and an interactive Textual playground — all designed to run on a single WSL2 machine with one consumer-grade GPU.
@@ -86,6 +86,8 @@ stall during server startup:
 ```bash
 # Using huggingface-cli (recommended)
 uv run huggingface-cli download Qwen/Qwen2.5-0.5B-Instruct
+uv run huggingface-cli download Qwen/Qwen2.5-1.5B-Instruct
+uv run huggingface-cli download openbmb/MiniCPM5-1B
 uv run huggingface-cli download TinyLlama/TinyLlama-1.1B-Chat-v1.0
 uv run huggingface-cli download facebook/opt-125m
 
@@ -97,10 +99,10 @@ snapshot_download('TinyLlama/TinyLlama-1.1B-Chat-v1.0')
 "
 ```
 
-For gated models (e.g. `llama3-8b` in `config/models.yaml`):
+For gated models (not in the default 8 GiB registry — add manually to `config/models.yaml` if you have ≥16 GiB VRAM and HuggingFace access):
 
 1. Request access on the [model page](https://huggingface.co/meta-llama/Meta-Llama-3-8B-Instruct) and wait for approval.
-2. Authenticate locally:
+2. Add an entry to `config/models.yaml` (see `tests/unit/test_vllm_gated.py` for shape), then authenticate locally:
 
 ```bash
 uv run huggingface-cli login
@@ -327,7 +329,7 @@ export VLLM_USE_FLASHINFER_SAMPLER=0
 ./scripts/dev.sh serve
 ```
 
-### Gated model access denied (Llama 3)
+### Gated model access denied (optional Llama 3)
 
 **Symptom:** Server exits on startup with `gated on HuggingFace`, `not yet approved`, or `403 Forbidden` for `meta-llama/...`.
 
@@ -336,23 +338,24 @@ export VLLM_USE_FLASHINFER_SAMPLER=0
 1. Open https://huggingface.co/meta-llama/Meta-Llama-3-8B-Instruct and request access (Meta license).
 2. Wait for approval email from HuggingFace (a token alone is not enough until access is granted).
 3. After approval: `uv run huggingface-cli login`
-4. Retry: `INFERENCE_X_DEFAULT_MODEL=llama3-8b ./scripts/dev.sh serve`
+4. Add `llama3-8b` to `config/models.yaml` if not present, then retry serve.
 
-If you do not have access yet, use an ungated model instead:
+If you do not have access yet, use a registry model instead:
 
 ```bash
 INFERENCE_X_DEFAULT_MODEL=qwen2.5-0.5b ./scripts/dev.sh serve
 ```
 
-### GPU memory insufficient (Llama 3 on 8 GiB)
+### GPU memory insufficient (8 GiB WSL2)
 
-**Symptom:** Startup fails with `Free memory on device cuda:0 ... less than desired GPU memory utilization` or `Insufficient GPU memory to start llama3-8b`.
+**Symptom:** Startup fails with `Free memory on device cuda:0 ... less than desired GPU memory utilization`, `Insufficient GPU memory`, or KV-cache / Mamba-cache errors.
 
 **Fix:**
 
 1. Stop other GPU processes (`make stop`, or kill leftover `uvicorn` / vLLM workers).
-2. Lower `gpu_memory_utilization` for `llama3-8b` in `config/models.yaml` (default is now `0.85` for 8 GiB WSL2 GPUs).
-3. If startup still fails after passing the memory check, the 8B bf16 model likely needs **16 GiB+ VRAM** — use `qwen2.5-1.5b` or a quantized Llama checkpoint instead.
+2. Use a smaller registry model (`qwen2.5-0.5b`, `minicpm5-1b`, or `qwen2.5-1.5b` at `max_model_len: 8192`).
+3. Lower `max_model_len` (e.g. 2048) for tight VRAM; hybrid/Mamba models may also need `max_num_seqs`.
+4. Models above ~1.5B dense bf16 (3B+, 8B, Qwen3.5 hybrid) are omitted from the default registry on 8 GiB cards — add them only with quantization or more VRAM.
 
 ### Port already in use
 

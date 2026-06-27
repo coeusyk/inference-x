@@ -204,6 +204,13 @@ def _map_vllm_init_error(model_name: str, model_path: str, exc: Exception) -> Ru
             "lower max_model_len (e.g. 2048) in config/models.yaml. "
             "Stop other GPU processes (nvidia-smi) before retrying."
         )
+    if "mamba cache blocks" in lower or "max_num_seqs" in lower:
+        return RuntimeError(
+            f"GPU memory insufficient for Mamba/state cache loading {model_name}. "
+            "Hybrid models (e.g. Qwen3.5) need more VRAM headroom than dense models. "
+            "Set max_num_seqs (e.g. 64) and/or lower max_model_len in config/models.yaml, "
+            "or raise gpu_memory_utilization."
+        )
     if "not found" in lower:
         return RuntimeError(
             f"Model not found: {model_path}. Check model_path in config/models.yaml."
@@ -316,6 +323,9 @@ class VLLMEngine(BaseEngine):
         max_model_len = model_config.get("max_model_len")
         if max_model_len is not None:
             kwargs["max_model_len"] = max_model_len
+        max_num_seqs = model_config.get("max_num_seqs")
+        if max_num_seqs is not None:
+            kwargs["max_num_seqs"] = max_num_seqs
         if model_config.get("quantization"):
             kwargs["quantization"] = model_config["quantization"]
         if pool_size > 1:

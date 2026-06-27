@@ -13,6 +13,11 @@ class ModelEntry(BaseModel):
     model_path: str
     gpu_memory_utilization: Optional[float | Literal["auto"]] = "auto"
     max_model_len: Optional[int] = Field(default=None, ge=1)
+    max_num_seqs: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="vLLM concurrent sequence cap (lower for hybrid/Mamba models on tight VRAM)",
+    )
     quantization: Optional[str] = None
     gated: bool = False
 
