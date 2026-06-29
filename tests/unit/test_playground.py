@@ -441,3 +441,17 @@ class TestCLI:
         with mock.patch("sys.stderr", buf):
             code = pg.main(["--prompts-file", "/nonexistent/path.json"])
         assert code == 1
+
+
+class TestResponsePanelTiming:
+    def test_elapsed_seconds_freezes_when_complete(self):
+        import time
+
+        import app as playground_app  # noqa: E402
+
+        panel = playground_app.ResponsePanel("opt-125m", panel_id="panel-a")
+        panel.started_at = time.perf_counter() - 0.8
+        panel.finished_at = panel.started_at + 0.8
+        panel.completed = True
+        time.sleep(0.05)
+        assert panel.elapsed_seconds() == pytest.approx(0.8, abs=0.05)

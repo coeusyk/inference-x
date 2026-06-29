@@ -109,6 +109,7 @@ class ResponsePanel(Vertical):
         self.model = model
         self.content = ""
         self.started_at: float | None = None
+        self.finished_at: float | None = None
         self.completed = False
 
     def compose(self) -> ComposeResult:
@@ -124,6 +125,7 @@ class ResponsePanel(Vertical):
     def clear_response(self) -> None:
         self.content = ""
         self.started_at = None
+        self.finished_at = None
         self.completed = False
         try:
             self.query_one(".empty-state", Static).display = True
@@ -140,6 +142,7 @@ class ResponsePanel(Vertical):
     def start(self) -> None:
         self.content = ""
         self.started_at = time.perf_counter()
+        self.finished_at = None
         self.completed = False
         try:
             self.query_one(".empty-state", Static).display = False
@@ -161,6 +164,7 @@ class ResponsePanel(Vertical):
 
     def finish(self, prompt: str) -> None:
         self.completed = True
+        self.finished_at = time.perf_counter()
         prompt_tokens = len(prompt.split())
         completion_tokens = len(self.content.split())
         total_tokens = prompt_tokens + completion_tokens
@@ -178,6 +182,7 @@ class ResponsePanel(Vertical):
 
     def set_error(self, message: str) -> None:
         self.completed = True
+        self.finished_at = time.perf_counter()
         self.content = message
         try:
             self.query_one(".empty-state", Static).display = False
@@ -192,7 +197,8 @@ class ResponsePanel(Vertical):
     def elapsed_seconds(self) -> float:
         if self.started_at is None:
             return 0.0
-        return time.perf_counter() - self.started_at
+        end = self.finished_at if self.finished_at is not None else time.perf_counter()
+        return end - self.started_at
 
     def refresh_title(self) -> None:
         try:
@@ -442,7 +448,12 @@ class InferenceXApp(App[None]):
                     token = parse_sse_line(line)
                     if token:
                         panel.append_token(token)
-        panel.finish(prompt)
+        if not panel.content.strip():
+            panel.set_error(
+                "No response tokens received. The model may be out of VRAM or busy."
+            )
+        else:
+            panel.finish(prompt)
 
     # ── Internal render helpers ────────────────────────────────────────────
 
