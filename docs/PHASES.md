@@ -144,7 +144,7 @@ tinyllama-chat on their setup. InferenceX should tell them.
 - Measures: tokens/sec (throughput), time-to-first-token (TTFT), p50/p95/p99 latency,
   VRAM footprint (`peak_vram_delta_gb` = total − min free VRAM before/after; works when
   the model is already loaded on the server)
-- Saves results to `docs/benchmarks/results-{model}-{date}.json`
+- Saves results to `benchmarks/results/results-{model}-{date}.json`
 - Invoked via `make benchmark MODEL=qwen2.5-0.5b` or `make benchmark-all`
 
 **6.2 — Benchmark results schema** (`src/inference_x/benchmarks/schemas.py`)
@@ -162,17 +162,22 @@ tinyllama-chat on their setup. InferenceX should tell them.
 
 **6.4 — Model advisor** (`src/inference_x/benchmarks/advisor.py`)
 - Takes a `HardwareProfile` and a set of `BenchmarkResult` records
-- Skips results whose saved `hardware` mismatches current GPU/VRAM (warning only)
+- Skips results whose saved `hardware` mismatches current GPU (exact name) or VRAM total
+  (>0.5 GB tolerance); warning only
 - Soft-warns on legacy results with `hardware: null` but still ranks them
+- TTFT scoring uses warm prompts only (`prompt_results[1:]`), skipping cold-start outliers
+- VRAM gate: `peak_vram_delta_gb + 0.5 GB ≤ vram_total_gb` (not free VRAM × margin)
 - Applies a scoring function across: throughput, TTFT, VRAM headroom, quantization fit
 - Returns `AdvisorReport` with ranked list and plain-language reasoning per model:
-  `"qwen2.5-0.5b is fastest on your hardware (42 tok/s, 3.1GB VRAM). Use for chat."`
-  `"llama3-8b requires 7.2GB VRAM — exceeds your free headroom of 5.1GB. Skip for now."`
+  `"qwen2.5-0.5b — 168 tok/s, 12ms TTFT, 7.15 GB VRAM"`
+  `"llama3-8b — requires 7.50 GB + 0.5 GB buffer = 8.00 GB, only 6.0 GB total. Skip."`
 - Does not make network calls; advice is purely local from observed results
 
 **6.5 — Advisor CLI surface**
 - `make advise` — runs advisor against latest benchmark results; prints `WARNING:` lines
   to stderr when results are skipped or lack hardware provenance
+- When no benchmark JSON exists, prints a static VRAM fit table from `config/models.yaml`
+  (parameter-count estimates) instead of exiting with an error
 - `GET /v1/benchmark/results` — returns stored results as JSON (read-only)
 - `GET /v1/benchmark/advise` — returns advisor output as JSON (includes `warnings`)
 
@@ -201,13 +206,17 @@ tinyllama-chat on their setup. InferenceX should tell them.
 - [x] Advisor scoring function unit-tested with fixture hardware profiles (10 tests: 6GB, 24GB, CPU-only)
 - [x] Benchmark results schema validated with Pydantic (round-trip test passing)
 - [x] Benchmark CLI and API routes implemented; playground uses CLI only (no Benchmark tab)
-- [x] Results stored in `docs/benchmarks/` for reproducible comparison
+- [x] Results stored in `benchmarks/results/` for reproducible comparison
 - [x] Benchmark methodology documented in DECISIONS.md or README where applicable
 
 **Post-phase note (2026-06-25):** Benchmark results now persist `hardware` at run time;
 advisor skips cross-machine mismatches. `peak_vram_delta_gb` measures VRAM footprint
 (not a naive before−after free-VRAM delta, which read 0 when the model was pre-loaded).
 Loading-screen failures surface actionable errors from `logs/playground-server.log`.
+
+**Post-phase note (2026-06-30):** Advisor scoring fixes (DEC-036): warm TTFT, VRAM gate
+against total VRAM + 0.5 GB buffer, exact GPU name matching, static config fallback when
+no results exist. Benchmark JSON lives under `benchmarks/results/` (gitignored).
 
 ---
 

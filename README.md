@@ -256,9 +256,9 @@ the benchmark CLI workflow below.
 INFERENCE_X_DEFAULT_MODEL=qwen2.5-0.5b ./scripts/dev.sh serve
 
 # Terminal 2
-make benchmark MODEL=qwen2.5-0.5b    # writes docs/benchmarks/results-<model>-<timestamp>.json
+make benchmark MODEL=qwen2.5-0.5b    # writes benchmarks/results/results-<model>-<timestamp>.json
 make benchmark-all                   # benchmarks qwen2.5-0.5b and tinyllama-chat
-make advise                          # ranked table + WARNING lines for skipped/legacy results
+make advise                          # ranked table; static VRAM estimates if no results yet
 ```
 
 Optional hardware profiling deps (improves VRAM accuracy on WSL2):

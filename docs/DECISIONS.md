@@ -301,14 +301,15 @@ Use this document to capture non-obvious design decisions as the project evolves
 - Date: 2026-06-25
 - Status: accepted
 - Context: Saved benchmark results lacked a `hardware` field, so `make advise` could score
-  desktop VRAM deltas against a laptop's current free VRAM. Legacy JSON in `docs/benchmarks/`
-  had no provenance.
+  desktop VRAM deltas against a laptop's current free VRAM. Legacy JSON in `benchmarks/results/`
+  (formerly `docs/benchmarks/`) had no provenance.
 - Decision: Add optional `hardware: HardwareProfile` to `BenchmarkResult` (default `None` for
   legacy files). Persist `hardware_before` from `BenchmarkRunner.run()`. Return `AdvisorReport`
   (`ranked` + `warnings`) from `ModelAdvisor.rank()`: skip results when saved hardware
-  mismatches current GPU name (substring match) or VRAM total (>0.5 GB tolerance); soft-warn
-  when `hardware` is null but still rank. Expose `warnings` on `GET /v1/benchmark/advise` and
-  print `WARNING:` lines in `scripts/advise.py`.
+  mismatches current GPU name or VRAM total (>0.5 GB tolerance); soft-warn when `hardware`
+  is null but still rank. GPU name matching was substring-based initially; **DEC-036** changed
+  it to exact canonical name match. Expose `warnings` on `GET /v1/benchmark/advise` and print
+  `WARNING:` lines in `scripts/advise.py`.
 - Consequences: Cross-machine result files are omitted from rankings with a clear warning.
   Operators should re-run `make benchmark MODEL=…` after hardware changes. Scoring weights
   unchanged.
@@ -340,7 +341,7 @@ Use this document to capture non-obvious design decisions as the project evolves
 
 ### DEC-034
 - Date: 2026-06-25
-- Status: accepted
+- Status: superseded by DEC-036
 - Context: After DEC-032, `peak_vram_delta_gb` reflects warm/steady-state VRAM footprint
   (model already loaded on the server). The advisor viability gate compared that footprint
   directly to current free VRAM. Cold vLLM startup allocates weights, KV cache, and CUDA
@@ -351,10 +352,31 @@ Use this document to capture non-obvious design decisions as the project evolves
   `effective_required < vram_free_gb`. Override via `INFERENCEX_COLD_START_MARGIN`.
   Recommendation strings show `footprint × margin = required`. VRAM headroom scoring uses
   `effective_required` for consistency with the gate.
-- Consequences: Marginal fits (e.g. 3.0 GB footprint, 3.3 GB free) are correctly marked
-  non-viable (3.6 GB required). Default 1.20 is conservative but not extreme. Measuring
-  true cold-load peak in the benchmark runner (server restart per model) is deferred to a
-  later phase.
+- Consequences: Superseded — multiplying an absolute footprint inflated requirements and
+  comparing against runtime free VRAM conflated server state with static capacity.
+
+### DEC-036
+- Date: 2026-06-30
+- Status: accepted
+- Context: Three advisor scoring bugs surfaced on real benchmark data. (1) TTFT used
+  `prompt_results[0]`, which is always a cold-start outlier (CUDA graph miss), unfairly
+  penalizing rankings. (2) The DEC-034 gate multiplied absolute `peak_vram_delta_gb` by 1.20
+  and compared to `vram_free_gb`, marking models non-viable that had run successfully
+  (e.g. 5.38 GB footprint on a 6 GB card). (3) GPU hardware matching used substring
+  containment, so an RTX 3060 benchmark could validate on an RTX 3060 Ti.
+- Decision:
+  - **Warm TTFT:** mean TTFT over `prompt_results[1:]`; fall back to the sole prompt when
+    only one result exists.
+  - **VRAM gate:** `vram_required = peak_vram_delta_gb + 0.5 GB`; viable when
+    `vram_required ≤ vram_total_gb`. VRAM headroom score uses the same denominator
+    (`vram_total_gb`). Remove `COLD_START_MARGIN` and `INFERENCEX_COLD_START_MARGIN`.
+  - **Hardware match:** exact GPU name equality (case-insensitive, stripped) plus
+    ±0.5 GB `vram_total_gb` tolerance.
+  - **Static fallback:** when `benchmarks/results/` is empty, `make advise` prints a
+    config-based VRAM fit table from `models.yaml` instead of exiting with an error.
+- Consequences: Rankings reflect steady-state latency. Models that fit total VRAM are
+  correctly marked viable regardless of current free VRAM. Cross-GPU-variant mismatches are
+  skipped. New users get actionable guidance before their first benchmark run.
 
 ### DEC-035
 - Date: 2026-06-25

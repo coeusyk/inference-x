@@ -66,9 +66,10 @@ The benchmark layer measures inference performance and recommends models for loc
 - hardware profiling (`benchmarks/hardware.py`) — GPU VRAM via pynvml or nvidia-smi
 - benchmark runner (`benchmarks/runner.py`) — streaming HTTP against `/v1/chat/completions`;
   records VRAM footprint and a per-run `hardware` snapshot in each result
-- result storage (`benchmarks/storage.py`) — JSON files under `docs/benchmarks/`
-- model advisor (`benchmarks/advisor.py`) — weighted scoring with VRAM viability gate;
-  skips hardware-mismatched results; returns `AdvisorReport` with warnings
+- result storage (`benchmarks/storage.py`) — JSON files under `benchmarks/results/`
+- model advisor (`benchmarks/advisor.py`) — weighted scoring (throughput, warm TTFT, VRAM
+  headroom); viability gate compares footprint + 0.5 GB buffer to total VRAM; exact GPU
+  name match for hardware provenance; returns `AdvisorReport` with warnings
 
 This layer lives under `src/inference_x/benchmarks/`. It does not call vLLM directly;
 the benchmark CLI requires a running server.
