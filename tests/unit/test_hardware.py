@@ -50,13 +50,6 @@ def _hw_profile(
     )
 
 
-@pytest.fixture(autouse=True)
-def _clear_util_cache():
-    suggest_gpu_memory_utilization.cache_clear()
-    yield
-    suggest_gpu_memory_utilization.cache_clear()
-
-
 @pytest.fixture()
 def mock_hw(monkeypatch):
     """Patch VRAM probes for suggest_gpu_memory_utilization tests."""
@@ -238,3 +231,10 @@ class TestSuggestGpuMemoryUtilization:
         monkeypatch.setenv("INFERENCEX_VRAM_SAFETY_BUFFER_GB", "0.8")
         mock_hw(total=8.0, free=6.93)
         assert suggest_gpu_memory_utilization() == 0.77
+
+    def test_auto_splits_budget_across_model_count(self, mock_hw):
+        mock_hw(total=8.0, free=6.93)
+        expected = ((6.93 - 0.4) / 2) / 8.0
+        assert suggest_gpu_memory_utilization(
+            model_count=2, free_gib=6.93, total_gib=8.0
+        ) == pytest.approx(expected, abs=0.01)

@@ -20,6 +20,17 @@ class ModelEntry(BaseModel):
     )
     quantization: Optional[str] = None
     gated: bool = False
+    instruction_tuned: bool = True
+    max_completion_tokens: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="Per-request generation cap; overrides client max_tokens when set",
+    )
+    repetition_penalty: Optional[float] = Field(
+        default=None,
+        gt=0.0,
+        description="vLLM repetition_penalty; applied when instruction_tuned is false",
+    )
 
     @field_validator("gpu_memory_utilization")
     @classmethod

@@ -147,7 +147,7 @@ def resolve_gpu_memory_utilization(
         from inference_x.benchmarks.hardware import _vram_for_utilization
 
         free_gib, total_gib, source = _vram_for_utilization()
-        resolved = suggest_gpu_memory_utilization()
+        resolved = suggest_gpu_memory_utilization(model_count=1)
         max_len_label = (
             str(max_model_len)
             if max_model_len is not None
@@ -377,6 +377,7 @@ def scale_model_config_for_pool(
     total_vram_gib: float = 8.0,
     engine_index: int = 0,
     free_vram_gib: float | None = None,
+    session_free_vram_gib: float | None = None,
 ) -> dict[str, Any]:
     """Return a copy of *config* with gpu_memory_utilization sized for this GPU."""
     scaled = dict(config)
@@ -385,12 +386,56 @@ def scale_model_config_for_pool(
 
     if scaled.get("gpu_memory_utilization") == "auto":
         max_model_len = scaled.get("max_model_len")
-        util = resolve_gpu_memory_utilization(
-            "auto",
-            model_name=str(scaled.get("name", "")),
-            max_model_len=int(max_model_len) if max_model_len is not None else None,
+        if pool_size <= 1:
+            util = resolve_gpu_memory_utilization(
+                "auto",
+                model_name=str(scaled.get("name", "")),
+                max_model_len=int(max_model_len) if max_model_len is not None else None,
+            )
+            scaled["gpu_memory_utilization"] = util
+            return scaled
+
+        # Multi-model: fresh (free − buffer) / total per engine (model_count=1), no ÷N split.
+        probe_free = free_vram_gib
+        probe_total = total_vram_gib
+        if probe_free is None or probe_total is None:
+            probed_free, probed_total = probe_gpu_memory_gib()
+            if probe_free is None:
+                probe_free = probed_free
+            if probe_total is None:
+                probe_total = probed_total or total_vram_gib
+        util = suggest_gpu_memory_utilization(
+            model_count=1,
+            free_gib=probe_free,
+            total_gib=probe_total,
         )
+        util = _apply_sequential_vram_caps(
+            util,
+            scaled,
+            engine_index=engine_index,
+            pool_size=pool_size,
+            pool_configs=pool_configs,
+            total_vram_gib=total_vram_gib,
+            free_vram_gib=free_vram_gib,
+        )
+        if "max_model_len" in scaled:
+            scaled["max_model_len"] = min(int(scaled["max_model_len"]), 2048)
         scaled["gpu_memory_utilization"] = util
+        free_label = (
+            f"{free_vram_gib:.1f} GiB free at load"
+            if free_vram_gib is not None
+            else "free VRAM unknown"
+        )
+        logger.info(
+            "Loading %s\n"
+            "  gpu_memory_utilization: auto → %.3f (%d-model pool, %s)\n"
+            "  max_model_len: %s",
+            scaled.get("name", "?"),
+            util,
+            pool_size,
+            free_label,
+            scaled.get("max_model_len", "vLLM default"),
+        )
         return scaled
 
     if pool_size <= 1:

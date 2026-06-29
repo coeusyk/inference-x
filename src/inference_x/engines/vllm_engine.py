@@ -24,6 +24,8 @@ from inference_x.schemas.chat import (
 logger = logging.getLogger(__name__)
 
 _VLLM_AVAILABLE: bool | None = None
+# Serialize llm_engine.step() across engines in one process (vLLM V1 forward context).
+_POOL_STEP_LOCK = threading.Lock()
 
 
 def _probe_cuda_vram() -> dict[str, float | bool]:
@@ -281,6 +283,7 @@ class VLLMEngine(BaseEngine):
         engine_index: int = 0,
         free_vram_gib: float | None = None,
         total_vram_gib: float | None = None,
+        session_free_vram_gib: float | None = None,
     ) -> None:
         _load_vllm()
         if not _VLLM_AVAILABLE:
@@ -297,6 +300,7 @@ class VLLMEngine(BaseEngine):
             engine_index=engine_index,
             free_vram_gib=free_vram_gib,
             total_vram_gib=total_vram_gib or _probe_cuda_vram().get("total_gib") or 8.0,
+            session_free_vram_gib=session_free_vram_gib,
         )
         required = {"name", "model_path"}
         missing = required - model_config.keys()
@@ -305,6 +309,10 @@ class VLLMEngine(BaseEngine):
 
         self._model_name: str = model_config["name"]
         self._model_path: str = model_config["model_path"]
+        self._pool_size = pool_size
+        self._max_completion_tokens: int | None = model_config.get("max_completion_tokens")
+        self._instruction_tuned: bool = bool(model_config.get("instruction_tuned", True))
+        self._repetition_penalty: float | None = model_config.get("repetition_penalty")
         self._healthy = False
         self._engine_lock = threading.Lock()
 
@@ -357,6 +365,7 @@ class VLLMEngine(BaseEngine):
             self._llm: LLM = LLM(**kwargs)
             self._supports_chat = self._detect_chat_support()
             self._healthy = True
+            self._log_kv_cache_stats()
             logger.info(
                 "vLLM engine ready: model=%s chat_template=%s",
                 self._model_name,
@@ -364,6 +373,25 @@ class VLLMEngine(BaseEngine):
             )
         except Exception as exc:
             raise _map_vllm_init_error(self._model_name, self._model_path, exc) from exc
+
+    def _log_kv_cache_stats(self) -> None:
+        """Log vLLM KV-cache sizing after engine init (mirrors vLLM '# GPU blocks' lines)."""
+        try:
+            llm_engine = self._llm.llm_engine
+            cache_config = getattr(llm_engine, "cache_config", None)
+            num_blocks = getattr(cache_config, "num_gpu_blocks", None)
+            block_size = getattr(cache_config, "block_size", None)
+            if num_blocks is not None and block_size is not None:
+                logger.info(
+                    "KV cache for model=%s: %d GPU blocks × %d tokens/block "
+                    "(~%d tokens capacity)",
+                    self._model_name,
+                    num_blocks,
+                    block_size,
+                    num_blocks * block_size,
+                )
+        except Exception as exc:
+            logger.debug("KV cache stats unavailable for %s: %s", self._model_name, exc)
 
     def _detect_chat_support(self) -> bool:
         try:
@@ -389,13 +417,23 @@ class VLLMEngine(BaseEngine):
         parts.append("Assistant:")
         return "\n".join(parts)
 
+    def _resolve_max_tokens(self, request: ChatCompletionRequest) -> int:
+        if self._max_completion_tokens is not None:
+            return self._max_completion_tokens
+        return request.max_tokens if request.max_tokens is not None else 512
+
     def _sampling_params(self, request: ChatCompletionRequest):
         SamplingParams = globals()["SamplingParams"]
-        return SamplingParams(
-            temperature=request.temperature if request.temperature is not None else 0.7,
-            max_tokens=request.max_tokens if request.max_tokens is not None else 512,
-            top_p=request.top_p if request.top_p is not None else 0.95,
-        )
+        kwargs: dict[str, Any] = {
+            "temperature": request.temperature if request.temperature is not None else 0.7,
+            "max_tokens": self._resolve_max_tokens(request),
+            "top_p": request.top_p if request.top_p is not None else 0.95,
+        }
+        if not self._instruction_tuned:
+            kwargs["repetition_penalty"] = (
+                self._repetition_penalty if self._repetition_penalty is not None else 1.15
+            )
+        return SamplingParams(**kwargs)
 
     def _stream_prompt(self, request: ChatCompletionRequest) -> str:
         if not self._supports_chat:
@@ -419,7 +457,8 @@ class VLLMEngine(BaseEngine):
         sampling = self._sampling_params(request)
         vllm_messages = [{"role": m.role, "content": m.content} for m in request.messages]
 
-        with self._engine_lock:
+        step_lock = _POOL_STEP_LOCK if self._pool_size > 1 else self._engine_lock
+        with step_lock:
             if self._supports_chat:
                 return self._llm.chat(
                     messages=vllm_messages,  # type: ignore[arg-type]
@@ -449,26 +488,41 @@ class VLLMEngine(BaseEngine):
             llm_engine = self._llm.llm_engine
             previous_text = ""
 
+            step_lock = _POOL_STEP_LOCK if self._pool_size > 1 else self._engine_lock
             try:
                 with self._engine_lock:
                     llm_engine.add_request(request_id, prompt, sampling)
-                    while llm_engine.has_unfinished_requests():
+                while llm_engine.has_unfinished_requests():
+                    with step_lock:
                         step_outputs = llm_engine.step()
-                        if not step_outputs:
+                    if not step_outputs:
+                        continue
+                    for output in step_outputs:
+                        if output.request_id != request_id or not output.outputs:
                             continue
-                        for output in step_outputs:
-                            if output.request_id != request_id or not output.outputs:
-                                continue
-                            text = output.outputs[0].text or ""
-                            if text.startswith(previous_text):
-                                chunk = text[len(previous_text) :]
-                            else:
-                                chunk = text
-                            previous_text = text
-                            if chunk:
-                                sync_queue.put(chunk)
-                            if output.finished:
-                                return
+                        text = output.outputs[0].text or ""
+                        if text.startswith(previous_text):
+                            chunk = text[len(previous_text) :]
+                        else:
+                            chunk = text
+                        previous_text = text
+                        if chunk:
+                            sync_queue.put(chunk)
+                        if output.finished:
+                            if not previous_text:
+                                logger.warning(
+                                    "vLLM stream finished with 0 tokens for model=%s "
+                                    "(possible KV cache exhaustion)",
+                                    self._model_name,
+                                )
+                            return
+            except Exception as worker_exc:
+                logger.warning(
+                    "vLLM stream worker failed for model=%s: %s",
+                    self._model_name,
+                    worker_exc,
+                )
+                raise
             finally:
                 sync_queue.put(None)
 

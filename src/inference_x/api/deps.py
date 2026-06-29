@@ -30,8 +30,8 @@ def _build_engine_pool(config_dir: str, loaded_models: tuple[str, ...]) -> Engin
     """Build an EnginePool loading one VLLMEngine per model in *loaded_models*."""
     registry = _build_registry(config_dir)
     pool_size = len(loaded_models)
-    free_gib, total_gib = probe_gpu_memory_gib()
-    total_vram = total_gib if total_gib is not None else 8.0
+    session_free_gib, session_total_gib = probe_gpu_memory_gib()
+    total_vram = session_total_gib if session_total_gib is not None else 8.0
     pool_configs = [registry.get(m).model_dump() for m in loaded_models]
     validate_pool_fits(pool_configs, total_vram_gib=total_vram)
     engines: dict = {}
@@ -47,6 +47,7 @@ def _build_engine_pool(config_dir: str, loaded_models: tuple[str, ...]) -> Engin
             engine_index=idx,
             free_vram_gib=free_gib,
             total_vram_gib=total_gib,
+            session_free_vram_gib=session_free_gib,
         )
     return EnginePool(engines)
 

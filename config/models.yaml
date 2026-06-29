@@ -10,6 +10,9 @@ models:
     model_path: facebook/opt-125m
     gpu_memory_utilization: auto
     max_model_len: 2048
+    max_completion_tokens: 256
+    instruction_tuned: false
+    repetition_penalty: 1.15
 
   - name: qwen2.5-0.5b
     engine: vllm

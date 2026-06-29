@@ -28,6 +28,7 @@ class _FakeRequestOutput:
 def _make_engine(step_batches: list[list[_FakeRequestOutput]]) -> VLLMEngine:
     engine = VLLMEngine.__new__(VLLMEngine)
     engine._model_name = "test-model"
+    engine._pool_size = 1
     engine._healthy = True
     engine._supports_chat = False
     engine._engine_lock = threading.Lock()

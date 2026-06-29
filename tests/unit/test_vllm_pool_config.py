@@ -106,7 +106,10 @@ def test_auto_resolves_at_startup(fixed_footprints, monkeypatch):
         "inference_x.benchmarks.hardware._vram_for_utilization",
         lambda: (6.93, 8.0, "torch"),
     )
-    monkeypatch.setattr(pool, "suggest_gpu_memory_utilization", lambda: 0.82)
+    monkeypatch.setattr(
+        "inference_x.benchmarks.hardware._probe_torch_vram_gib",
+        lambda: (6.93, 8.0),
+    )
 
     cfg = _qwen_cfg()
     cfg["gpu_memory_utilization"] = "auto"
@@ -159,6 +162,41 @@ def test_sequential_cap_limits_second_engine_to_free_vram(fixed_footprints):
     )
     assert scaled["gpu_memory_utilization"] < 0.38
     assert scaled["gpu_memory_utilization"] >= 0.25
+
+
+def test_auto_multi_model_uses_fresh_suggest_not_div_n(fixed_footprints):
+    """Auto in a 2-model pool samples (free − buffer) / total per engine, not ÷N."""
+    qwen = _qwen_cfg()
+    qwen["gpu_memory_utilization"] = "auto"
+    opt = {
+        "name": "opt-125m",
+        "model_path": "facebook/opt-125m",
+        "max_model_len": 2048,
+        "gpu_memory_utilization": "auto",
+    }
+    pool_configs = [opt, qwen]
+    opt_scaled = scale_model_config_for_pool(
+        opt,
+        pool_size=2,
+        pool_configs=pool_configs,
+        engine_index=0,
+        free_vram_gib=6.93,
+        total_vram_gib=8.0,
+        session_free_vram_gib=6.93,
+    )
+    qwen_scaled = scale_model_config_for_pool(
+        qwen,
+        pool_size=2,
+        pool_configs=pool_configs,
+        engine_index=1,
+        free_vram_gib=3.5,
+        total_vram_gib=8.0,
+        session_free_vram_gib=6.93,
+    )
+    assert opt_scaled["gpu_memory_utilization"] != 0.41
+    assert 0.25 < opt_scaled["gpu_memory_utilization"] < 0.45
+    assert qwen_scaled["gpu_memory_utilization"] != 0.41
+    assert qwen_scaled["gpu_memory_utilization"] >= 0.42
 
 
 def test_validate_pool_fits_rejects_impossible_combo(fixed_footprints):
