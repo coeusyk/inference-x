@@ -9,7 +9,7 @@ or:
 
 Usage:
     uv run python scripts/benchmark.py --model qwen2.5-0.5b
-    uv run python scripts/benchmark.py --model qwen2.5-0.5b --output-dir docs/benchmarks
+    uv run python scripts/benchmark.py --model qwen2.5-0.5b --output-dir benchmarks/results
     make benchmark MODEL=qwen2.5-0.5b
 """
 from __future__ import annotations
@@ -70,8 +70,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--output-dir",
-        default="docs/benchmarks",
-        help="Directory to save result JSON (default: docs/benchmarks)",
+        default="benchmarks/results",
+        help="Directory to save result JSON (default: benchmarks/results)",
     )
     args = parser.parse_args()
 
