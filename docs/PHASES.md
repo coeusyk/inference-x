@@ -309,6 +309,45 @@ Exit criteria:
 
 ---
 
+## Phase 9 — Shared Engine Driver Thread (Non-Streaming Batching Fix)
+**Goal:** Ship the non-streaming continuous-batching fix DEC-038 named but didn't deliver —
+a single shared per-engine driver thread that is the only caller of `add_request`/`step()`,
+eliminating the request-id-discard race a per-request step loop hit under live concurrency.
+
+Deliverables:
+- New `engines/driver.py` — `EngineDriver`: owns one vLLM sync `llm_engine` exclusively;
+  `submit_stream()`/`submit_complete()` hand back a queue/future; the driver thread drains
+  submissions, calls `add_request`/`step()`, and dispatches each output to its registered
+  channel by `request_id`
+- `VLLMEngine._run_completion` and `generate_stream` both submit through the driver instead
+  of running independent step loops — unifying streaming and non-streaming onto one step
+  loop per engine
+- Driver failure (`step()` raising) broadcasts to every pending channel and flips
+  `EngineDriver.is_dead`, checked by `VLLMEngine.is_healthy()`
+- `_POOL_STEP_LOCK` cross-engine serialization (`pool_size > 1`) preserved unchanged in
+  meaning, now acquired by the driver thread instead of by each request's own thread
+
+Exit criteria:
+- [x] `uv run pytest tests/unit -v` — 379/379 pass (8 new `test_engine_driver.py` cases,
+  1 new non-streaming-via-driver case, existing streaming tests updated to wire a real
+  `EngineDriver` over a mocked `llm_engine`)
+- [x] 2 and 4 concurrent non-streaming requests against a live server all return
+  complete, correctly-attributed, non-truncated output
+- [x] Determinism check (`temperature=0`, unique per-request tokens): concurrent-run
+  output byte-identical to the same prompts run fully sequentially — no cross-request
+  state leakage
+- [x] Streaming chat completions unaffected (verified live)
+- [x] Non-obvious choices recorded in DECISIONS.md (DEC-039)
+
+**Not delivered this phase:**
+- Engine knob surfacing (`max_num_batched_tokens`, `enable_prefix_caching`, wiring
+  `block_size`/`kv_cache_dtype` through to `LLM(...)`) — separately proposed under
+  `openspec/changes/add-engine-knob-surfacing`, not implemented.
+- Model variant routing (`family` grouping, load-time variant selection) — separately
+  proposed under `openspec/changes/add-model-variant-routing`, not implemented.
+
+---
+
 ## Decision rule: when to create a new phase
 
 A new phase is warranted when:

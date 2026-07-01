@@ -14,6 +14,7 @@ def _init_engine(scaled_config: dict) -> dict:
     class FakeLLM:
         def __init__(self, **kwargs):
             captured.update(kwargs)
+            self.llm_engine = MagicMock()  # EngineDriver needs a real-ish llm_engine
 
         def get_tokenizer(self):
             tok = MagicMock()

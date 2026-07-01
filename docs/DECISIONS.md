@@ -527,3 +527,52 @@ Use this document to capture non-obvious design decisions as the project evolves
   no improvement. `engine_knob surfacing` (block_size, max_num_batched_tokens,
   kv_cache_dtype, enable_prefix_caching) from the original Phase 2 scope was not started
   this round; deferred alongside the batching-fix follow-up.
+
+### DEC-039
+- Date: 2026-07-01
+- Status: accepted
+- Context: DEC-038 named the correct fix for non-streaming continuous batching but did not
+  ship it: a single shared per-engine driver thread that is the only caller of
+  `add_request`/`step()`, demultiplexing every output to its per-request destination by
+  `request_id`. This closes that follow-up (`openspec/changes/add-engine-driver-thread`).
+- Decision:
+  - New `engines/driver.py`: `EngineDriver` owns one vLLM sync `llm_engine` exclusively.
+    Callers submit a `(prompt, sampling)` pair — `submit_stream()` returns a `queue.Queue`
+    of text deltas terminated by `None`, `submit_complete()` returns a
+    `concurrent.futures.Future` resolved with the final `RequestOutput`. The driver thread
+    drains newly-submitted requests (calling `add_request` itself, from that same thread),
+    then calls `step()` and dispatches each output to its registered channel by
+    `request_id` — since exactly one thread ever calls `add_request`/`step()`, there is no
+    "wrong" thread left to discard a terminal output the way DEC-038's per-request loops
+    could.
+  - `VLLMEngine._run_completion` and `generate_stream` both now build a prompt via
+    `_stream_prompt()` and submit through `self._driver` instead of running their own
+    step loop (`generate_stream`) or a single blocking `.chat()`/`.generate()` call
+    (`_run_completion`). This is the "unification": both are now thin adapters over one
+    driver, differing only in channel shape.
+  - `_POOL_STEP_LOCK` (cross-engine serialization when `pool_size > 1`) is unchanged in
+    meaning — each `EngineDriver` is constructed with it as its `step_lock` when
+    `pool_size > 1`, a private per-engine lock otherwise — only the caller moved from
+    "each request's own thread" to "the one driver thread."
+  - Driver failure (`step()` raising) is broadcast to every currently-pending
+    channel — completion futures get `set_exception`, stream queues receive the
+    exception object itself (callers must check `isinstance(chunk, BaseException)`
+    before treating a queue item as a text chunk) — and flips `EngineDriver.is_dead`,
+    which `VLLMEngine.is_healthy()` now also checks.
+  - Idle-wait uses a bounded `queue.get(timeout=0.05)` rather than a busy loop or a fixed
+    sleep, so shutdown stays responsive without spinning when no requests are in flight.
+  - `BaseEngine`'s abstract contract, `ChatService`, and all request/response schemas are
+    unchanged — this is entirely internal to `VLLMEngine`.
+- Live-verified: with a running `opt-125m` server, 2 and then 4 concurrent non-streaming
+  `POST /v1/chat/completions` requests all returned complete, correctly-attributed,
+  non-truncated responses (finish_reason `stop`/`length`, distinct content per request).
+  A follow-up determinism check (`temperature=0`, unique per-request tokens) showed the
+  concurrent run's output was byte-identical to the same prompts run fully sequentially,
+  confirming no cross-request state leakage. Streaming chat completions were unaffected.
+- Consequences: Non-streaming completions get the continuous-batching concurrency
+  streaming already had, closing the last open item from DEC-038's admission-control
+  round. 379/379 unit tests pass (371 prior + 8 new `test_engine_driver.py` cases plus a
+  new `test_generate_completes_via_driver` case). Engine knob surfacing and model variant
+  routing (the other two DEC-038/Phase-2-adjacent deferrals) remain separately proposed
+  under `openspec/changes/add-engine-knob-surfacing` and
+  `openspec/changes/add-model-variant-routing`, not implemented this round.

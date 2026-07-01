@@ -3,14 +3,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import queue
 import re
 import threading
-import uuid
 from collections.abc import AsyncGenerator
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from typing import Any
 
 from inference_x.engines.base import BaseEngine
+from inference_x.engines.driver import EngineDriver, EngineDriverDeadError
 from inference_x.utils.cuda_env import ensure_vllm_runtime_env
 from inference_x.utils.vllm_pool_config import scale_model_config_for_pool
 from inference_x.schemas.chat import (
@@ -25,7 +25,11 @@ logger = logging.getLogger(__name__)
 
 _VLLM_AVAILABLE: bool | None = None
 # Serialize llm_engine.step() across engines in one process (vLLM V1 forward context).
+# Each engine's EngineDriver acquires this same lock around its step() calls when
+# pool_size > 1 — giving a driver its own private lock instead would silently
+# reintroduce the cross-engine race this was added to prevent.
 _POOL_STEP_LOCK = threading.Lock()
+_COMPLETION_TIMEOUT_S = 300.0  # safety net against a wedged driver thread/queue stall
 
 
 def _probe_cuda_vram() -> dict[str, float | bool]:
@@ -367,6 +371,8 @@ class VLLMEngine(BaseEngine):
             self._supports_chat = self._detect_chat_support()
             self._healthy = True
             self._log_kv_cache_stats()
+            step_lock = _POOL_STEP_LOCK if pool_size > 1 else self._engine_lock
+            self._driver = EngineDriver(self._llm.llm_engine, step_lock)
             logger.info(
                 "vLLM engine ready: model=%s chat_template=%s",
                 self._model_name,
@@ -501,41 +507,25 @@ class VLLMEngine(BaseEngine):
             return self._messages_to_prompt(request.messages)
 
     def _run_completion(self, request: ChatCompletionRequest):
-        """Blocking completion using the startup-loaded sync engine.
+        """Blocking completion via the shared EngineDriver (see engines/driver.py).
 
-        NOTE (DEC-037 Phase 2): a step()-loop refactor mirroring generate_stream
-        (releasing the lock between steps, like add_request + step()) was tried
-        here to give non-streaming requests the same continuous batching
-        streaming already has. It was reverted after a live concurrency test
-        found a real race: when N non-streaming requests finish within the same
-        few engine steps, whichever thread's step() call returns another
-        request's *finished* RequestOutput discards it (request_id mismatch)
-        and that request is never seen again — has_unfinished_requests() goes
-        globally False and the owning thread raises "no output" with no retry.
-        generate_stream doesn't hit this because it only needs *some* future
-        call to see its own request_id with cumulative text to catch up; a
-        one-shot finished-result handoff has no such recovery. A correct fix
-        needs a single shared per-engine driver thread that multiplexes step()
-        output to per-request queues, not N independent request-owned loops —
-        left as follow-up work, not shipped half-verified.
+        Both this method and generate_stream submit through the same per-engine
+        driver thread — the only caller of add_request/step() for this engine —
+        instead of each running its own step() loop. See DEC-038 for the race
+        that made a per-request step() loop unsafe for non-streaming completions,
+        and DEC-039 for the driver-thread fix.
         """
         sampling = self._sampling_params(request)
-        vllm_messages = [{"role": m.role, "content": m.content} for m in request.messages]
-
-        step_lock = _POOL_STEP_LOCK if self._pool_size > 1 else self._engine_lock
-        with step_lock:
-            if self._supports_chat:
-                return self._llm.chat(
-                    messages=vllm_messages,  # type: ignore[arg-type]
-                    sampling_params=sampling,
-                    use_tqdm=False,
-                )
-            prompt = self._messages_to_prompt(request.messages)
-            return self._llm.generate(
-                prompts=[prompt],
-                sampling_params=sampling,
-                use_tqdm=False,
-            )
+        prompt = self._stream_prompt(request)
+        future = self._driver.submit_complete(prompt, sampling)
+        try:
+            output = future.result(timeout=_COMPLETION_TIMEOUT_S)
+        except FuturesTimeoutError as exc:
+            raise RuntimeError(
+                f"vLLM completion timed out after {_COMPLETION_TIMEOUT_S}s "
+                f"for model={self._model_name}"
+            ) from exc
+        return [output]
 
     async def generate_stream(
         self, request: ChatCompletionRequest
@@ -544,64 +534,20 @@ class VLLMEngine(BaseEngine):
             yield "Streaming not available (vLLM not loaded)"
             return
 
-        sync_queue: queue.Queue[str | None] = queue.Queue()
-
-        def worker() -> None:
-            sampling = self._sampling_params(request)
-            prompt = self._stream_prompt(request)
-            request_id = f"cmpl-stream-{uuid.uuid4().hex}"
-            llm_engine = self._llm.llm_engine
-            previous_text = ""
-
-            step_lock = _POOL_STEP_LOCK if self._pool_size > 1 else self._engine_lock
-            try:
-                with self._engine_lock:
-                    llm_engine.add_request(request_id, prompt, sampling)
-                while llm_engine.has_unfinished_requests():
-                    with step_lock:
-                        step_outputs = llm_engine.step()
-                    if not step_outputs:
-                        continue
-                    for output in step_outputs:
-                        if output.request_id != request_id or not output.outputs:
-                            continue
-                        text = output.outputs[0].text or ""
-                        if text.startswith(previous_text):
-                            chunk = text[len(previous_text) :]
-                        else:
-                            chunk = text
-                        previous_text = text
-                        if chunk:
-                            sync_queue.put(chunk)
-                        if output.finished:
-                            if not previous_text:
-                                logger.warning(
-                                    "vLLM stream finished with 0 tokens for model=%s "
-                                    "(possible KV cache exhaustion)",
-                                    self._model_name,
-                                )
-                            return
-            except Exception as worker_exc:
-                logger.warning(
-                    "vLLM stream worker failed for model=%s: %s",
-                    self._model_name,
-                    worker_exc,
-                )
-                raise
-            finally:
-                sync_queue.put(None)
-
+        sampling = self._sampling_params(request)
+        prompt = self._stream_prompt(request)
         try:
-            thread = threading.Thread(target=worker, daemon=True)
-            thread.start()
-            while True:
-                chunk = await asyncio.to_thread(sync_queue.get)
-                if chunk is None:
-                    break
-                yield chunk
-            thread.join()
-        except Exception as exc:
+            out_queue = self._driver.submit_stream(prompt, sampling)
+        except EngineDriverDeadError as exc:
             raise RuntimeError(f"vLLM streaming generation failed: {exc}") from exc
+
+        while True:
+            chunk = await asyncio.to_thread(out_queue.get)
+            if chunk is None:
+                return
+            if isinstance(chunk, BaseException):
+                raise RuntimeError(f"vLLM streaming generation failed: {chunk}") from chunk
+            yield chunk
 
     async def generate(self, request: ChatCompletionRequest) -> ChatCompletionResponse:
         try:
@@ -633,6 +579,9 @@ class VLLMEngine(BaseEngine):
         )
 
     def is_healthy(self) -> bool:
+        driver = getattr(self, "_driver", None)
+        if driver is not None and driver.is_dead:
+            return False
         return self._healthy
 
     def shutdown(self) -> None:
@@ -641,6 +590,9 @@ class VLLMEngine(BaseEngine):
         if llm is None:
             return
         self._healthy = False
+        driver = getattr(self, "_driver", None)
+        if driver is not None:
+            driver.shutdown()
         try:
             with self._engine_lock:
                 llm.llm_engine.engine_core.shutdown()
