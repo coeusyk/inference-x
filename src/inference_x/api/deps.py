@@ -17,7 +17,12 @@ from inference_x.routing.task_router import TaskRouter
 from inference_x.services.chat_service import ChatService
 from inference_x.services.metrics_service import MetricsService
 from inference_x.services.model_service import ModelRegistry
-from inference_x.utils.vllm_pool_config import probe_gpu_memory_gib, validate_pool_fits
+from inference_x.utils.vllm_pool_config import (
+    apply_tier_knobs,
+    probe_gpu_memory_gib,
+    validate_pool_fits,
+)
+from inference_x.utils.vram_tiers import VramTier
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +32,25 @@ def _build_registry(config_dir: str) -> ModelRegistry:
     return ModelRegistry.from_config(config_dir)
 
 
+def _resolve_vram_tier_for_pool(config_dir: str) -> VramTier | None:
+    """Resolve the VRAM tier for engine-knob wiring, fail-open with a warning.
+
+    Same posture as _build_admission_controller: a resolution failure must not
+    block engine construction, it only means apply_tier_knobs() leaves each
+    model's config untouched (vLLM's own defaults, as before this knob wiring
+    existed).
+    """
+    try:
+        return get_settings().get_vram_tier()
+    except Exception as exc:
+        logger.warning(
+            "VRAM tier resolution failed for engine knob wiring (using model/vLLM "
+            "defaults): %s",
+            exc,
+        )
+        return None
+
+
 @lru_cache(maxsize=1)
 def _build_engine_pool(config_dir: str, loaded_models: tuple[str, ...]) -> EnginePool:
     """Build an EnginePool loading one VLLMEngine per model in *loaded_models*."""
@@ -34,15 +58,18 @@ def _build_engine_pool(config_dir: str, loaded_models: tuple[str, ...]) -> Engin
     pool_size = len(loaded_models)
     session_free_gib, session_total_gib = probe_gpu_memory_gib()
     total_vram = session_total_gib if session_total_gib is not None else 8.0
-    pool_configs = [registry.get(m).model_dump() for m in loaded_models]
+    tier = _resolve_vram_tier_for_pool(config_dir)
+    pool_configs = [
+        apply_tier_knobs(registry.get(m).model_dump(), tier) for m in loaded_models
+    ]
     validate_pool_fits(pool_configs, total_vram_gib=total_vram)
     engines: dict = {}
     for idx, model_name in enumerate(loaded_models):
         free_gib, total_gib = probe_gpu_memory_gib()
-        model_config = registry.get(model_name)
+        model_config = pool_configs[idx]
         logger.info("Loading engine for model=%s (pool_size=%d)", model_name, pool_size)
         engines[model_name] = VLLMEngine(
-            model_config.model_dump(),
+            model_config,
             pool_size=pool_size,
             pool_models=list(loaded_models),
             pool_configs=pool_configs,

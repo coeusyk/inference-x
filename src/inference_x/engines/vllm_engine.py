@@ -339,6 +339,17 @@ class VLLMEngine(BaseEngine):
         max_num_seqs = model_config.get("max_num_seqs")
         if max_num_seqs is not None:
             kwargs["max_num_seqs"] = max_num_seqs
+        max_num_batched_tokens = model_config.get("max_num_batched_tokens")
+        if max_num_batched_tokens is not None:
+            kwargs["max_num_batched_tokens"] = max_num_batched_tokens
+        block_size = model_config.get("block_size")
+        if block_size is not None:
+            kwargs["block_size"] = block_size
+        kv_cache_dtype = model_config.get("kv_cache_dtype")
+        if kv_cache_dtype is not None:
+            kwargs["kv_cache_dtype"] = kv_cache_dtype
+        if model_config.get("enable_prefix_caching") is not None:
+            kwargs["enable_prefix_caching"] = model_config["enable_prefix_caching"]
         if model_config.get("quantization"):
             kwargs["quantization"] = model_config["quantization"]
         if pool_size > 1:

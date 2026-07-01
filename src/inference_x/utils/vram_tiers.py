@@ -32,9 +32,12 @@ class VramTier:
     max_num_seqs: int
     block_size: int
     kv_cache_dtype: str
+    max_num_batched_tokens: int | None = None
+    enable_prefix_caching: bool = False
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "VramTier":
+        max_num_batched_tokens = data.get("max_num_batched_tokens")
         return cls(
             name=str(data["name"]),
             min_vram_gb=float(data["min_vram_gb"]),
@@ -44,6 +47,10 @@ class VramTier:
             max_num_seqs=int(data["max_num_seqs"]),
             block_size=int(data.get("block_size", 16)),
             kv_cache_dtype=str(data.get("kv_cache_dtype", "auto")),
+            max_num_batched_tokens=(
+                int(max_num_batched_tokens) if max_num_batched_tokens is not None else None
+            ),
+            enable_prefix_caching=bool(data.get("enable_prefix_caching", False)),
         )
 
 

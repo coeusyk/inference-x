@@ -9,6 +9,7 @@ from functools import lru_cache
 from typing import Any
 
 from inference_x.benchmarks.hardware import suggest_gpu_memory_utilization
+from inference_x.utils.vram_tiers import VramTier
 
 logger = logging.getLogger(__name__)
 
@@ -419,6 +420,47 @@ def validate_pool_fits(
                 f"Models [{names}] cannot load sequentially on a {total_vram_gib:.0f} GiB "
                 f"GPU: {exc}"
             ) from exc
+
+
+def apply_tier_knobs(config: dict[str, Any], tier: VramTier | None) -> dict[str, Any]:
+    """Return a copy of *config* with VRAM-tier engine knobs resolved and merged in.
+
+    ``max_num_seqs`` / ``max_num_batched_tokens``: the tighter of any per-model
+    override already present in *config* and the tier's ceiling — a model can
+    only ask for a smaller budget than its tier allows, never a looser one
+    (same composition ``AdmissionController._context_ceiling`` uses for
+    ``max_model_len``).
+
+    ``block_size`` / ``kv_cache_dtype`` / ``enable_prefix_caching``: tier-only,
+    no per-model override — ``ModelEntry`` declares none of these.
+
+    A *tier* of ``None`` (VRAM tier resolution failed) leaves *config*
+    unchanged, consistent with this codebase's fail-open posture for advisory
+    signals elsewhere (e.g. VRAM tier resolution failure in ``api/deps.py``).
+    """
+    resolved = dict(config)
+    if tier is None:
+        return resolved
+
+    model_max_num_seqs = resolved.get("max_num_seqs")
+    resolved["max_num_seqs"] = (
+        min(model_max_num_seqs, tier.max_num_seqs)
+        if model_max_num_seqs is not None
+        else tier.max_num_seqs
+    )
+
+    if tier.max_num_batched_tokens is not None:
+        model_max_batched = resolved.get("max_num_batched_tokens")
+        resolved["max_num_batched_tokens"] = (
+            min(model_max_batched, tier.max_num_batched_tokens)
+            if model_max_batched is not None
+            else tier.max_num_batched_tokens
+        )
+
+    resolved["block_size"] = tier.block_size
+    resolved["kv_cache_dtype"] = tier.kv_cache_dtype
+    resolved["enable_prefix_caching"] = tier.enable_prefix_caching
+    return resolved
 
 
 def scale_model_config_for_pool(

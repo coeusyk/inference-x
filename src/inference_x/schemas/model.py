@@ -18,6 +18,14 @@ class ModelEntry(BaseModel):
         ge=1,
         description="vLLM concurrent sequence cap (lower for hybrid/Mamba models on tight VRAM)",
     )
+    max_num_batched_tokens: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description=(
+            "vLLM per-step token budget override; clamped to the resolved VRAM "
+            "tier's ceiling by apply_tier_knobs(), never looser"
+        ),
+    )
     quantization: Optional[str] = None
     gated: bool = False
     instruction_tuned: bool = True

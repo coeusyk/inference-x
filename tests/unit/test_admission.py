@@ -19,6 +19,7 @@ from inference_x.services.model_service import ModelRegistry
 @dataclass
 class _FakeTier:
     max_model_len_cap: int
+    max_num_seqs: int = 1000  # high enough to not trip the seq-concurrency gate by default
 
 
 class _FakeEngine:
@@ -165,3 +166,63 @@ class TestPromptTokenFallback:
         # "hi" is 2 chars -> max(1, 2 // 4) == 1 prompt token, well under the cap.
         result = controller.admit("m", _req(max_tokens=1), _NoTokenizerEngine())
         assert result.effective_max_tokens == 1
+
+
+class TestSequenceConcurrencyGate:
+    def test_no_tier_never_blocks_on_sequence_count(self):
+        """No tier resolved -> gate is skipped entirely (fail open)."""
+        controller = AdmissionController(_registry())
+        for _ in range(50):
+            controller.admit("m", _req(max_tokens=10), _FakeEngine(prompt_tokens=1))
+        # No exception raised for any of the 50 concurrent (never-released) admissions.
+
+    def test_batch_rejected_at_tier_max_num_seqs(self):
+        controller = AdmissionController(_registry(), tier=_FakeTier(max_model_len_cap=4096, max_num_seqs=2))
+        controller.admit("m", _req(max_tokens=10, priority="batch"), _FakeEngine(prompt_tokens=1))
+        controller.admit("m", _req(max_tokens=10, priority="batch"), _FakeEngine(prompt_tokens=1))
+        with pytest.raises(EngineSaturatedError, match="concurrent-sequence limit"):
+            controller.admit("m", _req(max_tokens=10, priority="batch"), _FakeEngine(prompt_tokens=1))
+
+    def test_interactive_also_rejected_at_tier_max_num_seqs(self):
+        """Unlike the KV-token gate, there is no clamp path for a sequence slot —
+        interactive priority is rejected too when the ceiling is hit."""
+        controller = AdmissionController(_registry(), tier=_FakeTier(max_model_len_cap=4096, max_num_seqs=1))
+        controller.admit("m", _req(max_tokens=10), _FakeEngine(prompt_tokens=1))
+        with pytest.raises(EngineSaturatedError, match="concurrent-sequence limit"):
+            controller.admit("m", _req(max_tokens=10), _FakeEngine(prompt_tokens=1))
+
+    def test_model_max_num_seqs_override_further_restricts_tier(self):
+        controller = AdmissionController(
+            _registry(max_num_seqs=1), tier=_FakeTier(max_model_len_cap=4096, max_num_seqs=8)
+        )
+        controller.admit("m", _req(max_tokens=10), _FakeEngine(prompt_tokens=1))
+        with pytest.raises(EngineSaturatedError, match="concurrent-sequence limit"):
+            controller.admit("m", _req(max_tokens=10), _FakeEngine(prompt_tokens=1))
+
+    def test_release_frees_a_sequence_slot(self):
+        controller = AdmissionController(_registry(), tier=_FakeTier(max_model_len_cap=4096, max_num_seqs=1))
+        result = controller.admit("m", _req(max_tokens=10), _FakeEngine(prompt_tokens=1))
+        controller.release("m", result.reserved_tokens)
+        # Slot freed -> a second admission succeeds instead of raising.
+        controller.admit("m", _req(max_tokens=10), _FakeEngine(prompt_tokens=1))
+
+    def test_sequence_counts_are_tracked_per_model(self):
+        controller = AdmissionController(_registry(), tier=_FakeTier(max_model_len_cap=4096, max_num_seqs=1))
+        controller.admit("m", _req(max_tokens=10), _FakeEngine(prompt_tokens=1))
+        # A different model has its own independent slot count.
+        controller._registry = ModelRegistry(
+            [ModelEntry(name="m", model_path="test/m"), ModelEntry(name="other", model_path="test/other")]
+        )
+        controller.admit("other", _req(model="other", max_tokens=10), _FakeEngine(prompt_tokens=1))
+
+    def test_a_request_rejected_by_context_gate_does_not_consume_a_sequence_slot(self):
+        """admit() must be atomic: a later-gate rejection must not leak a slot that
+        release() will never be called for (ChatService only calls release() when
+        admit() succeeds)."""
+        controller = AdmissionController(
+            _registry(max_model_len=4), tier=_FakeTier(max_model_len_cap=4096, max_num_seqs=1)
+        )
+        with pytest.raises(ContextTooLongError):
+            controller.admit("m", _req(), _FakeEngine(prompt_tokens=10))
+        # Slot was never consumed -> a normal admission still succeeds.
+        controller.admit("m", _req(max_tokens=1), _FakeEngine(prompt_tokens=1))

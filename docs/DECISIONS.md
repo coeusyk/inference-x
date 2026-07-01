@@ -576,3 +576,55 @@ Use this document to capture non-obvious design decisions as the project evolves
   routing (the other two DEC-038/Phase-2-adjacent deferrals) remain separately proposed
   under `openspec/changes/add-engine-knob-surfacing` and
   `openspec/changes/add-model-variant-routing`, not implemented this round.
+
+### DEC-040
+- Date: 2026-07-01
+- Status: accepted
+- Context: `config/vram_tiers.yaml` has declared `block_size`/`kv_cache_dtype`/`max_num_seqs`
+  per tier since DEC-037, with a comment noting they weren't yet consumed by the engine.
+  `_build_engine_pool` (`api/deps.py`) never resolved a VRAM tier at all — only
+  `initialize_app()` did, purely for a log line. `AdmissionController`'s KV-pressure gate
+  had no visibility into `max_num_seqs`: a saturated sequence-concurrency ceiling just
+  queued silently inside vLLM's scheduler instead of surfacing as an explicit signal.
+  This closes `openspec/changes/add-engine-knob-surfacing`.
+- Decision:
+  - `VramTier` (`utils/vram_tiers.py`) and `config/vram_tiers.yaml` gain two additive
+    fields per tier: `max_num_batched_tokens` (bounds the transient prefill-burst compute
+    spike, distinct from steady-state KV usage) and `enable_prefix_caching`.
+    `.get()`-defaulted (`None`/`False`) so old tier files keep parsing unchanged. 6gb:
+    2048 / `false` (tight KV budget, prefix caching would hold blocks longer than
+    affordable); 12gb/24gb: 4096/8192 / `true`.
+  - `ModelEntry.max_num_batched_tokens: Optional[int]` — same override shape as the
+    existing `max_num_seqs`. `enable_prefix_caching` is deliberately tier-only, no
+    per-model override — a single engine-startup flag with no meaningful per-model
+    variance in a one-model-per-process engine.
+  - New `apply_tier_knobs(config, tier)` (`utils/vllm_pool_config.py`): resolves
+    `max_num_seqs`/`max_num_batched_tokens` as `min(model override or tier value, tier
+    value)` — same composition `AdmissionController._context_ceiling` already uses for
+    `max_model_len` — and passes `block_size`/`kv_cache_dtype`/`enable_prefix_caching`
+    straight from the tier. A `None` tier leaves the config dict untouched (fail-open).
+  - `VLLMEngine.__init__` now forwards `max_num_batched_tokens`, `block_size`,
+    `kv_cache_dtype`, `enable_prefix_caching` to `LLM(**kwargs)` alongside the existing
+    `max_num_seqs` — confirmed all five are real `EngineArgs` fields on the installed
+    vLLM 0.22.1 (`LLM.__init__`'s `**kwargs` forwards to `EngineArgs`).
+  - `_build_engine_pool` (`api/deps.py`) gained `_resolve_vram_tier_for_pool` (same
+    fail-open-with-a-warning try/except pattern as `_build_admission_controller`) and
+    now calls `apply_tier_knobs` on each model's config before constructing its
+    `VLLMEngine` — previously this function never resolved a tier at all.
+  - `AdmissionController` (`routing/admission.py`) gained a third gate,
+    `_InFlightSeqTracker`: a per-model in-flight *request count* (not tokens), checked
+    first in `admit()` against the resolved `max_num_seqs` ceiling. Unlike the KV-token
+    gate, there is no clamp path — both `interactive` and `batch` priority get
+    `EngineSaturatedError` (429 + `Retry-After`) when saturated, since a sequence slot
+    can't be partially granted. The increment happens only at the very end of `admit()`
+    (alongside the KV token reservation) so an earlier-gate rejection never leaks a slot
+    that `release()` would never be called to free.
+- Live-verified: with a running `opt-125m` server on the 6gb tier, vLLM's own startup log
+  shows `max_num_batched_tokens=2048` and `enable_prefix_caching=False` — the resolved
+  tier values, not vLLM's defaults — reaching the real engine config, and the server
+  served a normal chat completion afterward.
+- Consequences: 401/401 unit tests pass (17 new: `apply_tier_knobs` composition cases,
+  `VLLMEngine` kwarg-forwarding cases, `_build_engine_pool` tier-resolution wiring cases,
+  6 new `AdmissionController` sequence-gate cases, 1 new route-level 429 test). Model
+  variant routing (`openspec/changes/add-model-variant-routing`) remains separately
+  proposed, not implemented this round.

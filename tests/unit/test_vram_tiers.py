@@ -127,3 +127,47 @@ def test_real_vram_tiers_yaml_loads_and_resolves():
     assert resolve_tier(6.0, tiers).name == "6gb"
     assert resolve_tier(12.0, tiers).name == "12gb"
     assert resolve_tier(24.0, tiers).name == "24gb"
+
+
+def test_real_vram_tiers_yaml_has_engine_knobs():
+    """max_num_batched_tokens/enable_prefix_caching are wired for every shipped tier."""
+    load_tiers.cache_clear()
+    tiers = load_tiers("config")
+    by_name = {t.name: t for t in tiers}
+    assert by_name["6gb"].max_num_batched_tokens == 2048
+    assert by_name["6gb"].enable_prefix_caching is False
+    assert by_name["12gb"].max_num_batched_tokens == 4096
+    assert by_name["12gb"].enable_prefix_caching is True
+    assert by_name["24gb"].max_num_batched_tokens == 8192
+    assert by_name["24gb"].enable_prefix_caching is True
+
+
+def test_from_dict_defaults_new_knobs_when_absent(tiers_config_dir):
+    """Old-style vram_tiers.yaml files without the new fields keep working."""
+    load_tiers.cache_clear()
+    tiers = load_tiers(tiers_config_dir)
+    for tier in tiers:
+        assert tier.max_num_batched_tokens is None
+        assert tier.enable_prefix_caching is False
+
+
+def test_from_dict_parses_new_knobs_when_present(tmp_path):
+    (tmp_path / "vram_tiers.yaml").write_text(
+        """
+tiers:
+  - name: 6gb
+    min_vram_gb: 0
+    description: floor tier
+    gpu_memory_utilization_ceiling: 0.90
+    max_model_len_cap: 2048
+    max_num_seqs: 4
+    block_size: 16
+    kv_cache_dtype: auto
+    max_num_batched_tokens: 2048
+    enable_prefix_caching: false
+"""
+    )
+    load_tiers.cache_clear()
+    tiers = load_tiers(str(tmp_path))
+    assert tiers[0].max_num_batched_tokens == 2048
+    assert tiers[0].enable_prefix_caching is False

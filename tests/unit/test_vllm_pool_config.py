@@ -4,9 +4,28 @@ import pytest
 
 from inference_x.utils import vllm_pool_config as pool
 from inference_x.utils.vllm_pool_config import (
+    apply_tier_knobs,
     scale_model_config_for_pool,
     validate_pool_fits,
 )
+from inference_x.utils.vram_tiers import VramTier
+
+
+def _tier(**overrides) -> VramTier:
+    defaults = dict(
+        name="6gb",
+        min_vram_gb=0,
+        description="test tier",
+        gpu_memory_utilization_ceiling=0.90,
+        max_model_len_cap=2048,
+        max_num_seqs=4,
+        block_size=16,
+        kv_cache_dtype="auto",
+        max_num_batched_tokens=2048,
+        enable_prefix_caching=False,
+    )
+    defaults.update(overrides)
+    return VramTier(**defaults)
 
 
 @pytest.fixture
@@ -246,3 +265,51 @@ def test_validate_pool_fits_allows_small_pair(fixed_footprints):
 def test_validate_pool_fits_rejects_dual_model_on_6gb(fixed_footprints):
     with pytest.raises(ValueError, match="need ~|cannot load sequentially"):
         validate_pool_fits([_qwen_cfg(), _tiny_cfg()], total_vram_gib=6.0)
+
+
+# ---------------------------------------------------------------------------
+# apply_tier_knobs
+# ---------------------------------------------------------------------------
+
+
+def test_apply_tier_knobs_no_tier_leaves_config_unchanged():
+    config = {"name": "m", "model_path": "org/m"}
+    resolved = apply_tier_knobs(config, None)
+    assert resolved == config
+    assert resolved is not config  # still a copy, not the same object
+
+
+def test_apply_tier_knobs_uses_tier_defaults_when_no_model_override():
+    config = {"name": "m", "model_path": "org/m"}
+    resolved = apply_tier_knobs(config, _tier())
+    assert resolved["max_num_seqs"] == 4
+    assert resolved["max_num_batched_tokens"] == 2048
+    assert resolved["block_size"] == 16
+    assert resolved["kv_cache_dtype"] == "auto"
+    assert resolved["enable_prefix_caching"] is False
+
+
+def test_apply_tier_knobs_honors_tighter_model_override():
+    config = {"name": "m", "model_path": "org/m", "max_num_seqs": 2, "max_num_batched_tokens": 512}
+    resolved = apply_tier_knobs(config, _tier())
+    assert resolved["max_num_seqs"] == 2
+    assert resolved["max_num_batched_tokens"] == 512
+
+
+def test_apply_tier_knobs_clamps_looser_model_override_down_to_tier():
+    config = {"name": "m", "model_path": "org/m", "max_num_seqs": 64, "max_num_batched_tokens": 999999}
+    resolved = apply_tier_knobs(config, _tier())
+    assert resolved["max_num_seqs"] == 4
+    assert resolved["max_num_batched_tokens"] == 2048
+
+
+def test_apply_tier_knobs_enable_prefix_caching_is_tier_only():
+    config = {"name": "m", "model_path": "org/m"}
+    resolved = apply_tier_knobs(config, _tier(name="12gb", enable_prefix_caching=True))
+    assert resolved["enable_prefix_caching"] is True
+
+
+def test_apply_tier_knobs_skips_max_num_batched_tokens_when_tier_omits_it():
+    config = {"name": "m", "model_path": "org/m", "max_num_batched_tokens": 1024}
+    resolved = apply_tier_knobs(config, _tier(max_num_batched_tokens=None))
+    assert resolved["max_num_batched_tokens"] == 1024  # left untouched, not cleared

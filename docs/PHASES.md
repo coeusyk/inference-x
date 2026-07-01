@@ -348,6 +348,45 @@ Exit criteria:
 
 ---
 
+## Phase 10 — Engine Knob Surfacing
+
+**Goal:** Make the VRAM/concurrency knobs `config/vram_tiers.yaml` has declared since
+DEC-037 (`block_size`, `kv_cache_dtype`, `max_num_seqs`) actually reach the vLLM engine,
+add the two knobs that were missing entirely (`max_num_batched_tokens`,
+`enable_prefix_caching`), and give `AdmissionController` visibility into sequence
+concurrency saturation.
+
+Deliverables:
+- `VramTier` / `config/vram_tiers.yaml` — additive `max_num_batched_tokens`,
+  `enable_prefix_caching` per tier; `ModelEntry.max_num_batched_tokens` per-model
+  override
+- `apply_tier_knobs()` (`utils/vllm_pool_config.py`) — resolves tier ceiling ∩ per-model
+  override for `max_num_seqs`/`max_num_batched_tokens`; passes `block_size`/
+  `kv_cache_dtype`/`enable_prefix_caching` straight from the tier
+- `VLLMEngine.__init__` forwards all five knobs to `LLM(**kwargs)`; `_build_engine_pool`
+  (`api/deps.py`) resolves the VRAM tier and applies knobs before engine construction
+  (previously never resolved a tier at all)
+- `AdmissionController` gains an in-flight-sequence-count gate
+  (`_InFlightSeqTracker`) — 429 for both priorities when a model's resolved
+  `max_num_seqs` is saturated, no clamp path
+
+Exit criteria:
+- [x] `uv run pytest tests/unit -v` — 401/401 pass (17 new across
+  `test_vllm_pool_config.py`, `test_vllm_engine_knobs.py`, `test_deps_tier_knobs.py`,
+  `test_admission.py`, `test_routes.py`)
+- [x] Live-verified: a running `opt-125m` server on the 6gb tier shows vLLM's own startup
+  log reporting `max_num_batched_tokens=2048`/`enable_prefix_caching=False` — the
+  resolved tier values — and serves a normal chat completion afterward
+- [x] Model-level knob overrides compose correctly with tier ceilings (unit-tested:
+  tighter override honored, looser override clamped down)
+- [x] Non-obvious choices recorded in DECISIONS.md (DEC-040)
+
+**Not delivered this phase:**
+- Model variant routing — separately proposed under
+  `openspec/changes/add-model-variant-routing`, not implemented.
+
+---
+
 ## Decision rule: when to create a new phase
 
 A new phase is warranted when:

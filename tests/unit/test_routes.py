@@ -291,6 +291,44 @@ class TestChatCompletionsEndpoint:
             assert body["error"]["type"] == "rate_limit_error"
         app.dependency_overrides.clear()
 
+    def test_sequence_concurrency_saturation_returns_429(self):
+        """An interactive-priority request is also rejected (no clamp path exists
+        for a sequence slot) when the resolved max_num_seqs ceiling is already
+        full (add-engine-knob-surfacing)."""
+        from dataclasses import dataclass
+
+        from inference_x.routing.admission import AdmissionController
+
+        @dataclass
+        class _FakeTier:
+            max_model_len_cap: int
+            max_num_seqs: int
+
+        engine = _AdmissionAwareEngine(prompt_tokens=5)
+        registry = _make_stub_registry()
+        router = TaskRouter(registry, _TEST_MODEL)
+        pool = EnginePool({_TEST_MODEL: engine})
+        admission = AdmissionController(
+            registry, tier=_FakeTier(max_model_len_cap=4096, max_num_seqs=1)
+        )
+        svc = ChatService(engine_pool=pool, registry=registry, router=router, admission=admission)
+        # Simulate one in-flight request already holding the model's only sequence slot.
+        admission.admit(
+            _TEST_MODEL,
+            ChatCompletionRequest(
+                model=_TEST_MODEL, messages=[ChatMessage(role="user", content="x")]
+            ),
+            engine,
+        )
+        app.dependency_overrides[get_chat_service] = lambda: svc
+        with TestClient(app) as c:
+            resp = c.post("/v1/chat/completions", json=self._payload)
+            assert resp.status_code == 429
+            assert "Retry-After" in resp.headers
+            body = resp.json()
+            assert body["error"]["type"] == "rate_limit_error"
+        app.dependency_overrides.clear()
+
 
 # ---------------------------------------------------------------------------
 # Models endpoint

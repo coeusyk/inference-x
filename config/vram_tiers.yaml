@@ -13,9 +13,13 @@ tiers:
   # (max_model_len * max_num_seqs * kv_bytes_per_token) against real KV-cache VRAM —
   # see estimate_kv_cache_gib() in utils/vllm_pool_config.py.
   #
-  # block_size / kv_cache_dtype are vLLM PagedAttention knobs, not yet consumed by the
-  # engine (surfacing them is Phase 2 work) — recorded here now so the tier contract is
-  # complete and the values are ready to wire in without a config-schema change.
+  # block_size / kv_cache_dtype are vLLM PagedAttention knobs. max_num_batched_tokens
+  # bounds the transient compute/activation spike during a prefill-heavy scheduler step
+  # (distinct from steady-state KV usage, which max_num_seqs/max_model_len_cap already
+  # bound). enable_prefix_caching trades KV-pool headroom (blocks kept alive longer)
+  # for reuse across requests sharing a prompt prefix — off on the tight 6gb tier,
+  # on where there's headroom. See utils/vllm_pool_config.py's apply_tier_knobs() for
+  # how these compose with any per-model override in models.yaml.
 
   - name: 6gb
     min_vram_gb: 0
@@ -28,6 +32,8 @@ tiers:
     max_num_seqs: 4
     block_size: 16
     kv_cache_dtype: auto
+    max_num_batched_tokens: 2048
+    enable_prefix_caching: false
 
   - name: 12gb
     min_vram_gb: 10
@@ -39,6 +45,8 @@ tiers:
     max_num_seqs: 8
     block_size: 16
     kv_cache_dtype: auto
+    max_num_batched_tokens: 4096
+    enable_prefix_caching: true
 
   - name: 24gb
     min_vram_gb: 20
@@ -50,3 +58,5 @@ tiers:
     max_num_seqs: 16
     block_size: 16
     kv_cache_dtype: auto
+    max_num_batched_tokens: 8192
+    enable_prefix_caching: true

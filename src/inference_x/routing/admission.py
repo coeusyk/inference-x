@@ -6,25 +6,33 @@ is admitted as-is, admitted with a clamped `max_tokens`, or rejected. All GPU
 sizing lives in utils/vllm_pool_config.py and the engine, as in the rest of
 routing/ (see routing/base.py).
 
-Two independent gates, both keyed on real numbers where they're available:
+Three independent gates, each keyed on real numbers where they're available:
 
-1. Context length: prompt_tokens + requested_output_tokens must fit the
+1. Sequence-concurrency ceiling: the number of in-flight requests against a
+   model must stay at or below the resolved max_num_seqs (tier ceiling ∩ any
+   per-model ModelEntry.max_num_seqs override — see
+   utils/vllm_pool_config.apply_tier_knobs for the same composition applied at
+   engine-construction time). Unlike the two gates below, there is no clamp
+   path: a request either gets a sequence slot or it doesn't, so both
+   'interactive' and 'batch' priority get EngineSaturatedError when saturated.
+
+2. Context length: prompt_tokens + requested_output_tokens must fit the
    model's context window (min of ModelEntry.max_model_len, the resolved VRAM
    tier's max_model_len_cap, and the request's own max_context_tokens, if
    set). Prompt tokens come from the engine's tokenizer when it exposes
    count_prompt_tokens(); otherwise a chars/4 heuristic is used.
 
-2. KV-pool pressure: a per-model in-memory counter tracks tokens reserved by
+3. KV-pool pressure: a per-model in-memory counter tracks tokens reserved by
    in-flight requests, compared against the engine's real post-load
    kv_capacity_tokens (num_gpu_blocks * block_size) when it exposes one.
    'interactive' requests get max_tokens clamped to fit; 'batch' requests are
    rejected with EngineSaturatedError (mapped to 429 + Retry-After) instead of
    silently getting a truncated completion.
 
-Both gates degrade to "don't block" when the underlying number is unavailable
-(no tokenizer, no reported KV capacity) — consistent with the rest of this
-codebase's fail-open-with-a-log posture for advisory/best-effort signals
-(e.g. VRAM tier resolution in api/deps.py).
+All three gates degrade to "don't block" when the underlying number is
+unavailable (no resolved tier, no tokenizer, no reported KV capacity) —
+consistent with the rest of this codebase's fail-open-with-a-log posture for
+advisory/best-effort signals (e.g. VRAM tier resolution in api/deps.py).
 """
 from __future__ import annotations
 
@@ -110,6 +118,31 @@ class _KVReservationTracker:
             self._reserved[model] = max(0, self._reserved.get(model, 0) - tokens)
 
 
+class _InFlightSeqTracker:
+    """Thread-safe per-model counter of in-flight admitted requests (sequence slots).
+
+    Unlike _KVReservationTracker (token counts), this counts requests, since
+    vLLM's max_num_seqs is a hard cap on concurrent sequences regardless of how
+    few tokens each one uses.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._counts: dict[str, int] = {}
+
+    def current(self, model: str) -> int:
+        with self._lock:
+            return self._counts.get(model, 0)
+
+    def increment(self, model: str) -> None:
+        with self._lock:
+            self._counts[model] = self._counts.get(model, 0) + 1
+
+    def decrement(self, model: str) -> None:
+        with self._lock:
+            self._counts[model] = max(0, self._counts.get(model, 0) - 1)
+
+
 class AdmissionController:
     """Enforces context-length and KV-budget limits before an engine is invoked."""
 
@@ -124,12 +157,26 @@ class AdmissionController:
         self._tier = tier
         self._kv_safety_margin = kv_safety_margin
         self._tracker = _KVReservationTracker()
+        self._seq_tracker = _InFlightSeqTracker()
 
     def _context_ceiling(self, routed_model: str) -> int:
         """Highest token count (prompt + output) this model's context window allows."""
         ceiling = self._tier.max_model_len_cap if self._tier is not None else _DEFAULT_CONTEXT_CAP
         if routed_model in self._registry:
             entry_cap = self._registry.get(routed_model).max_model_len
+            if entry_cap is not None:
+                ceiling = min(ceiling, entry_cap)
+        return ceiling
+
+    def _effective_max_num_seqs(self, routed_model: str) -> int | None:
+        """Resolved sequence-concurrency ceiling for *routed_model*, or None if no
+        tier is resolved (gate is skipped entirely — fail open, same posture as
+        the context/KV gates when their underlying numbers are unavailable)."""
+        if self._tier is None:
+            return None
+        ceiling = self._tier.max_num_seqs
+        if routed_model in self._registry:
+            entry_cap = self._registry.get(routed_model).max_num_seqs
             if entry_cap is not None:
                 ceiling = min(ceiling, entry_cap)
         return ceiling
@@ -152,8 +199,20 @@ class AdmissionController:
                 requested_output can't be clamped to a usable size (batch tier,
                 or interactive with essentially no room left).
             EngineSaturatedError: KV pool is saturated and the request is
-                batch-tier (429; caller should retry later).
+                batch-tier (429; caller should retry later), or the model's
+                sequence-concurrency ceiling is already full (429 for either
+                priority — there is no clamp path for a sequence slot).
         """
+        effective_max_num_seqs = self._effective_max_num_seqs(routed_model)
+        if effective_max_num_seqs is not None:
+            in_flight = self._seq_tracker.current(routed_model)
+            if in_flight >= effective_max_num_seqs:
+                raise EngineSaturatedError(
+                    f"Model '{routed_model}' is at its concurrent-sequence limit "
+                    f"({in_flight}/{effective_max_num_seqs} in flight); retry shortly.",
+                    retry_after_s=1.0,
+                )
+
         requested_output = request.max_output_tokens or request.max_tokens or 512
         context_ceiling = self._context_ceiling(routed_model)
         if request.max_context_tokens is not None:
@@ -193,8 +252,10 @@ class AdmissionController:
 
         reserved_tokens = prompt_tokens + effective_output
         self._tracker.reserve(routed_model, reserved_tokens)
+        self._seq_tracker.increment(routed_model)
         return AdmissionResult(effective_max_tokens=effective_output, reserved_tokens=reserved_tokens)
 
     def release(self, routed_model: str, reserved_tokens: int) -> None:
         """Release a reservation made by admit() once the request has completed."""
         self._tracker.release(routed_model, reserved_tokens)
+        self._seq_tracker.decrement(routed_model)
