@@ -43,8 +43,14 @@ class MetricsRecorder:
         completion_tokens: int | None = None,
         total_tokens: int | None = None,
         error: bool = False,
+        ttft_ms: float | None = None,
+        tokens_per_sec: float | None = None,
     ) -> RequestRecord:
         """Build, store, and export a RequestRecord.
+
+        *ttft_ms* and *tokens_per_sec* are only populated for streaming chat
+        completions (see ObservabilityMiddleware); every other request leaves
+        them None.
 
         Always returns the record even if storage or export fails.
         """
@@ -59,6 +65,8 @@ class MetricsRecorder:
             completion_tokens=completion_tokens,
             total_tokens=total_tokens,
             error=error,
+            ttft_ms=round(ttft_ms, 3) if ttft_ms is not None else None,
+            tokens_per_sec=round(tokens_per_sec, 3) if tokens_per_sec is not None else None,
         )
         try:
             self._storage.append(record)

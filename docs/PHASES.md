@@ -1,6 +1,6 @@
 # InferenceX — Phases
 
-**All phases 0–6 are complete (2026-06).** This file is the historical milestone record
+**All phases 0–7 are complete (2026-07).** This file is the historical milestone record
 and phase-gating rules. New work uses OpenSpec (`openspec/changes/`) — do not add features
 here without a new phase section and exit criteria.
 
@@ -15,6 +15,7 @@ here without a new phase section and exit criteria.
 | 4 | Playground and evaluation | Done |
 | 5 | Hardening and publication | Done |
 | 6 | Benchmark suite and model advisor | Done |
+| 7 | VRAM-aware sizing, tiers, and observability wiring | Done |
 
 ---
 
@@ -217,6 +218,47 @@ Loading-screen failures surface actionable errors from `logs/playground-server.l
 **Post-phase note (2026-06-30):** Advisor scoring fixes (DEC-036): warm TTFT, VRAM gate
 against total VRAM + 0.5 GB buffer, exact GPU name matching, static config fallback when
 no results exist. Benchmark JSON lives under `benchmarks/results/` (gitignored).
+
+---
+
+## Phase 7 — VRAM-Aware Sizing, Tiers, and Observability Wiring
+**Goal:** Make VRAM budgeting quant-aware, give the deployment an explicit per-GPU-class
+capacity contract, and wire the previously-stubbed observability HTTP surface (including
+streaming TTFT/tokens-per-sec, which the middleware could not see before this phase).
+This is Phase 1 of the larger VRAM-aware architecture plan (see DEC-037); admission
+control (Phase 2 of that plan) and CPU offload (Phase 3) are deferred to future phases.
+
+Deliverables:
+- Quant-aware `estimate_weight_gib()` and every caller in `utils/vllm_pool_config.py`
+  (bf16/None → 2 bytes/param, int8/fp8 → 1.0, awq/gptq/int4 → ~0.55)
+- `config/vram_tiers.yaml` + `utils/vram_tiers.py` — 6gb/12gb/24gb tier resolution from
+  probed VRAM, exposed via `AppSettings.get_vram_tier()` and logged at startup
+  (resolution and logging only in this phase; enforcement is future work)
+- `qwen2.5-7b-awq` added to `config/models.yaml` as the first exercised 4-bit model
+- `GET /v1/metrics` (`schemas/metrics.py`, `api/routes/metrics.py`) — request metrics
+  plus a live per-model VRAM breakdown (weights, real `kv_capacity_tokens`, free/total)
+- Streaming (SSE) chat completions now record TTFT and approximate tokens/sec via a
+  wrapped `body_iterator` in `ObservabilityMiddleware`
+- `GET /v1/models` additively exposes `quantization`, `max_model_len`,
+  `estimated_weights_gib` per model
+
+Exit criteria:
+- [x] `uv run pytest tests/unit -v` — 352/352 pass
+- [x] VRAM tier resolves and logs correctly at startup (verified: `6gb` tier on the RTX
+  3060 Laptop 6GB dev box)
+- [x] `GET /v1/metrics` returns a live weights/KV/free VRAM breakdown against a running
+  server
+- [x] Streaming request populates `avg_ttft_ms` / `avg_tokens_per_sec` on
+  `GET /v1/metrics` (verified live: ~255ms TTFT, ~29 tok/s on qwen2.5-0.5b)
+- [x] `GET /v1/models` returns quantization/VRAM metadata for all registered models,
+  including the new AWQ variant
+- [x] Non-obvious choices recorded in DECISIONS.md (DEC-037)
+
+**Post-phase note (2026-07-01):** `qwen2.5-7b-awq` is sized for the 12GB tier and not
+part of the default 6GB dev pool — quant-aware sizing is unit-tested but not yet
+validated on real 12GB+ hardware. Tier *enforcement* against `max_num_seqs`/
+`max_model_len_cap`, the `AdmissionController`, and non-streaming continuous-batching
+fix are Phase 2 of the VRAM-aware plan (DEC-037) and remain unbuilt.
 
 ---
 

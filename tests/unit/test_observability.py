@@ -54,7 +54,8 @@ class _StubEngine(BaseEngine):
         )
 
     async def generate_stream(self, request: ChatCompletionRequest):
-        yield "ok"
+        yield "hello "
+        yield "world"
 
     def is_healthy(self) -> bool:
         return self._healthy
@@ -292,6 +293,25 @@ class TestMetricsService:
         assert s.error_count == 1
         assert s.avg_latency_ms == 15.0
 
+    def test_summary_ttft_and_tokens_per_sec_absent_when_no_streaming_records(self):
+        records = [_record(request_id="1", latency_ms=10.0)]
+        svc = self._svc(records)
+        s = svc.summary()
+        assert s.avg_ttft_ms is None
+        assert s.avg_tokens_per_sec is None
+
+    def test_summary_averages_ttft_and_tokens_per_sec_over_streaming_records_only(self):
+        records = [
+            _record(request_id="1", latency_ms=10.0, ttft_ms=50.0, tokens_per_sec=20.0),
+            _record(request_id="2", latency_ms=20.0, ttft_ms=150.0, tokens_per_sec=40.0),
+            # Non-streaming request: no ttft/tokens_per_sec — must not skew the average.
+            _record(request_id="3", latency_ms=5.0),
+        ]
+        svc = self._svc(records)
+        s = svc.summary()
+        assert s.avg_ttft_ms == 100.0
+        assert s.avg_tokens_per_sec == 30.0
+
 
 # ---------------------------------------------------------------------------
 # Middleware integration via TestClient
@@ -405,3 +425,76 @@ class TestObservabilityMiddleware:
         assert resp.status_code == 500
         error_records = [r for r in recorder.storage.all() if r.error]
         assert error_records
+
+    def test_streaming_chat_response_unchanged(self, obs_client):
+        """SSE body_iterator wrapping must not alter the bytes the client receives."""
+        client, _ = obs_client
+        payload = {**self._chat_payload, "stream": True}
+        resp = client.post("/v1/chat/completions", json=payload)
+        assert resp.status_code == 200
+        assert "text/event-stream" in resp.headers["content-type"]
+        assert '"content":"hello "' in resp.text
+        assert '"content":"world"' in resp.text
+        assert resp.text.rstrip().endswith("data: [DONE]")
+
+    def test_streaming_chat_request_records_ttft_and_tokens_once(self, obs_client):
+        """Exactly one RequestRecord per streamed request, with TTFT/tokens populated."""
+        client, recorder = obs_client
+        payload = {**self._chat_payload, "stream": True}
+        resp = client.post("/v1/chat/completions", json=payload)
+        assert resp.status_code == 200
+
+        chat_records = [r for r in recorder.storage.all() if r.path == "/v1/chat/completions"]
+        assert len(chat_records) == 1
+
+        rec = chat_records[0]
+        assert rec.error is False
+        assert rec.ttft_ms is not None and rec.ttft_ms >= 0
+        # "hello " + "world" -> 2 whitespace-separated words (word-count approximation).
+        assert rec.completion_tokens == 2
+        assert rec.total_tokens == 2
+        assert rec.tokens_per_sec is not None and rec.tokens_per_sec > 0
+        # Non-streaming token extraction never ran for this request.
+        assert rec.prompt_tokens is None
+
+    def test_streaming_mid_stream_engine_failure_still_records_partial_progress(
+        self, obs_client
+    ):
+        """A mid-stream engine failure can't set error=True (see middleware docstring:
+        Starlette's BaseHTTPMiddleware only surfaces the inner app's exception *after*
+        our dispatch() has already finished sending the response) — but the wrapper
+        must still record whatever partial TTFT/token progress it saw, and must not
+        crash the request.
+        """
+        client, recorder = obs_client
+
+        class _BrokenStreamEngine(BaseEngine):
+            async def generate(self, req: ChatCompletionRequest) -> ChatCompletionResponse:
+                raise RuntimeError("boom")
+
+            async def generate_stream(self, req: ChatCompletionRequest):
+                yield "partial "
+                raise RuntimeError("boom mid-stream")
+
+            def is_healthy(self) -> bool:
+                return True
+
+        def _broken_service() -> ChatService:
+            registry = _make_registry()
+            return ChatService(
+                engine_pool=EnginePool({_TEST_MODEL: _BrokenStreamEngine()}),
+                registry=registry,
+                router=TaskRouter(registry, _TEST_MODEL),
+            )
+
+        app.dependency_overrides[get_chat_service] = _broken_service
+        payload = {**self._chat_payload, "stream": True}
+        try:
+            client.post("/v1/chat/completions", json=payload)
+        except Exception:
+            pass  # A mid-stream exception after headers are sent may surface client-side.
+
+        chat_records = [r for r in recorder.storage.all() if r.path == "/v1/chat/completions"]
+        assert chat_records
+        assert chat_records[-1].completion_tokens == 1
+        assert chat_records[-1].ttft_ms is not None

@@ -57,3 +57,6 @@ class ModelObject(BaseModel):
     id: str
     object: Literal["model"] = "model"
     owned_by: str = "inferencex"
+    quantization: Optional[str] = None
+    max_model_len: Optional[int] = None
+    estimated_weights_gib: Optional[float] = None

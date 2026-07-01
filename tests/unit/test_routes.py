@@ -6,10 +6,12 @@ is never imported in this test — it runs on any machine without a GPU.
 import pytest
 from fastapi.testclient import TestClient
 
-from inference_x.api.deps import get_chat_service, get_registry
+from inference_x.api.deps import get_chat_service, get_engine_pool, get_metrics_service, get_registry
 from inference_x.api.main import app
 from inference_x.engines.base import BaseEngine
 from inference_x.engines.pool import EnginePool
+from inference_x.observability.recorder import MetricsRecorder
+from inference_x.observability.storage import InMemoryStorage
 from inference_x.routing.task_router import TaskRouter
 from inference_x.schemas.chat import (
     ChatCompletionChoice,
@@ -20,6 +22,7 @@ from inference_x.schemas.chat import (
 )
 from inference_x.schemas.model import ModelEntry
 from inference_x.services.chat_service import ChatService
+from inference_x.services.metrics_service import MetricsService
 from inference_x.services.model_service import ModelRegistry
 
 _TEST_MODEL = "test-model"
@@ -233,6 +236,29 @@ class TestModelsEndpoint:
         assert "id" in model
         assert model["object"] == "model"
         assert model["owned_by"] == "inferencex"
+        assert model["quantization"] is None
+        assert model["estimated_weights_gib"] > 0
+
+    def test_model_object_reflects_quantization_and_max_model_len(self, client):
+        """A quantized entry must surface its variant + context cap for client selection."""
+        registry = ModelRegistry(
+            [
+                ModelEntry(
+                    name="quant-model",
+                    model_path="Qwen/Qwen2.5-7B-Instruct-AWQ",
+                    quantization="awq",
+                    max_model_len=4096,
+                )
+            ]
+        )
+        app.dependency_overrides[get_registry] = lambda: registry
+        with TestClient(app) as c:
+            resp = c.get("/v1/models")
+            model = resp.json()["data"][0]
+            assert model["quantization"] == "awq"
+            assert model["max_model_len"] == 4096
+            assert model["estimated_weights_gib"] > 0
+        app.dependency_overrides.clear()
 
     def test_reflects_models_yaml(self, client):
         """Models endpoint should list every entry from config/models.yaml."""
@@ -247,3 +273,55 @@ class TestModelsEndpoint:
             ids = {m["id"] for m in resp.json()["data"]}
             assert ids == set(real_registry.names())
         app.dependency_overrides.clear()
+
+
+# ---------------------------------------------------------------------------
+# Metrics endpoint
+# ---------------------------------------------------------------------------
+
+class TestMetricsEndpoint:
+    @pytest.fixture()
+    def metrics_client(self):
+        registry = _make_stub_registry()
+        pool = EnginePool({_TEST_MODEL: _StubEngine()})
+        recorder = MetricsRecorder(storage=InMemoryStorage())
+
+        app.dependency_overrides[get_registry] = lambda: registry
+        app.dependency_overrides[get_engine_pool] = lambda: pool
+        app.dependency_overrides[get_metrics_service] = lambda: MetricsService(recorder)
+        app.dependency_overrides[get_chat_service] = _stub_service_factory(healthy=True)
+        with TestClient(app) as c:
+            yield c, recorder
+        app.dependency_overrides.clear()
+
+    def test_returns_200(self, metrics_client):
+        client, _ = metrics_client
+        resp = client.get("/v1/metrics")
+        assert resp.status_code == 200
+
+    def test_empty_metrics_shape(self, metrics_client):
+        client, _ = metrics_client
+        resp = client.get("/v1/metrics")
+        body = resp.json()
+        assert body["total_requests"] == 0
+        assert body["avg_latency_ms"] is None
+        assert body["avg_ttft_ms"] is None
+
+    def test_vram_breakdown_lists_loaded_stub_model(self, metrics_client):
+        client, _ = metrics_client
+        resp = client.get("/v1/metrics")
+        body = resp.json()
+        model_names = [m["name"] for m in body["vram"]["models"]]
+        assert _TEST_MODEL in model_names
+        entry = next(m for m in body["vram"]["models"] if m["name"] == _TEST_MODEL)
+        assert entry["estimated_weights_gib"] > 0
+        # _StubEngine has no kv_capacity_tokens attribute — must degrade to None, not error.
+        assert entry["kv_capacity_tokens"] is None
+
+    def test_reflects_recorded_requests(self, metrics_client):
+        client, recorder = metrics_client
+        recorder.record(path="/v1/chat/completions", method="POST", status_code=200, latency_ms=12.0)
+        resp = client.get("/v1/metrics")
+        body = resp.json()
+        assert body["total_requests"] == 1
+        assert body["avg_latency_ms"] == 12.0

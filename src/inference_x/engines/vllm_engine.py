@@ -314,6 +314,7 @@ class VLLMEngine(BaseEngine):
         self._instruction_tuned: bool = bool(model_config.get("instruction_tuned", True))
         self._repetition_penalty: float | None = model_config.get("repetition_penalty")
         self._healthy = False
+        self._kv_capacity_tokens: int | None = None
         self._engine_lock = threading.Lock()
 
         hf_token = resolve_hf_token()
@@ -375,23 +376,50 @@ class VLLMEngine(BaseEngine):
             raise _map_vllm_init_error(self._model_name, self._model_path, exc) from exc
 
     def _log_kv_cache_stats(self) -> None:
-        """Log vLLM KV-cache sizing after engine init (mirrors vLLM '# GPU blocks' lines)."""
+        """Log vLLM KV-cache sizing after engine init (mirrors vLLM '# GPU blocks' lines).
+
+        Also records ``self._kv_capacity_tokens`` so the /v1/metrics route can report
+        real KV-pool capacity instead of the pre-load estimate in vllm_pool_config.
+        """
         try:
             llm_engine = self._llm.llm_engine
-            cache_config = getattr(llm_engine, "cache_config", None)
+            # vLLM 0.22.1's V1 LLMEngine keeps CacheConfig under vllm_config, not as a
+            # direct attribute (llm_engine.cache_config is None on this version) —
+            # verified by introspecting a loaded engine, see plan Task #4 smoke test.
+            cache_config = getattr(
+                getattr(llm_engine, "vllm_config", None), "cache_config", None
+            )
             num_blocks = getattr(cache_config, "num_gpu_blocks", None)
             block_size = getattr(cache_config, "block_size", None)
             if num_blocks is not None and block_size is not None:
+                self._kv_capacity_tokens = int(num_blocks) * int(block_size)
                 logger.info(
                     "KV cache for model=%s: %d GPU blocks × %d tokens/block "
                     "(~%d tokens capacity)",
                     self._model_name,
                     num_blocks,
                     block_size,
-                    num_blocks * block_size,
+                    self._kv_capacity_tokens,
                 )
         except Exception as exc:
             logger.debug("KV cache stats unavailable for %s: %s", self._model_name, exc)
+
+    @property
+    def model_name(self) -> str:
+        return self._model_name
+
+    @property
+    def model_path(self) -> str:
+        return self._model_path
+
+    @property
+    def kv_capacity_tokens(self) -> int | None:
+        """Real post-load KV-cache capacity in tokens (num_gpu_blocks * block_size).
+
+        ``None`` if unavailable (e.g. vLLM not loaded, or cache_config introspection
+        failed — see _log_kv_cache_stats).
+        """
+        return getattr(self, "_kv_capacity_tokens", None)
 
     def _detect_chat_support(self) -> bool:
         try:

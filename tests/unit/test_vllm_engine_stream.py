@@ -107,3 +107,42 @@ async def test_generate_stream_does_not_use_async_llm_engine():
 
     assert chunks == ["ok"]
     assert getattr(engine, "_async_llm", None) is None
+
+
+def test_log_kv_cache_stats_reads_cache_config_from_vllm_config():
+    """Regression guard: vLLM 0.22.1's V1 LLMEngine has cache_config=None at the top
+    level — the real CacheConfig lives under llm_engine.vllm_config.cache_config.
+    Reading the wrong attribute silently leaves kv_capacity_tokens as None forever
+    (no exception), which is exactly what happened before this was caught via a live
+    GPU smoke test. This test pins the correct attribute path with a mock engine.
+    """
+    engine = VLLMEngine.__new__(VLLMEngine)
+    engine._model_name = "test-model"
+    engine._kv_capacity_tokens = None
+    engine._llm = MagicMock()
+
+    llm_engine = MagicMock()
+    llm_engine.cache_config = None  # top-level attribute is always None on V1
+    llm_engine.vllm_config.cache_config.num_gpu_blocks = 14822
+    llm_engine.vllm_config.cache_config.block_size = 16
+    engine._llm.llm_engine = llm_engine
+
+    engine._log_kv_cache_stats()
+
+    assert engine.kv_capacity_tokens == 14822 * 16
+
+
+def test_log_kv_cache_stats_defaults_to_none_when_cache_config_missing():
+    engine = VLLMEngine.__new__(VLLMEngine)
+    engine._model_name = "test-model"
+    engine._kv_capacity_tokens = None
+    engine._llm = MagicMock()
+
+    llm_engine = MagicMock()
+    llm_engine.cache_config = None
+    llm_engine.vllm_config = None
+    engine._llm.llm_engine = llm_engine
+
+    engine._log_kv_cache_stats()
+
+    assert engine.kv_capacity_tokens is None

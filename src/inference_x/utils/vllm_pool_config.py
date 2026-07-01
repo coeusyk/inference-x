@@ -13,12 +13,44 @@ from inference_x.benchmarks.hardware import suggest_gpu_memory_utilization
 logger = logging.getLogger(__name__)
 
 _POOL_GPU_HEADROOM = 0.92
-_BYTES_PER_PARAM = 2  # bf16/fp16 weights (vLLM dtype=auto typical)
+_BYTES_PER_PARAM = 2  # bf16/fp16 weights (vLLM dtype=auto typical) — default/unquantized
 _RUNTIME_HEADROOM_GIB = 0.35  # fragmentation, activations, graph capture slack
 _CUDAGRAPH_OVERHEAD_GIB = 0.45  # vLLM 0.21+ CUDA graph memory profiling reserve
 _FREE_VRAM_SAFETY = 0.98
 _DEFAULT_WEIGHT_GIB = 1.5
 _DEFAULT_KV_GIB = 0.4
+
+# Approximate on-GPU bytes/param by quantization scheme, matched against
+# ModelEntry.quantization (vLLM's own quant method string, lowercased).
+# 4-bit schemes include a small overhead for group-wise scales/zero-points,
+# so they land a bit above a bare 0.5 bytes/param.
+_QUANT_BYTES_PER_PARAM: dict[str, float] = {
+    "awq": 0.55,
+    "awq_marlin": 0.55,
+    "gptq": 0.55,
+    "gptq_marlin": 0.55,
+    "int4": 0.55,
+    "bitsandbytes": 0.55,  # nf4/int4 default; int8 bnb configs are rarer, treat as 4-bit
+    "int8": 1.0,
+    "fp8": 1.0,
+    "fp8_e4m3": 1.0,
+    "fp8_e5m2": 1.0,
+}
+
+
+def _bytes_per_param(quantization: str | None) -> float:
+    """Resolve GPU bytes/param for a quantization scheme (None/unknown → bf16)."""
+    if not quantization:
+        return _BYTES_PER_PARAM
+    key = str(quantization).strip().lower()
+    if key in _QUANT_BYTES_PER_PARAM:
+        return _QUANT_BYTES_PER_PARAM[key]
+    # Substring fallback for variant spellings (e.g. "gptq-4bit", "marlin-awq").
+    for name, bytes_per_param in _QUANT_BYTES_PER_PARAM.items():
+        if name in key:
+            return bytes_per_param
+    logger.debug("Unknown quantization %r; assuming bf16 (2 bytes/param)", quantization)
+    return _BYTES_PER_PARAM
 
 
 def probe_gpu_memory_gib() -> tuple[float | None, float | None]:
@@ -76,8 +108,12 @@ def _params_from_name_or_path(model_path: str) -> int | None:
     return int(value * 1_000_000_000)
 
 
-def estimate_weight_gib(model_path: str) -> float:
-    """Estimate model weight VRAM from HuggingFace config (GiB)."""
+def estimate_weight_gib(model_path: str, quantization: str | None = None) -> float:
+    """Estimate model weight VRAM from HuggingFace config (GiB).
+
+    *quantization* is the ModelEntry.quantization value (e.g. ``"awq"``,
+    ``"gptq"``, ``"int8"``); ``None`` assumes unquantized bf16/fp16 weights.
+    """
     config = _hf_config_dict(model_path)
     params = _params_from_name_or_path(model_path)
     if params is None and config:
@@ -86,7 +122,7 @@ def estimate_weight_gib(model_path: str) -> float:
             params = _parameter_count_from_arch(config)
     if not params:
         return _DEFAULT_WEIGHT_GIB
-    return (int(params) * _BYTES_PER_PARAM) / (1024**3)
+    return (int(params) * _bytes_per_param(quantization)) / (1024**3)
 
 
 def estimate_kv_cache_gib(model_path: str, max_model_len: int) -> float:
@@ -106,28 +142,37 @@ def estimate_kv_cache_gib(model_path: str, max_model_len: int) -> float:
     return bytes_needed / (1024**3)
 
 
-def estimate_engine_footprint_gib(model_path: str, max_model_len: int) -> float:
+def estimate_engine_footprint_gib(
+    model_path: str, max_model_len: int, quantization: str | None = None
+) -> float:
     """Total GiB budget for weights + KV cache + vLLM runtime/CUDA-graph overhead."""
     return (
-        estimate_weight_gib(model_path)
+        estimate_weight_gib(model_path, quantization)
         + estimate_kv_cache_gib(model_path, max_model_len)
         + _RUNTIME_HEADROOM_GIB
         + _CUDAGRAPH_OVERHEAD_GIB
     )
 
 
-def _minimum_utilization(model_path: str, max_model_len: int, total_vram_gib: float) -> float:
+def _minimum_utilization(
+    model_path: str,
+    max_model_len: int,
+    total_vram_gib: float,
+    quantization: str | None = None,
+) -> float:
     """Lowest gpu_memory_utilization that fits this model on *total_vram_gib*."""
     if total_vram_gib <= 0:
         return 0.9
-    return estimate_engine_footprint_gib(model_path, max_model_len) / total_vram_gib
+    return estimate_engine_footprint_gib(model_path, max_model_len, quantization) / total_vram_gib
 
 
-def _weights_only_utilization(model_path: str, total_vram_gib: float) -> float:
+def _weights_only_utilization(
+    model_path: str, total_vram_gib: float, quantization: str | None = None
+) -> float:
     """Lowest utilization that fits model weights alone (sequential pool fallback)."""
     if total_vram_gib <= 0:
         return 0.5
-    return estimate_weight_gib(model_path) / total_vram_gib
+    return estimate_weight_gib(model_path, quantization) / total_vram_gib
 
 
 def _multi_engine_overhead_gib(total_vram_gib: float) -> float:
@@ -199,17 +244,21 @@ def _weight_scaled_utilization(
     name = str(config.get("name", ""))
     model_path = str(config.get("model_path", ""))
     max_model_len = int(config.get("max_model_len") or 2048)
+    quantization = config.get("quantization")
     user_cap = _user_util_cap(config)
 
     equal_share = _POOL_GPU_HEADROOM / pool_size
-    floor = _minimum_utilization(model_path, max_model_len, total_vram_gib)
+    floor = _minimum_utilization(model_path, max_model_len, total_vram_gib, quantization)
 
-    weights = [estimate_weight_gib(str(c.get("model_path", ""))) for c in pool_configs]
+    weights = [
+        estimate_weight_gib(str(c.get("model_path", "")), c.get("quantization"))
+        for c in pool_configs
+    ]
     total_weight = sum(weights) or 1.0
-    my_weight = estimate_weight_gib(model_path)
+    my_weight = estimate_weight_gib(model_path, quantization)
     weight_share = my_weight / total_weight
 
-    mem_budget_gib = estimate_engine_footprint_gib(model_path, max_model_len) * (
+    mem_budget_gib = estimate_engine_footprint_gib(model_path, max_model_len, quantization) * (
         0.85 + 0.15 * weight_share
     )
     weight_based = mem_budget_gib / total_vram_gib
@@ -234,7 +283,7 @@ def _apply_sequential_vram_caps(
 ) -> float:
     """Cap utilization so vLLM's free-memory check passes for sequential pool loads."""
     model_path = str(config.get("model_path", ""))
-    weights_floor = _weights_only_utilization(model_path, total_vram_gib)
+    weights_floor = _weights_only_utilization(model_path, total_vram_gib, config.get("quantization"))
     capped = util
 
     if free_vram_gib is not None and total_vram_gib > 0:
@@ -248,6 +297,7 @@ def _apply_sequential_vram_caps(
                 str(c.get("model_path", "")),
                 int(c.get("max_model_len") or 2048),
                 total_vram_gib,
+                c.get("quantization"),
             )
             for c in remaining
         )
@@ -274,14 +324,15 @@ def _single_engine_utilization(
     """Compute gpu_memory_utilization for a lone engine from footprint + free VRAM."""
     model_path = str(config.get("model_path", ""))
     max_model_len = int(config.get("max_model_len") or 2048)
+    quantization = config.get("quantization")
     user_cap = _user_util_cap(config)
-    weights_floor = _weights_only_utilization(model_path, total_vram_gib)
-    footprint_util = _minimum_utilization(model_path, max_model_len, total_vram_gib)
+    weights_floor = _weights_only_utilization(model_path, total_vram_gib, quantization)
+    footprint_util = _minimum_utilization(model_path, max_model_len, total_vram_gib, quantization)
 
     max_from_free: float | None = None
     if free_vram_gib is not None and total_vram_gib > 0:
         max_from_free = (_FREE_VRAM_SAFETY * free_vram_gib) / total_vram_gib
-        weight_gib = estimate_weight_gib(model_path)
+        weight_gib = estimate_weight_gib(model_path, quantization)
         if weight_gib > free_vram_gib * _FREE_VRAM_SAFETY:
             raise ValueError(
                 f"Only {free_vram_gib:.1f} GiB VRAM free but model {config.get('name')} "
@@ -313,6 +364,7 @@ def validate_pool_fits(
         estimate_engine_footprint_gib(
             str(c.get("model_path", "")),
             int(c.get("max_model_len") or 2048),
+            c.get("quantization"),
         )
         for c in model_configs
     )
@@ -331,6 +383,7 @@ def validate_pool_fits(
             str(c.get("model_path", "")),
             int(c.get("max_model_len") or 2048),
             total_vram_gib,
+            c.get("quantization"),
         )
         for c in model_configs
     )

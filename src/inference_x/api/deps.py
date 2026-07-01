@@ -14,6 +14,7 @@ from inference_x.observability.recorder import MetricsRecorder
 from inference_x.observability.storage import InMemoryStorage
 from inference_x.routing.task_router import TaskRouter
 from inference_x.services.chat_service import ChatService
+from inference_x.services.metrics_service import MetricsService
 from inference_x.services.model_service import ModelRegistry
 from inference_x.utils.vllm_pool_config import probe_gpu_memory_gib, validate_pool_fits
 
@@ -73,6 +74,12 @@ def get_chat_service(
     return ChatService(engine_pool=pool, registry=registry, router=router)
 
 
+def get_engine_pool(
+    settings: Annotated[AppSettings, Depends(get_settings)],
+) -> EnginePool:
+    return _build_engine_pool(settings.config_dir, tuple(settings.loaded_models))
+
+
 @lru_cache(maxsize=1)
 def _build_recorder() -> MetricsRecorder:
     storage = InMemoryStorage()
@@ -83,6 +90,10 @@ def _build_recorder() -> MetricsRecorder:
 def get_recorder() -> MetricsRecorder:
     """Return the process-level recorder singleton (not a FastAPI Depends)."""
     return _build_recorder()
+
+
+def get_metrics_service() -> MetricsService:
+    return MetricsService(_build_recorder())
 
 
 def initialize_app() -> None:
@@ -105,6 +116,19 @@ def initialize_app() -> None:
 
     registry = _build_registry(config_dir)
     logger.info("Model registry loaded: %s", registry.names())
+
+    try:
+        tier = settings.get_vram_tier()
+        logger.info(
+            "VRAM tier: %s (util_ceiling=%.2f, max_model_len_cap=%d, max_num_seqs=%d) — %s",
+            tier.name,
+            tier.gpu_memory_utilization_ceiling,
+            tier.max_model_len_cap,
+            tier.max_num_seqs,
+            tier.description,
+        )
+    except Exception as exc:
+        logger.warning("VRAM tier resolution failed (continuing without it): %s", exc)
 
     _build_router(config_dir, default_model)
     logger.info("Task router ready (default_model=%s)", default_model)

@@ -20,8 +20,11 @@ def fixed_footprints(monkeypatch):
         "org/a": 1.0,
     }
 
-    def weight(path: str) -> float:
-        return weights.get(path, 1.5)
+    def weight(path: str, quantization: str | None = None) -> float:
+        base = weights.get(path, 1.5)
+        if quantization:
+            return base * 0.28  # ~0.55/2 bytes-per-param ratio for 4-bit quant
+        return base
 
     def kv(path: str, max_model_len: int) -> float:
         if "Qwen" in path:
@@ -88,6 +91,35 @@ def test_estimate_weight_from_model_name():
     pool._hf_config_dict.cache_clear()
     weight = pool.estimate_weight_gib("Qwen/Qwen2.5-0.5B-Instruct")
     assert 0.7 < weight < 1.2
+
+
+@pytest.mark.parametrize(
+    ("quantization", "expected_ratio"),
+    [
+        (None, 1.0),
+        ("awq", 0.275),
+        ("gptq", 0.275),
+        ("awq_marlin", 0.275),
+        ("int4", 0.275),
+        ("int8", 0.5),
+        ("fp8", 0.5),
+        ("some-custom-gptq-variant", 0.275),  # substring fallback
+        ("unknown-scheme", 1.0),  # unrecognized -> bf16 default
+    ],
+)
+def test_estimate_weight_gib_is_quantization_aware(quantization, expected_ratio):
+    pool._hf_config_dict.cache_clear()
+    bf16 = pool.estimate_weight_gib("Qwen/Qwen2.5-0.5B-Instruct")
+    quantized = pool.estimate_weight_gib("Qwen/Qwen2.5-0.5B-Instruct", quantization)
+    assert quantized == pytest.approx(bf16 * expected_ratio, rel=1e-6)
+
+
+def test_bytes_per_param_lookup():
+    assert pool._bytes_per_param(None) == 2
+    assert pool._bytes_per_param("awq") == 0.55
+    assert pool._bytes_per_param("GPTQ") == 0.55  # case-insensitive
+    assert pool._bytes_per_param("int8") == 1.0
+    assert pool._bytes_per_param("totally-unknown") == 2
 
 
 def test_single_model_respects_user_cap(fixed_footprints):

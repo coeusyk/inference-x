@@ -402,3 +402,62 @@ Use this document to capture non-obvious design decisions as the project evolves
   entries); multi-model sequential VRAM profiling.
 - Consequences: Startup logs show resolved utilization with `(free − buffer) / total`
   breakdown. `BenchmarkResult` stores `max_model_len`; advisor warns on config drift.
+
+### DEC-037
+- Date: 2026-07-01
+- Status: accepted
+- Context: DEC-035's sizing was load-time only and not quant-aware
+  (`_BYTES_PER_PARAM = 2` hardcoded), so a 4-bit model would be sized as if it needed
+  full bf16 VRAM and rejected or badly under-utilized. There was also no explicit,
+  documented VRAM-capacity contract per GPU class, and the observability HTTP surface
+  was stubbed: `api/routes/metrics.py` and `schemas/metrics.py` were 0-byte files, and
+  streaming (SSE) chat responses recorded no TTFT or tokens/sec because the middleware
+  only reads a buffered JSON body for non-streaming responses.
+- Decision (Phase 1 of the VRAM-aware architecture plan; Phase 2 admission control and
+  Phase 3 CPU offload are deferred):
+  - **Quant-aware sizing:** `utils/vllm_pool_config.py` resolves GPU bytes/param from
+    `ModelEntry.quantization` (bf16/None → 2, int8/fp8 → 1.0, awq/gptq/int4 → ~0.55)
+    instead of a hardcoded constant; threaded through `estimate_weight_gib()` and every
+    caller (`estimate_engine_footprint_gib`, `validate_pool_fits`,
+    `_weight_scaled_utilization`, `_apply_sequential_vram_caps`,
+    `_single_engine_utilization`). Added `qwen2.5-7b-awq` (`quantization: awq`) to
+    `config/models.yaml` as the first exercised 4-bit variant — sized for the 12GB tier,
+    not loaded by default alongside the 6GB dev pool.
+  - **VRAM tiers:** `config/vram_tiers.yaml` (new) declares 6gb/12gb/24gb tiers
+    (`gpu_memory_utilization_ceiling`, `max_model_len_cap`, `max_num_seqs`, `block_size`,
+    `kv_cache_dtype`) as a documented capacity contract. `utils/vram_tiers.py` resolves
+    the highest tier whose `min_vram_gb` floor the probed GPU clears, falling back to the
+    lowest tier (with a warning) when probing fails or reports something below every
+    floor — never guesses a higher/less-safe tier. `AppSettings.get_vram_tier()` wires it
+    to `profile_hardware()`; `deps.initialize_app()` logs the resolved tier at startup.
+    Tiers are **resolved and logged only** in this phase — enforcement (admission control
+    against `max_num_seqs`/`max_model_len_cap`) is explicitly Phase 2, not built here.
+  - **Observability wiring:** filled `schemas/metrics.py` (`MetricsResponse`,
+    `VramSummary`, `ModelVramBreakdown`) and `api/routes/metrics.py`
+    (`GET /v1/metrics`), registered in `api/main.py`. Response combines request metrics
+    (`MetricsService.summary()`) with a live per-model VRAM breakdown (weights estimate,
+    real post-load `kv_capacity_tokens` from `VLLMEngine.kv_capacity_tokens`, free/total
+    GiB from `probe_gpu_memory_gib()`).
+  - **Streaming TTFT/tokens-per-sec:** `ObservabilityMiddleware` wraps
+    `response.body_iterator` for SSE chat responses (instead of skipping token
+    extraction) to time-to-first-chunk and approximate completion tokens via whitespace
+    word count over each chunk's `delta.content` (same approximation as the playground
+    and `benchmarks/runner.py`, since streaming carries no final `usage` block — see
+    DEC-023). Records exactly one `RequestRecord` when the stream ends (normal
+    completion or client disconnect via `GeneratorExit`); the unconditional
+    `recorder.record()` call is skipped for this branch to avoid double-counting.
+  - **`GET /v1/models` metadata:** additive `quantization`, `max_model_len`,
+    `estimated_weights_gib` fields on `ModelObject` so clients can pick a variant that
+    fits their tier without a separate call.
+- Known limitation: an engine failure *after* SSE headers are sent is not observable as
+  `error=True` — Starlette's `BaseHTTPMiddleware` surfaces the inner task's exception to
+  the outer ASGI call only after `dispatch()` has finished sending the response, so a
+  mid-stream engine failure looks like a normal end-of-stream to the wrapper. Partial
+  TTFT/token count is still recorded; only the error flag is unreliable for this case.
+- Consequences: `qwen2.5-7b-awq` loads and serves standalone on 12GB+ hardware (not yet
+  available to validate live; unit-tested against the quant-aware estimator). On the 6GB
+  dev box, `GET /v1/metrics` returns a live weights/KV/free breakdown and streaming TTFT
+  (~255ms) / tokens-per-sec (~29) verified against a running server. 352/352 unit tests
+  pass. Phase 2 (`routing/admission.py`, `max_context_tokens`/`precision`/`priority`
+  request fields, engine knob surfacing, non-streaming batching fix) and Phase 3 (CPU
+  offload, prefix caching) remain future work.

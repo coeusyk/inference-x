@@ -24,6 +24,8 @@ class RequestRecord:
     completion_tokens: int | None = None
     total_tokens: int | None = None
     error: bool = False
+    ttft_ms: float | None = None
+    tokens_per_sec: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

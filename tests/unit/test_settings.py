@@ -88,3 +88,47 @@ class TestAppSettings:
         monkeypatch.setenv("INFERENCE_X_LOADED_MODELS", " alpha , beta ")
         settings = AppSettings()
         assert settings.loaded_models == ["alpha", "beta"]
+
+    def test_get_vram_tier_resolves_from_probed_hardware(self, tmp_config, monkeypatch):
+        from inference_x.benchmarks.schemas import HardwareProfile
+        from inference_x.utils.vram_tiers import load_tiers
+
+        (tmp_config / "vram_tiers.yaml").write_text(
+            textwrap.dedent(
+                """\
+                tiers:
+                  - name: 6gb
+                    min_vram_gb: 0
+                    description: floor
+                    gpu_memory_utilization_ceiling: 0.9
+                    max_model_len_cap: 2048
+                    max_num_seqs: 4
+                    block_size: 16
+                    kv_cache_dtype: auto
+                  - name: 12gb
+                    min_vram_gb: 10
+                    description: mid
+                    gpu_memory_utilization_ceiling: 0.9
+                    max_model_len_cap: 4096
+                    max_num_seqs: 8
+                    block_size: 16
+                    kv_cache_dtype: auto
+                """
+            )
+        )
+        load_tiers.cache_clear()
+        monkeypatch.setattr(
+            "inference_x.benchmarks.hardware.profile_hardware",
+            lambda: HardwareProfile(
+                gpu_name="Fake GPU",
+                vram_total_gb=12.0,
+                vram_free_gb=10.0,
+                cpu_cores=8,
+                ram_total_gb=32.0,
+                has_gpu=True,
+            ),
+        )
+        settings = AppSettings()
+        settings.config_dir = str(tmp_config)
+        tier = settings.get_vram_tier()
+        assert tier.name == "12gb"

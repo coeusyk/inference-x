@@ -20,6 +20,7 @@ from inference_x.api.errors import runtime_error_handler, value_error_handler
 from inference_x.api.routes.benchmark import router as benchmark_router
 from inference_x.api.routes.chat_completions import router as chat_router
 from inference_x.api.routes.health import router as health_router
+from inference_x.api.routes.metrics import router as metrics_router
 from inference_x.api.routes.models import router as models_router
 from inference_x.observability.middleware import ObservabilityMiddleware
 
@@ -68,4 +69,5 @@ app.add_middleware(ObservabilityMiddleware, recorder=deps.get_recorder())
 app.include_router(health_router)
 app.include_router(chat_router, prefix="/v1")
 app.include_router(models_router, prefix="/v1")
+app.include_router(metrics_router, prefix="/v1")
 app.include_router(benchmark_router, prefix="/v1/benchmark")

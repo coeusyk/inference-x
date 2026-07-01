@@ -3,6 +3,7 @@ import pytest
 
 from inference_x.schemas.model import ModelEntry, ModelList, ModelObject
 from inference_x.services.model_service import ModelRegistry
+from inference_x.utils.vllm_pool_config import estimate_weight_gib
 
 
 def _entry(name: str, path: str = "test/stub") -> ModelEntry:
@@ -93,6 +94,20 @@ class TestModelRegistry:
         assert "m2" in reg
         assert len(reg.all()) == 2
 
+    def test_real_config_has_a_quantized_awq_variant(self):
+        """The shipped config/models.yaml includes a 4-bit model proving the quant path."""
+        reg = ModelRegistry.from_config("config")
+        entry = reg.get("qwen2.5-7b-awq")
+        assert entry.quantization == "awq"
+        assert entry.max_model_len == 4096
+
+        # Quant-aware sizing must estimate meaningfully less VRAM than a bf16 7B model.
+        quantized_gib = estimate_weight_gib(entry.model_path, entry.quantization)
+        bf16_gib = estimate_weight_gib(entry.model_path, None)
+        assert quantized_gib < bf16_gib * 0.35
+        # Sized for the 12GB tier (config/vram_tiers.yaml), not the 6GB dev tier.
+        assert quantized_gib < 6.0
+
 
 class TestModelSchemas:
     def test_model_list_object_field(self):
@@ -101,3 +116,17 @@ class TestModelSchemas:
         assert ml.data[0].id == "foo"
         assert ml.data[0].object == "model"
         assert ml.data[0].owned_by == "inferencex"
+
+    def test_model_object_vram_fields_default_to_none(self):
+        m = ModelObject(id="foo")
+        assert m.quantization is None
+        assert m.max_model_len is None
+        assert m.estimated_weights_gib is None
+
+    def test_model_object_vram_fields_are_settable(self):
+        m = ModelObject(
+            id="foo", quantization="awq", max_model_len=4096, estimated_weights_gib=3.5
+        )
+        assert m.quantization == "awq"
+        assert m.max_model_len == 4096
+        assert m.estimated_weights_gib == 3.5
