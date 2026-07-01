@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 
 import pytest
 
-from inference_x.engines.driver import EngineDriver
+from inference_x.engines.driver import EngineDriver, EngineDriverDeadError
 
 
 @dataclass
@@ -43,6 +43,12 @@ class FakeLLMEngine:
         self.added: list[tuple[str, str]] = []
         self.step_calls = 0
         self.step_raises: Exception | None = None
+        # Set to gate step_raises: step() returns an empty (no-op) result instead
+        # of raising until at least this many add_request calls have landed. Lets
+        # a test guarantee N requests are registered with the fake engine before
+        # the failure fires, without any sleep-based timing -- see
+        # test_step_exception_is_broadcast_to_pending_completion_futures.
+        self.fail_after_registered: int | None = None
 
     def register_script(self, prompt: str, steps: list[tuple[str, bool]]) -> None:
         """steps: list of (cumulative_text, finished) tuples, one per step() call."""
@@ -55,6 +61,8 @@ class FakeLLMEngine:
     def step(self) -> list[_FakeRequestOutput]:
         self.step_calls += 1
         if self.step_raises is not None:
+            if self.fail_after_registered is not None and len(self.added) < self.fail_after_registered:
+                return []
             raise self.step_raises
         outputs = []
         for request_id in list(self._active):
@@ -153,10 +161,17 @@ def test_two_concurrent_streams_do_not_cross_contaminate():
 
 
 def test_step_exception_is_broadcast_to_pending_completion_futures():
+    """Both requests must be registered with the fake engine before step() is
+    allowed to raise (fake.fail_after_registered), so this no longer depends on
+    scheduling luck to land both submissions ahead of the failure -- see DEC-043
+    for the pre-fix flake this replaces (was previously ~40% flaky: a second
+    submission could lose the race against the driver thread's failure/exit and
+    hang until timeout instead of landing in the broadcast)."""
     fake = FakeLLMEngine()
     fake.register_script("prompt-A", [("partial", False), ("final", True)])
     fake.register_script("prompt-B", [("partial", False), ("final", True)])
     fake.step_raises = RuntimeError("simulated CUDA failure")
+    fake.fail_after_registered = 2
     driver = EngineDriver(fake, threading.Lock())
     try:
         future_a = driver.submit_complete("prompt-A", object())
@@ -167,11 +182,36 @@ def test_step_exception_is_broadcast_to_pending_completion_futures():
         with pytest.raises(RuntimeError, match="simulated CUDA failure"):
             future_b.result(timeout=5.0)
 
-        # Driver thread must have actually exited, not just failed one call.
-        deadline = time.monotonic() + 5.0
-        while driver.is_dead is False and time.monotonic() < deadline:
-            time.sleep(0.05)
+        # `_broadcast_exception` sets `_dead` before it resolves any pending
+        # future/queue, so this is already guaranteed true here -- no polling needed.
         assert driver.is_dead is True
+    finally:
+        driver.shutdown()
+
+
+def test_submit_after_driver_death_raises_immediately():
+    """DEC-043 regression: once the driver is dead, submit_complete rejects
+    immediately with EngineDriverDeadError instead of silently enqueuing a
+    request that no thread is left to serve, which previously hung the caller
+    until its completion/stream timeout."""
+    fake = FakeLLMEngine()
+    fake.register_script("prompt-A", [("partial", False), ("final", True)])
+    fake.step_raises = RuntimeError("simulated failure")
+    driver = EngineDriver(fake, threading.Lock())
+    try:
+        future_a = driver.submit_complete("prompt-A", object())
+        with pytest.raises(RuntimeError, match="simulated failure"):
+            future_a.result(timeout=5.0)
+        assert driver.is_dead is True
+
+        start = time.monotonic()
+        with pytest.raises(EngineDriverDeadError):
+            driver.submit_complete("prompt-late", object())
+        elapsed = time.monotonic() - start
+        assert elapsed < 1.0, "submit after death must reject immediately, not time out"
+
+        with pytest.raises(EngineDriverDeadError):
+            driver.submit_stream("prompt-late-stream", object())
     finally:
         driver.shutdown()
 

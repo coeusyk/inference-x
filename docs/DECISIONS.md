@@ -733,3 +733,63 @@ Use this document to capture non-obvious design decisions as the project evolves
   (`_resolve_loaded_model_names`) and `variant_selector.select_variant()` internals are
   both untouched by this change. This was the last item on 3C's known scope-boundary
   list — that list is now empty.
+
+### DEC-043
+- Date: 2026-07-01
+- Status: accepted
+- Context: while validating DEC-042, `tests/unit/test_engine_driver.py::
+  test_step_exception_is_broadcast_to_pending_completion_futures` was found flaky
+  (~40% failure rate under repeated runs) on unmodified `develop` — confirmed via
+  `git stash`, unrelated to any Phase 12 change. `EngineDriver._broadcast_exception`
+  (`engines/driver.py`, DEC-038/DEC-039) sets `self._dead = True`, fails every
+  request in `_pending`, drains and fails anything already sitting in `_submit_q`,
+  then returns — the driver thread exits for good. `submit_stream`/`submit_complete`
+  checked `self._dead` and called `_submit_q.put(...)` as two separate, unsynchronized
+  steps. A request submitted in the gap between the dead-check reading `False` and
+  its own `_submit_q.put()` landing — if `_broadcast_exception`'s drain had already
+  run and found the queue empty in between — was enqueued with no thread left to
+  ever read it, dispatch it, or fail it: the caller blocked for the full 300s
+  completion timeout (or forever, for a stream) instead of receiving the engine's
+  actual failure immediately.
+- Decision:
+  - `EngineDriver` gains one `threading.Lock` (`self._dead_lock`) plus
+    `self._dead_exception: BaseException | None`, guarding `_dead`/`_dead_exception`
+    together with the decision of whether a given `_submit_q.put()` may happen at
+    all — not just the flag read.
+  - `_submit` (the shared helper both `submit_stream` and `submit_complete` call)
+    now does the dead-check and the enqueue as one atomic critical section: acquire
+    `_dead_lock`; if `_dead`, raise `EngineDriverDeadError` immediately (chaining
+    `_dead_exception` as the cause) without touching `_submit_q`; otherwise put the
+    request onto `_submit_q` before releasing.
+  - `_broadcast_exception` does its own atomic critical section under the same
+    lock: set `_dead = True` and `_dead_exception = exc`, then drain and fail
+    anything currently in `_submit_q`, all before releasing. Broadcasting to
+    `_pending` stays outside the lock — `_pending` is only ever touched by the
+    driver thread itself.
+  - Sharing one lock between both critical sections is the actual fix, not just
+    locking the flag read: a design that checks `dead` under a lock, releases it,
+    and only then calls `_submit_q.put()` reopens the identical race one level up
+    (`_broadcast_exception` could run its own set-and-drain in the gap between
+    `submit`'s release and its put). Making "check dead, else enqueue" and "set
+    dead, then drain" share one lock means the two can no longer interleave: either
+    the enqueue lands before the drain (and is caught by it) or the flag is already
+    set before the enqueue is attempted (and it never happens) — no third case.
+  - The lock is held only across flag read/write and queue drain/put, never across
+    `self._llm_engine.step()` — holding it there would serialize every submission
+    against every step() call for no reason.
+  - `EngineDriverDeadError` was already raised synchronously by `submit_stream`/
+    `submit_complete` for the already-dead case before this change; that contract is
+    unchanged for callers (`vllm_engine.py`'s catch sites are untouched) — only the
+    race in the transition into the dead state is fixed.
+  - `test_step_exception_is_broadcast_to_pending_completion_futures` was rewritten
+    to gate the fake engine's `step()` on a registration count
+    (`fake.fail_after_registered`) instead of relying on submission-ordering luck,
+    making the "both requests registered before failure" scenario deterministic. A
+    new `test_submit_after_driver_death_raises_immediately` regression-tests the
+    fix directly: a submission after `driver.is_dead` is `True` raises
+    `EngineDriverDeadError` in well under a second, not after a timeout.
+- Consequences: 426/426 unit tests pass, including 160/160 runs of
+  `test_engine_driver.py` under `pytest-repeat --count=20` (added as a dev
+  dependency). No change to the driver thread's restart policy, the streaming
+  path's chunking/delta logic, `EngineDriver`'s public method signatures, or any
+  other module.

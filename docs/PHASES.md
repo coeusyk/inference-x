@@ -447,6 +447,14 @@ Exit criteria:
 
 **Phase 3C's deferred/scope-boundary list is now empty.**
 
+**Follow-up (DEC-043):** validating this phase surfaced a pre-existing, unrelated
+flaky test in `EngineDriver` (Phase 3A) — a race where a request submitted during
+the driver's failure/exit transition could be silently orphaned until timeout
+instead of receiving the engine's failure immediately. Fixed with a
+lock-protected dead-flag + stored-exception, applied atomically with the
+submission queue drain. 426/426 unit tests pass, including 160/160 runs of
+`test_engine_driver.py` under `pytest-repeat --count=20`.
+
 ---
 
 ## Decision rule: when to create a new phase

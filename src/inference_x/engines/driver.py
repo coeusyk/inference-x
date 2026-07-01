@@ -68,6 +68,17 @@ class EngineDriver:
         self._submit_q: queue.Queue[tuple[str, str, Any, _PendingRequest]] = queue.Queue()
         self._pending: dict[str, _PendingRequest] = {}
         self._dead = False
+        self._dead_exception: BaseException | None = None
+        # Guards `_dead`/`_dead_exception` together with the decision of whether a
+        # given `_submit_q.put()` is allowed at all — see DEC-043. Checking `_dead`
+        # and enqueuing as two separate unguarded steps left a window where a
+        # request submitted right as `step()` failed would be enqueued after
+        # `_broadcast_exception` had already drained the queue and returned,
+        # orphaning it until its caller's completion/stream timeout. Making
+        # "check dead, else enqueue" and "set dead, then drain" share one lock
+        # closes that window: either the enqueue completes before the drain (and
+        # is caught by it) or after the flag is already set (and never happens).
+        self._dead_lock = threading.Lock()
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
@@ -79,27 +90,31 @@ class EngineDriver:
     def submit_stream(self, prompt: str, sampling: Any) -> "queue.Queue[str | BaseException | None]":
         """Submit a streaming request; returns a queue yielding text deltas, then None.
 
-        On driver failure the queue instead receives the raised exception as its
-        one and only item — callers must check for a `BaseException` instance
-        before treating a queue item as a text chunk.
+        Raises `EngineDriverDeadError` immediately if the driver has already
+        failed — see `_submit`.
         """
-        if self._dead:
-            raise EngineDriverDeadError("engine driver thread has exited")
         pending = _PendingRequest(mode="stream", out_queue=queue.Queue())
         self._submit(prompt, sampling, pending)
         return pending.out_queue
 
     def submit_complete(self, prompt: str, sampling: Any) -> Future:
-        """Submit a non-streaming request; returns a Future resolved with the final RequestOutput."""
-        if self._dead:
-            raise EngineDriverDeadError("engine driver thread has exited")
+        """Submit a non-streaming request; returns a Future resolved with the final RequestOutput.
+
+        Raises `EngineDriverDeadError` immediately if the driver has already
+        failed — see `_submit`.
+        """
         pending = _PendingRequest(mode="complete", future=Future())
         self._submit(prompt, sampling, pending)
         return pending.future
 
     def _submit(self, prompt: str, sampling: Any, pending: _PendingRequest) -> None:
         request_id = f"cmpl-{uuid.uuid4().hex}"
-        self._submit_q.put((request_id, prompt, sampling, pending))
+        with self._dead_lock:
+            if self._dead:
+                raise EngineDriverDeadError(
+                    "engine driver thread has exited"
+                ) from self._dead_exception
+            self._submit_q.put((request_id, prompt, sampling, pending))
 
     def shutdown(self, timeout: float = 5.0) -> None:
         self._stop.set()
@@ -171,14 +186,21 @@ class EngineDriver:
             pending.future.set_exception(exc)
 
     def _broadcast_exception(self, exc: Exception) -> None:
-        self._dead = True
+        # Set dead + drain the submission queue as one atomic step with `_submit`'s
+        # check-then-enqueue (same lock) — anything that lands in the queue before
+        # this runs is caught here; anything submitted after sees `_dead` already
+        # set and never reaches the queue at all. See __init__ and DEC-043.
+        with self._dead_lock:
+            self._dead = True
+            self._dead_exception = exc
+            while True:
+                try:
+                    _request_id, _prompt, _sampling, pending = self._submit_q.get_nowait()
+                except queue.Empty:
+                    break
+                self._fail_one(pending, exc)
+        # `_pending` is only ever touched by this (the driver) thread, so broadcasting
+        # to it needs no lock.
         for pending in self._pending.values():
             self._fail_one(pending, exc)
         self._pending.clear()
-        # Anything still sitting in the submission queue never got its turn either.
-        while True:
-            try:
-                _request_id, _prompt, _sampling, pending = self._submit_q.get_nowait()
-            except queue.Empty:
-                break
-            self._fail_one(pending, exc)
