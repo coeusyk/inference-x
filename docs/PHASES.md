@@ -387,6 +387,42 @@ Exit criteria:
 
 ---
 
+## Phase 11 — Model Variant Routing
+
+**Goal:** Let one logical model be declared as multiple config entries at different
+quantizations, grouped by `family`, and automatically load the highest-precision variant
+that fits the current VRAM tier's budget — the variant-set prerequisite DEC-038 named
+for a future `precision` request field (not added this phase; still not needed until a
+per-request use case exists).
+
+Deliverables:
+- `ModelEntry.family` (additive), `ModelRegistry.variants(family)` — groups config
+  entries; ungrouped entries are unaffected (a "family of one")
+- `routing/variant_selector.select_variant()` — highest-precision-that-fits selection
+  reusing `utils/vllm_pool_config`'s existing quant-aware bytes-per-param table as the
+  sole precision-ordering source; `NoVariantFitsError` when nothing fits
+- `_build_engine_pool` (`api/deps.py`) resolves each `INFERENCE_X_LOADED_MODELS` entry
+  to a concrete name — a registered name bypasses the selector unchanged; an unknown
+  name is treated as a family and resolved, or falls through to the existing
+  "not registered" error
+- Worked example in `config/models.yaml`: `qwen2.5-7b-bf16`/`qwen2.5-7b-awq` grouped
+  under `family: qwen2.5-7b`
+
+Exit criteria:
+- [x] `uv run pytest tests/unit -v` — 419/419 pass (18 new)
+- [x] Live-verified: a temporary family of two real small models resolved and loaded
+  through the actual server startup path (not just mocked)
+- [x] A model with no `family` set behaves identically to before this phase
+  (regression-tested against the full existing suite)
+- [x] Non-obvious choices recorded in DECISIONS.md (DEC-041)
+
+**Known scope boundary:** `INFERENCE_X_DEFAULT_MODEL` is not resolved through the
+selector — operators loading a family should set the default model to one of its
+concrete variant names. Resolving the router's default would require threading VRAM
+tier state into `_build_router`, out of scope for this phase.
+
+---
+
 ## Decision rule: when to create a new phase
 
 A new phase is warranted when:

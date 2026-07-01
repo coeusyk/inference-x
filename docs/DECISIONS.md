@@ -628,3 +628,54 @@ Use this document to capture non-obvious design decisions as the project evolves
   6 new `AdmissionController` sequence-gate cases, 1 new route-level 429 test). Model
   variant routing (`openspec/changes/add-model-variant-routing`) remains separately
   proposed, not implemented this round.
+
+### DEC-041
+- Date: 2026-07-01
+- Status: accepted
+- Context: DEC-038 deliberately did not add a `precision` request field, calling it
+  "meaningless without model variant sets... which don't exist yet." This closes that
+  prerequisite: `openspec/changes/add-model-variant-routing`.
+- Decision:
+  - `ModelEntry.family: Optional[str]` (`schemas/model.py`) — additive; entries with no
+    `family` behave exactly as before (a "family of one," keyed by their own `name`).
+  - `ModelRegistry.variants(family)` (`services/model_service.py`) groups entries by
+    `family`, falling back to `name` for ungrouped entries — so `variants("some-name")`
+    still returns that single entry unaffected by this method's existence.
+  - New `routing/variant_selector.py`: `select_variant(family, registry, tier,
+    available_vram_gib)` sorts a family's variants by descending
+    `_bytes_per_param(quantization)` — reusing `utils/vllm_pool_config`'s existing
+    quant-aware table as the *only* source of precision ordering, deliberately not a
+    second rank field that could drift out of sync with it — and returns the first
+    variant whose `estimate_weight_gib()` fits `available_vram_gib *
+    tier.gpu_memory_utilization_ceiling`. Raises `NoVariantFitsError` (naming every
+    variant's estimated size) when none fit, or when the family name matches no
+    registered entry at all.
+  - Selection is **load-time only**: `_build_engine_pool` (`api/deps.py`) resolves each
+    name in `INFERENCE_X_LOADED_MODELS` via a new `_resolve_loaded_model_names` — a name
+    matching a registered `ModelEntry.name` exactly is used as-is (bypasses the
+    selector, unchanged from before); otherwise it's treated as a family name and
+    resolved via `select_variant`. A name that is neither a concrete entry nor has any
+    registered variants (`registry.variants(name)` empty), or arrives when no VRAM tier
+    resolved, falls through to `registry.get(name)`'s existing "not registered" error
+    unchanged — one consistent error path for a genuinely unknown name regardless of
+    tier availability.
+  - `TaskRouter`/`AdmissionController`/`ChatService` are untouched — they only ever see
+    the concrete, already-resolved name from `EnginePool`, exactly as before this change.
+  - Known scope boundary: `INFERENCE_X_DEFAULT_MODEL` is **not** resolved through the
+    selector — `DefaultModelPolicy` still requires an exact registered name. An operator
+    loading a family should still set the default model to one of that family's concrete
+    variant names, not the family name itself; resolving the router's default through
+    variant selection would require threading tier/VRAM state into `_build_router` too,
+    which DEC-038's original scoping for this component didn't call for.
+- Live-verified: a temporary config (`vram_tiers.yaml` copied from the real one, a
+  two-entry `models.yaml` grouping `facebook/opt-125m` and
+  `Qwen/Qwen2.5-0.5B-Instruct` under `family: tiny`) started with
+  `INFERENCE_X_LOADED_MODELS=tiny` against a real vLLM engine — the server resolved the
+  family to the first-listed variant (`tiny-a`), loaded it, reported healthy, and served
+  a normal chat completion. `config/models.yaml` also gained a real worked example
+  (`qwen2.5-7b-bf16`/`qwen2.5-7b-awq`, both genuine HuggingFace repos, grouped under
+  `family: qwen2.5-7b`) not live-verified on this 6-8GB dev box (needs 12GB+/24GB+).
+- Consequences: 419/419 unit tests pass (18 new: `ModelEntry.family`/`variants()`,
+  `variant_selector` selection-order/fallback/no-fit cases, `_build_engine_pool`
+  family-resolution wiring). All three Phase 3 sub-changes (driver thread, engine
+  knobs, variant routing) are now shipped.

@@ -14,6 +14,7 @@ from inference_x.observability.recorder import MetricsRecorder
 from inference_x.observability.storage import InMemoryStorage
 from inference_x.routing.admission import AdmissionController
 from inference_x.routing.task_router import TaskRouter
+from inference_x.routing.variant_selector import select_variant
 from inference_x.services.chat_service import ChatService
 from inference_x.services.metrics_service import MetricsService
 from inference_x.services.model_service import ModelRegistry
@@ -51,27 +52,63 @@ def _resolve_vram_tier_for_pool(config_dir: str) -> VramTier | None:
         return None
 
 
+def _resolve_loaded_model_names(
+    registry: ModelRegistry,
+    loaded_models: tuple[str, ...],
+    tier: VramTier | None,
+    available_vram_gib: float,
+) -> list[str]:
+    """Resolve each name in *loaded_models* to a concrete registered model name.
+
+    A name matching a registered ModelEntry.name exactly is used as-is
+    (today's behavior, unchanged). Otherwise it's treated as a model family
+    and resolved to its best-fitting variant via
+    routing/variant_selector.select_variant() (see
+    add-model-variant-routing) — requires a resolved *tier* to size variants
+    against; if no tier is available, an unrecognized name falls through to
+    registry.get()'s existing "not registered" error, unchanged from before
+    this module existed.
+    """
+    resolved: list[str] = []
+    for name in loaded_models:
+        if name in registry:
+            resolved.append(name)
+            continue
+        if tier is None or not registry.variants(name):
+            registry.get(name)  # raises the standard "not registered" ValueError
+        resolved.append(select_variant(name, registry, tier, available_vram_gib))
+    return resolved
+
+
 @lru_cache(maxsize=1)
 def _build_engine_pool(config_dir: str, loaded_models: tuple[str, ...]) -> EnginePool:
-    """Build an EnginePool loading one VLLMEngine per model in *loaded_models*."""
+    """Build an EnginePool loading one VLLMEngine per model in *loaded_models*.
+
+    Each requested name is first resolved to a concrete model — either
+    directly (already a registered name) or via family-based variant
+    selection (see _resolve_loaded_model_names).
+    """
     registry = _build_registry(config_dir)
-    pool_size = len(loaded_models)
     session_free_gib, session_total_gib = probe_gpu_memory_gib()
     total_vram = session_total_gib if session_total_gib is not None else 8.0
+    available_vram = session_free_gib if session_free_gib is not None else total_vram
     tier = _resolve_vram_tier_for_pool(config_dir)
+    resolved_models = _resolve_loaded_model_names(registry, loaded_models, tier, available_vram)
+
+    pool_size = len(resolved_models)
     pool_configs = [
-        apply_tier_knobs(registry.get(m).model_dump(), tier) for m in loaded_models
+        apply_tier_knobs(registry.get(m).model_dump(), tier) for m in resolved_models
     ]
     validate_pool_fits(pool_configs, total_vram_gib=total_vram)
     engines: dict = {}
-    for idx, model_name in enumerate(loaded_models):
+    for idx, model_name in enumerate(resolved_models):
         free_gib, total_gib = probe_gpu_memory_gib()
         model_config = pool_configs[idx]
         logger.info("Loading engine for model=%s (pool_size=%d)", model_name, pool_size)
         engines[model_name] = VLLMEngine(
             model_config,
             pool_size=pool_size,
-            pool_models=list(loaded_models),
+            pool_models=list(resolved_models),
             pool_configs=pool_configs,
             engine_index=idx,
             free_vram_gib=free_gib,

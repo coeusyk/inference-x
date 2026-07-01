@@ -11,6 +11,14 @@ class ModelEntry(BaseModel):
     name: str
     engine: Literal["vllm"] = "vllm"
     model_path: str
+    family: Optional[str] = Field(
+        default=None,
+        description=(
+            "Groups variants of the same logical model (e.g. bf16/int8/awq of "
+            "qwen2.5-7b) for load-time selection via routing/variant_selector.py. "
+            "Entries with no family are their own family of one."
+        ),
+    )
     gpu_memory_utilization: Optional[float | Literal["auto"]] = "auto"
     max_model_len: Optional[int] = Field(default=None, ge=1)
     max_num_seqs: Optional[int] = Field(

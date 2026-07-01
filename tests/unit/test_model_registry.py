@@ -44,6 +44,14 @@ class TestModelEntry:
         with pytest.raises(Exception):
             ModelEntry(name="x", model_path="p", max_model_len=0)
 
+    def test_family_defaults_to_none(self):
+        e = _entry("m")
+        assert e.family is None
+
+    def test_family_is_settable(self):
+        e = ModelEntry(name="qwen2.5-7b-awq", model_path="org/model", family="qwen2.5-7b")
+        assert e.family == "qwen2.5-7b"
+
 
 class TestModelRegistry:
     def _registry(self, *names: str) -> ModelRegistry:
@@ -93,6 +101,26 @@ class TestModelRegistry:
         assert "m1" in reg
         assert "m2" in reg
         assert len(reg.all()) == 2
+
+    def test_variants_returns_ungrouped_entry_as_family_of_one(self):
+        reg = self._registry("alpha", "beta")
+        assert [e.name for e in reg.variants("alpha")] == ["alpha"]
+
+    def test_variants_groups_by_family(self):
+        reg = ModelRegistry(
+            [
+                ModelEntry(name="qwen-bf16", model_path="org/a", family="qwen"),
+                ModelEntry(name="qwen-awq", model_path="org/b", family="qwen", quantization="awq"),
+                ModelEntry(name="other", model_path="org/c"),
+            ]
+        )
+        names = [e.name for e in reg.variants("qwen")]
+        assert names == ["qwen-bf16", "qwen-awq"]
+        assert reg.variants("other") == [reg.get("other")]
+
+    def test_variants_unknown_family_returns_empty(self):
+        reg = self._registry("alpha")
+        assert reg.variants("nonexistent") == []
 
     def test_real_config_has_a_quantized_awq_variant(self):
         """The shipped config/models.yaml includes a 4-bit model proving the quant path."""

@@ -5,11 +5,15 @@ models:
   # 8 GiB WSL2 ceiling (bf16, max_model_len 8192): dense models up to ~1.5B work reliably.
   # Larger / hybrid models (Qwen3.5 Mamba, 3B+, 8B) need more VRAM or quantization.
   #
-  # qwen2.5-7b-awq below is a 4-bit (AWQ) quantized variant sized for the 12GB VRAM tier
-  # (see config/vram_tiers.yaml) — weight sizing accounts for the "awq" quantization
-  # field via utils/vllm_pool_config.py's quant-aware bytes/param lookup. It is not part
-  # of INFERENCE_X_LOADED_MODELS by default and does not fit the 6GB dev tier alongside
-  # the other models here; load it standalone on 12GB+ hardware to exercise the quant path.
+  # qwen2.5-7b-bf16 / qwen2.5-7b-awq below share family: qwen2.5-7b — same logical
+  # model at two precisions, grouped for routing/variant_selector.py's load-time
+  # selection (add-model-variant-routing). Setting INFERENCE_X_LOADED_MODELS=qwen2.5-7b
+  # picks whichever variant's estimated weight size fits the resolved VRAM tier's
+  # budget (bf16 preferred, falling back to awq). Neither is part of
+  # INFERENCE_X_LOADED_MODELS by default and neither fits the 6GB dev tier alongside
+  # the other models here; qwen2.5-7b-awq needs 12GB+, qwen2.5-7b-bf16 needs 24GB+ —
+  # weight sizing accounts for the "awq" quantization field via
+  # utils/vllm_pool_config.py's quant-aware bytes/param lookup.
 
   - name: opt-125m
     engine: vllm
@@ -44,9 +48,17 @@ models:
     gpu_memory_utilization: auto
     max_model_len: 8192
 
+  - name: qwen2.5-7b-bf16
+    engine: vllm
+    model_path: Qwen/Qwen2.5-7B-Instruct
+    family: qwen2.5-7b
+    gpu_memory_utilization: auto
+    max_model_len: 4096
+
   - name: qwen2.5-7b-awq
     engine: vllm
     model_path: Qwen/Qwen2.5-7B-Instruct-AWQ
     quantization: awq
+    family: qwen2.5-7b
     gpu_memory_utilization: auto
     max_model_len: 4096
