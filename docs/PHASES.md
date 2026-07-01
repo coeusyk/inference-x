@@ -1,6 +1,6 @@
 # InferenceX — Phases
 
-**All phases 0–7 are complete (2026-07).** This file is the historical milestone record
+**All phases 0–8 are complete (2026-07).** This file is the historical milestone record
 and phase-gating rules. New work uses OpenSpec (`openspec/changes/`) — do not add features
 here without a new phase section and exit criteria.
 
@@ -16,6 +16,7 @@ here without a new phase section and exit criteria.
 | 5 | Hardening and publication | Done |
 | 6 | Benchmark suite and model advisor | Done |
 | 7 | VRAM-aware sizing, tiers, and observability wiring | Done |
+| 8 | Admission control (context/KV enforcement) | Done (partial scope, see notes) |
 
 ---
 
@@ -259,6 +260,52 @@ part of the default 6GB dev pool — quant-aware sizing is unit-tested but not y
 validated on real 12GB+ hardware. Tier *enforcement* against `max_num_seqs`/
 `max_model_len_cap`, the `AdmissionController`, and non-streaming continuous-batching
 fix are Phase 2 of the VRAM-aware plan (DEC-037) and remain unbuilt.
+
+---
+
+## Phase 8 — Admission Control (Context/KV Enforcement)
+**Goal:** Enforce context-length and KV-pool limits before a request reaches vLLM, instead
+of letting oversized requests fail unpredictably inside the engine. This is Phase 2 of the
+VRAM-aware architecture plan (DEC-037/DEC-038). Scope was narrowed mid-phase after a real
+concurrency bug was found in live testing — see notes below.
+
+Deliverables:
+- `routing/admission.py` — `AdmissionController` enforces prompt/output context limits
+  (`ModelEntry.max_model_len` ∩ VRAM tier `max_model_len_cap` ∩ request
+  `max_context_tokens`) and KV-pool pressure (in-flight token reservations vs.
+  `engine.kv_capacity_tokens`), clamping for `priority: interactive` or rejecting for
+  `priority: batch`
+- New request fields on `ChatCompletionRequest`: `max_context_tokens`,
+  `max_output_tokens` (alias for `max_tokens`), `priority`
+- `VLLMEngine.count_prompt_tokens()` — real tokenizer-based prompt token count for
+  admission math
+- `ContextTooLongError` (400, reuses the existing sanitized ValueError handler) and
+  `EngineSaturatedError` (429 + `Retry-After`, new handler in `api/errors.py`)
+- `ChatService` wires `AdmissionController` around every `generate()`/`generate_stream()`
+  call, releasing the KV reservation in a `finally` block
+
+Exit criteria:
+- [x] `uv run pytest tests/unit -v` — 371/371 pass (17 new: 15 `test_admission.py`, 2
+  route-level 400/429 integration tests)
+- [x] A prompt over `max_context_tokens` returns 400 (verified live against a running
+  server)
+- [x] A batch-tier request against a saturated KV budget returns 429 with `Retry-After`
+  (verified via unit + route-level tests)
+- [x] Normal chat and streaming continue to work unchanged against a live server
+- [x] Non-obvious choices recorded in DECISIONS.md (DEC-038)
+
+**Not delivered this phase (see DEC-038):**
+- **Non-streaming continuous-batching fix** — attempted, unit-tested, then reverted after
+  a live 2-concurrent-request test reproducibly lost one request's output. The original
+  plan called this "low-risk, self-contained"; it isn't — a correct fix needs a shared
+  per-engine driver thread multiplexing `step()` output to per-request queues, not N
+  independent request-owned loops. Non-streaming requests still serialize per model,
+  same as before this phase.
+- **Engine knob surfacing** (`block_size`, `max_num_batched_tokens`, `kv_cache_dtype`,
+  `enable_prefix_caching`) — not started.
+- **`precision` request field / variant selection** — deliberately not added; meaningless
+  without model variant sets (VRAM-aware plan Component 1), which don't exist.
+- Phase 3 of the VRAM-aware plan (CPU/weight offload, prefix caching) remains untouched.
 
 ---
 

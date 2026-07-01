@@ -146,3 +146,33 @@ def test_log_kv_cache_stats_defaults_to_none_when_cache_config_missing():
     engine._log_kv_cache_stats()
 
     assert engine.kv_capacity_tokens is None
+
+
+# ---------------------------------------------------------------------------
+# count_prompt_tokens (admission control)
+# ---------------------------------------------------------------------------
+
+
+def test_count_prompt_tokens_uses_tokenizer_encode():
+    engine = VLLMEngine.__new__(VLLMEngine)
+    engine._model_name = "test-model"
+    engine._stream_prompt = lambda request: "User: hi\nAssistant:"
+    engine._llm = MagicMock()
+    engine._llm.get_tokenizer.return_value.encode.return_value = [1, 2, 3, 4, 5]
+
+    req = ChatCompletionRequest(
+        model="test-model", messages=[ChatMessage(role="user", content="hi")]
+    )
+    assert engine.count_prompt_tokens(req) == 5
+
+
+def test_count_prompt_tokens_falls_back_to_chars_over_4_on_error():
+    engine = VLLMEngine.__new__(VLLMEngine)
+    engine._model_name = "test-model"
+    engine._stream_prompt = MagicMock(side_effect=RuntimeError("tokenizer unavailable"))
+    engine._llm = MagicMock()
+
+    req = ChatCompletionRequest(
+        model="test-model", messages=[ChatMessage(role="user", content="12345678")]
+    )
+    assert engine.count_prompt_tokens(req) == 2  # 8 chars // 4

@@ -19,6 +19,7 @@ from inference_x.schemas.chat import (
     ChatCompletionRequest,
     ChatCompletionResponse,
     ChatCompletionUsage,
+    ChatMessage,
 )
 from inference_x.schemas.model import ModelEntry
 from inference_x.services.chat_service import ChatService
@@ -54,6 +55,39 @@ class _StubEngine(BaseEngine):
     async def generate_stream(self, request: ChatCompletionRequest):
         yield "Hello "
         yield "from stub"
+
+    def is_healthy(self) -> bool:
+        return self._healthy
+
+
+class _AdmissionAwareEngine(BaseEngine):
+    """Stub engine exposing count_prompt_tokens/kv_capacity_tokens so
+    AdmissionController's context and KV-saturation gates are exercisable
+    from route-level tests (real VLLMEngine isn't importable without a GPU)."""
+
+    def __init__(self, prompt_tokens: int = 5, kv_capacity_tokens: int | None = None) -> None:
+        self._healthy = True
+        self._prompt_tokens = prompt_tokens
+        self.kv_capacity_tokens = kv_capacity_tokens
+
+    def count_prompt_tokens(self, request: ChatCompletionRequest) -> int:
+        return self._prompt_tokens
+
+    async def generate(self, request: ChatCompletionRequest) -> ChatCompletionResponse:
+        return ChatCompletionResponse(
+            model=request.model,
+            choices=[
+                ChatCompletionChoice(
+                    index=0,
+                    message=ChatCompletionMessage(content="ok"),
+                    finish_reason="stop",
+                )
+            ],
+            usage=ChatCompletionUsage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+        )
+
+    async def generate_stream(self, request: ChatCompletionRequest):
+        yield "ok"
 
     def is_healthy(self) -> bool:
         return self._healthy
@@ -205,6 +239,56 @@ class TestChatCompletionsEndpoint:
             assert resp.status_code == 500
             body = resp.json()
             assert body["error"]["type"] == "internal_error"
+        app.dependency_overrides.clear()
+
+    def test_prompt_exceeding_max_context_tokens_returns_400(self):
+        """AdmissionController rejects a prompt over the client's own
+        max_context_tokens ceiling with a sanitized 400 (DEC-037 Phase 2)."""
+        engine = _AdmissionAwareEngine(prompt_tokens=50)
+        registry = _make_stub_registry()
+        router = TaskRouter(registry, _TEST_MODEL)
+        pool = EnginePool({_TEST_MODEL: engine})
+        svc = ChatService(engine_pool=pool, registry=registry, router=router)
+        app.dependency_overrides[get_chat_service] = lambda: svc
+        with TestClient(app) as c:
+            payload = dict(self._payload)
+            payload["max_context_tokens"] = 10
+            resp = c.post("/v1/chat/completions", json=payload)
+            assert resp.status_code == 400
+            body = resp.json()
+            assert body["error"]["type"] == "invalid_request_error"
+        app.dependency_overrides.clear()
+
+    def test_kv_saturation_returns_429_with_retry_after(self):
+        """A batch-tier request is rejected (not silently truncated) when an
+        in-flight reservation has already consumed the KV safety budget."""
+        engine = _AdmissionAwareEngine(prompt_tokens=5, kv_capacity_tokens=20)
+        registry = _make_stub_registry()
+        router = TaskRouter(registry, _TEST_MODEL)
+        pool = EnginePool({_TEST_MODEL: engine})
+        svc = ChatService(engine_pool=pool, registry=registry, router=router)
+        # Simulate an in-flight request holding most of the KV budget
+        # (safety margin 0.9 * capacity 20 = 18 tokens) without releasing it.
+        svc._admission.admit(
+            _TEST_MODEL,
+            ChatCompletionRequest(
+                model=_TEST_MODEL,
+                messages=[ChatMessage(role="user", content="x")],
+                max_tokens=12,
+                priority="batch",
+            ),
+            engine,
+        )
+        app.dependency_overrides[get_chat_service] = lambda: svc
+        with TestClient(app) as c:
+            payload = dict(self._payload)
+            payload["max_tokens"] = 10
+            payload["priority"] = "batch"
+            resp = c.post("/v1/chat/completions", json=payload)
+            assert resp.status_code == 429
+            assert "Retry-After" in resp.headers
+            body = resp.json()
+            assert body["error"]["type"] == "rate_limit_error"
         app.dependency_overrides.clear()
 
 

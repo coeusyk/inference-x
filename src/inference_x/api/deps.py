@@ -12,6 +12,7 @@ from inference_x.engines.vllm_engine import VLLMEngine
 from inference_x.observability.exporters import build_exporter
 from inference_x.observability.recorder import MetricsRecorder
 from inference_x.observability.storage import InMemoryStorage
+from inference_x.routing.admission import AdmissionController
 from inference_x.routing.task_router import TaskRouter
 from inference_x.services.chat_service import ChatService
 from inference_x.services.metrics_service import MetricsService
@@ -59,6 +60,26 @@ def _build_router(config_dir: str, default_model: str) -> TaskRouter:
     return TaskRouter(registry, default_model)
 
 
+@lru_cache(maxsize=1)
+def _build_admission_controller(config_dir: str) -> AdmissionController:
+    """Build the AdmissionController with the resolved VRAM tier as its context cap.
+
+    Falls back to AdmissionController's built-in default cap (no tier) if tier
+    resolution fails — same fail-open-with-a-warning posture as the tier
+    logging in initialize_app().
+    """
+    registry = _build_registry(config_dir)
+    tier = None
+    try:
+        tier = get_settings().get_vram_tier()
+    except Exception as exc:
+        logger.warning(
+            "VRAM tier resolution failed for admission control (using default cap): %s",
+            exc,
+        )
+    return AdmissionController(registry, tier=tier)
+
+
 def get_registry(
     settings: Annotated[AppSettings, Depends(get_settings)],
 ) -> ModelRegistry:
@@ -71,7 +92,8 @@ def get_chat_service(
     pool = _build_engine_pool(settings.config_dir, tuple(settings.loaded_models))
     registry = _build_registry(settings.config_dir)
     router = _build_router(settings.config_dir, settings.default_model)
-    return ChatService(engine_pool=pool, registry=registry, router=router)
+    admission = _build_admission_controller(settings.config_dir)
+    return ChatService(engine_pool=pool, registry=registry, router=router, admission=admission)
 
 
 def get_engine_pool(
@@ -155,4 +177,5 @@ def shutdown_app() -> None:
     _build_engine_pool.cache_clear()
     _build_registry.cache_clear()
     _build_router.cache_clear()
+    _build_admission_controller.cache_clear()
     logger.info("InferenceX shutdown complete")

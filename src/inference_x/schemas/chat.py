@@ -19,6 +19,26 @@ class ChatCompletionRequest(BaseModel):
     max_tokens: Optional[int] = Field(default=512, ge=1, le=4096)
     top_p: Optional[float] = Field(default=0.95, ge=0.0, le=1.0)
     stream: bool = False
+    max_context_tokens: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="Prompt-token ceiling enforced pre-dispatch by AdmissionController; "
+        "None means the model's configured max_model_len is the only ceiling.",
+    )
+    max_output_tokens: Optional[int] = Field(
+        default=None,
+        ge=1,
+        le=4096,
+        description="Preferred alias for max_tokens; takes precedence over max_tokens "
+        "when both are set. Kept max_tokens for OpenAI-client compatibility.",
+    )
+    priority: Literal["interactive", "batch"] = Field(
+        default="interactive",
+        description="'interactive' requests get output clamped to fit available context/"
+        "KV budget when possible; 'batch' requests are rejected (429) instead of clamped "
+        "when the engine is saturated. Client-supplied and unauthenticated — do not treat "
+        "as a trust boundary.",
+    )
 
 
 class ChatCompletionMessage(BaseModel):

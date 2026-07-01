@@ -461,3 +461,69 @@ Use this document to capture non-obvious design decisions as the project evolves
   pass. Phase 2 (`routing/admission.py`, `max_context_tokens`/`precision`/`priority`
   request fields, engine knob surfacing, non-streaming batching fix) and Phase 3 (CPU
   offload, prefix caching) remain future work.
+
+### DEC-038
+- Date: 2026-07-01
+- Status: accepted (admission control) / reverted-with-findings (batching fix)
+- Context: Phase 2 of the VRAM-aware plan (DEC-037). Two independent goals: (1) enforce
+  context-length and KV-pool limits before dispatch instead of letting oversized requests
+  reach vLLM and fail unpredictably; (2) give non-streaming completions the same
+  continuous-batching concurrency `generate_stream` already had, since `_run_completion`
+  held a lock across the entire blocking `.chat()`/`.generate()` call.
+- Decision (admission control, shipped):
+  - New `routing/admission.py`: `AdmissionController.admit(routed_model, request, engine)`
+    runs after `TaskRouter.select()`, before engine dispatch. Two gates:
+    1. **Context length** — `prompt_tokens + requested_output` must fit
+      `min(ModelEntry.max_model_len, tier.max_model_len_cap, request.max_context_tokens)`.
+      Prompt tokens come from `engine.count_prompt_tokens()` (new `VLLMEngine` method,
+      real tokenizer-based) via `getattr`, same optional-attribute pattern already used
+      for `kv_capacity_tokens` in `api/routes/metrics.py` — not added to `BaseEngine`'s
+      abstract contract, so no test-stub engine needed updating. Falls back to a chars/4
+      estimate when the engine has no tokenizer.
+    2. **KV pressure** — an in-memory per-model `_KVReservationTracker` (token counts, not
+      GiB — simpler and more accurate than converting through `kv_gib_for_tokens` since
+      `kv_capacity_tokens` is already real, post-load tokens) compares in-flight
+      reservations against `engine.kv_capacity_tokens * 0.9`.
+    - `priority: "interactive" | "batch"` (new request field) decides the response to
+      either gate: interactive clamps `max_tokens` down to what fits (rejecting only if
+      the clamped room is below 16 tokens — a "clamp" to a handful of tokens is really a
+      rejection in disguise); batch always rejects instead of silently truncating.
+    - Both gates fail open (don't block) when the underlying number is unavailable (no
+      tokenizer, no reported KV capacity) — matches this codebase's existing posture for
+      advisory signals (e.g. VRAM tier resolution failure in `api/deps.py`).
+    - New request fields: `max_context_tokens`, `max_output_tokens` (alias for
+      `max_tokens`, additive/back-compat), `priority`. `precision` from the original plan
+      was deliberately **not** added — it's meaningless without variant sets (Component 1
+      of the plan, "group models into variant sets by quantization"), which don't exist
+      yet; adding an inert field would be dead API surface.
+    - `ContextTooLongError(ValueError)` reuses the existing sanitized 400 handler.
+      `EngineSaturatedError` is new — mapped to 429 + `Retry-After` via a new handler in
+      `api/errors.py`, registered in `api/main.py`.
+    - `ChatService` gained an optional `admission` constructor param defaulting to
+      `AdmissionController(registry)` (no tier, 4096-token cap) so every existing direct
+      `ChatService(...)` test call site keeps working unchanged; `api/deps.py` wires the
+      real controller with the resolved VRAM tier via a new `_build_admission_controller`.
+  - Live-verified: a prompt over `max_context_tokens` returns 400; normal chat and
+    streaming still work end-to-end against the running 6GB dev server.
+- Decision (non-streaming batching fix, reverted): refactoring `_run_completion` to drive
+  `add_request`/`step()` directly (mirroring `generate_stream`, releasing the lock between
+  steps) was implemented, unit-tested with mocks, and passed — but a **live concurrency
+  test with 2 real concurrent non-streaming requests reproducibly failed one of them** with
+  "vLLM produced no output". Root cause: `generate_stream` tolerates a request's own
+  `step()`-call "turn" being preempted by another thread, because `output.outputs[0].text`
+  is cumulative — whichever call next happens to surface your `request_id` lets you catch
+  up. A one-shot `finished=True` handoff has no such recovery: if another thread's `step()`
+  call is the one that returns your request's terminal output, it discards it (request_id
+  mismatch) and `has_unfinished_requests()` can go globally False before your own thread
+  ever sees it — no retry, no error signal until the "no output" `RuntimeError`. The
+  original plan called this "low-risk, self-contained"; live testing showed otherwise.
+  Reverted to the original blocking `.chat()`/`.generate()` call (proven safe, one lock
+  held for the whole generation). A correct fix needs a single shared per-engine driver
+  thread that multiplexes `step()` output to per-request queues instead of N independent
+  request-owned loops — left as explicit follow-up, not shipped half-verified.
+- Consequences: Admission control is live and tested (17 new unit tests: 15 in
+  `test_admission.py`, 2 route-level 400/429 integration tests). Non-streaming requests
+  still serialize behind one lock per model, same as before this change — no regression,
+  no improvement. `engine_knob surfacing` (block_size, max_num_batched_tokens,
+  kv_cache_dtype, enable_prefix_caching) from the original Phase 2 scope was not started
+  this round; deferred alongside the batching-fix follow-up.

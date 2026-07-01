@@ -445,6 +445,26 @@ class VLLMEngine(BaseEngine):
         parts.append("Assistant:")
         return "\n".join(parts)
 
+    def count_prompt_tokens(self, request: ChatCompletionRequest) -> int:
+        """Real prompt token count via this model's tokenizer, for admission control.
+
+        Accessed via getattr() by routing/admission.py (BaseEngine doesn't declare
+        this — same optional-attribute pattern as kv_capacity_tokens in
+        api/routes/metrics.py). Falls back to a chars/4 estimate — the same
+        heuristic AdmissionController uses for engines without a tokenizer at
+        all — if tokenization fails for any reason.
+        """
+        try:
+            prompt = self._stream_prompt(request)
+            tokenizer = self._llm.get_tokenizer()
+            return len(tokenizer.encode(prompt))
+        except Exception as exc:
+            logger.debug(
+                "count_prompt_tokens fallback for model=%s: %s", self._model_name, exc
+            )
+            total_chars = sum(len(m.content) for m in request.messages)
+            return max(1, total_chars // 4)
+
     def _resolve_max_tokens(self, request: ChatCompletionRequest) -> int:
         if self._max_completion_tokens is not None:
             return self._max_completion_tokens
@@ -481,7 +501,24 @@ class VLLMEngine(BaseEngine):
             return self._messages_to_prompt(request.messages)
 
     def _run_completion(self, request: ChatCompletionRequest):
-        """Blocking completion using the startup-loaded sync engine."""
+        """Blocking completion using the startup-loaded sync engine.
+
+        NOTE (DEC-037 Phase 2): a step()-loop refactor mirroring generate_stream
+        (releasing the lock between steps, like add_request + step()) was tried
+        here to give non-streaming requests the same continuous batching
+        streaming already has. It was reverted after a live concurrency test
+        found a real race: when N non-streaming requests finish within the same
+        few engine steps, whichever thread's step() call returns another
+        request's *finished* RequestOutput discards it (request_id mismatch)
+        and that request is never seen again — has_unfinished_requests() goes
+        globally False and the owning thread raises "no output" with no retry.
+        generate_stream doesn't hit this because it only needs *some* future
+        call to see its own request_id with cumulative text to catch up; a
+        one-shot finished-result handoff has no such recovery. A correct fix
+        needs a single shared per-engine driver thread that multiplexes step()
+        output to per-request queues, not N independent request-owned loops —
+        left as follow-up work, not shipped half-verified.
+        """
         sampling = self._sampling_params(request)
         vllm_messages = [{"role": m.role, "content": m.content} for m in request.messages]
 
