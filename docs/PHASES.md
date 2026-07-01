@@ -423,6 +423,32 @@ tier state into `_build_router`, out of scope for this phase.
 
 ---
 
+## Phase 12 — Default-Model Variant Resolution
+
+**Goal:** Close Phase 11's known scope boundary — `INFERENCE_X_DEFAULT_MODEL` now
+resolves a registered `family` name to its best-fitting variant at startup, the same
+rule `INFERENCE_X_LOADED_MODELS` already follows.
+
+Deliverables:
+- `_resolve_default_model()` (`api/deps.py`) — concrete names pass through unchanged;
+  a family name (with a resolved VRAM tier) is resolved via the existing
+  `variant_selector.select_variant()`; anything else defers to `TaskRouter`'s
+  pre-existing `DefaultModelPolicy` error, unchanged
+- `_build_router` resolves the VRAM tier and available VRAM before constructing
+  `TaskRouter`, threading both through
+- Startup INFO log: `Default model resolved: {family} → {variant} (tier: {tier_name})`
+
+Exit criteria:
+- [x] `uv run pytest tests/unit -v` — 425/425 pass (6 new in
+  `test_default_model_resolution.py`)
+- [x] Live-verified: startup log shows the resolved variant for a family-name default;
+  a request routes to that resolved variant
+- [x] Non-obvious choices recorded in DECISIONS.md (DEC-042)
+
+**Phase 3C's deferred/scope-boundary list is now empty.**
+
+---
+
 ## Decision rule: when to create a new phase
 
 A new phase is warranted when:

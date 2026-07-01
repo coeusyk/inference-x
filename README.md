@@ -225,7 +225,7 @@ Key environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `INFERENCE_X_DEFAULT_MODEL` | `qwen2.5-0.5b` | Model to load when LOADED_MODELS is unset |
+| `INFERENCE_X_DEFAULT_MODEL` | `qwen2.5-0.5b` | Model to load when LOADED_MODELS is unset; also accepts a registered model `family` name, resolved to its best-fitting variant at startup (e.g. `INFERENCE_X_DEFAULT_MODEL=qwen2.5-7b`) |
 | `INFERENCE_X_LOADED_MODELS` | (default model) | Comma-separated list of models to load at startup |
 | `INFERENCE_X_CONFIG_DIR` | `config` | Path to config directory |
 | `INFERENCE_X_METRICS_FILE` | (unset) | If set, enables NDJSON metrics export to this path |

@@ -679,3 +679,57 @@ Use this document to capture non-obvious design decisions as the project evolves
   `variant_selector` selection-order/fallback/no-fit cases, `_build_engine_pool`
   family-resolution wiring). All three Phase 3 sub-changes (driver thread, engine
   knobs, variant routing) are now shipped.
+
+### DEC-042
+- Date: 2026-07-01
+- Status: accepted
+- Context: DEC-041 (70ca241) shipped load-time variant selection for
+  `INFERENCE_X_LOADED_MODELS` but explicitly left `INFERENCE_X_DEFAULT_MODEL` out of
+  scope: `_build_router`'s `TaskRouter(registry, default_model)` → `DefaultModelPolicy`
+  required an exact registered `ModelEntry.name`, so a family name there either matched
+  nothing (immediate startup failure) or, if it happened to collide with a real entry
+  name, silently used the wrong model. `variant_selector.select_variant()` was never
+  consulted for this path. This closes that scope boundary.
+- Decision:
+  - New `_resolve_default_model(registry, default_model, tier, available_vram_gib)` in
+    `api/deps.py`: a name already in the registry passes through unchanged (zero
+    behavior change for existing operators). A name matching a `ModelEntry.family` —
+    only when a VRAM tier is resolved — is resolved via `select_variant()`, the exact
+    same function `_resolve_loaded_model_names` already calls for
+    `INFERENCE_X_LOADED_MODELS`. Any other value (unrecognized name, or a real family
+    name when no tier is available to size it) is returned **unchanged**, deliberately
+    deferring to `TaskRouter`'s existing `DefaultModelPolicy` constructor, which raises
+    its own pre-existing `"Default model '{x}' is not in the registry"` `ValueError` —
+    this preserves that exact error path/wording for the genuinely-unresolvable case
+    instead of introducing a second, differently-worded error message for what was
+    already a handled failure mode.
+  - `_build_router` now resolves the VRAM tier (`_resolve_vram_tier_for_pool`, already
+    used by `_build_engine_pool`) and probes free/total VRAM before constructing
+    `TaskRouter`, threading both into `_resolve_default_model`.
+  - Detection uses the model registry directly (`ModelEntry.family` membership), not a
+    separate `INFERENCE_X_DEFAULT_MODEL_IS_FAMILY` flag — unambiguous from data already
+    present, no extra operator-facing config.
+  - Hard-error, no silent fallback: when a recognized family has no variant fitting the
+    current VRAM budget, `select_variant()`'s existing `NoVariantFitsError` (already a
+    `RuntimeError` subclass, naming the family, every variant's estimated size, and the
+    tier's budget) propagates unmodified — no new exception type needed, and no
+    fallback to "just pick the first/smallest variant anyway," which would silently
+    contradict the tier the operator's hardware actually resolved to.
+  - Resolution happens once at startup (`_build_router`, `@lru_cache`d), not per
+    request — `INFERENCE_X_DEFAULT_MODEL` is operator config, and the loaded model set
+    is already fixed for the life of the process; a per-request VRAM check belongs to
+    `AdmissionController`, not the default-model lookup.
+  - New INFO log on actual resolution: `Default model resolved: {family} → {variant}
+    (tier: {tier_name})` — logged only when resolution changes the value, not for the
+    concrete-passthrough case.
+- Live-verified: a temporary two-model `family: tiny` config (reused from the DEC-041
+  live check) started with `INFERENCE_X_DEFAULT_MODEL=tiny` and no
+  `INFERENCE_X_LOADED_MODELS` override. Startup log showed `Default model resolved:
+  tiny → tiny-a (tier: 6gb)`; a request with an unregistered `model` value (falling
+  through `ExplicitModelPolicy` to the resolved default) returned
+  `"model":"tiny-a"` in the response.
+- Consequences: 425/425 unit tests pass (6 new in
+  `test_default_model_resolution.py`). `INFERENCE_X_LOADED_MODELS` resolution logic
+  (`_resolve_loaded_model_names`) and `variant_selector.select_variant()` internals are
+  both untouched by this change. This was the last item on 3C's known scope-boundary
+  list — that list is now empty.

@@ -118,10 +118,43 @@ def _build_engine_pool(config_dir: str, loaded_models: tuple[str, ...]) -> Engin
     return EnginePool(engines)
 
 
+def _resolve_default_model(
+    registry: ModelRegistry,
+    default_model: str,
+    tier: VramTier | None,
+    available_vram_gib: float,
+) -> str:
+    """Resolve INFERENCE_X_DEFAULT_MODEL to a concrete registered model name.
+
+    A concrete registered name passes through unchanged (existing behavior,
+    zero change). A name matching a ModelEntry.family — and only when a VRAM
+    tier is resolved — is resolved via variant_selector.select_variant().
+    Closes the DEC-041 scope boundary: the router's default previously
+    required an exact registered name.
+
+    Any other value (not a concrete name, not a resolvable family, or no tier
+    available to size variants against) is returned unchanged so
+    TaskRouter's DefaultModelPolicy raises its own existing "not in the
+    registry" error — preserving that error path exactly as it was before
+    this function existed.
+    """
+    if default_model in registry or tier is None or not registry.variants(default_model):
+        return default_model
+    resolved = select_variant(default_model, registry, tier, available_vram_gib)
+    logger.info(
+        "Default model resolved: %s → %s (tier: %s)", default_model, resolved, tier.name
+    )
+    return resolved
+
+
 @lru_cache(maxsize=1)
 def _build_router(config_dir: str, default_model: str) -> TaskRouter:
     registry = _build_registry(config_dir)
-    return TaskRouter(registry, default_model)
+    tier = _resolve_vram_tier_for_pool(config_dir)
+    session_free_gib, session_total_gib = probe_gpu_memory_gib()
+    available_vram = session_free_gib if session_free_gib is not None else (session_total_gib or 8.0)
+    resolved_default = _resolve_default_model(registry, default_model, tier, available_vram)
+    return TaskRouter(registry, resolved_default)
 
 
 @lru_cache(maxsize=1)
