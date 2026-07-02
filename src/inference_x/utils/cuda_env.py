@@ -8,15 +8,10 @@ import shutil
 import site
 from pathlib import Path
 
+from inference_x.utils.vllm_platform_patch import _is_wsl
+from inference_x.utils.vllm_platform_patch import apply as apply_vllm_platform_patch
+
 logger = logging.getLogger(__name__)
-
-
-def _is_wsl() -> bool:
-    try:
-        with open("/proc/version", encoding="utf-8") as f:
-            return "microsoft" in f.read().lower()
-    except OSError:
-        return False
 
 
 def _find_venv_cuda_home() -> Path | None:
@@ -87,9 +82,6 @@ def ensure_cuda_home() -> str | None:
         "CUDA_HOME set from venv CUDA toolkit (FlashInfer JIT): %s", venv_cuda
     )
     return str(venv_cuda)
-
-
-from inference_x.utils.vllm_platform_patch import apply as apply_vllm_platform_patch
 
 
 def ensure_vllm_runtime_env(*, pool_size: int = 1) -> str | None:

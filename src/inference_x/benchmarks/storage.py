@@ -9,8 +9,6 @@ from inference_x.benchmarks.schemas import BenchmarkResult
 
 DEFAULT_RESULTS_DIR = "benchmarks/results"
 
-_FILENAME_RE = re.compile(r"^results-(.+)-(\d{4}-\d{2}-\d{2}T[\d\-:+Z.]+)\.json$")
-
 
 class ResultStore:
     """Reads and writes BenchmarkResult JSON to/from a directory."""

@@ -9,7 +9,7 @@ from inference_x.core.settings import get_settings
 from inference_x.engines.base import BaseEngine
 from inference_x.engines.pool import EnginePool
 from inference_x.routing.admission import AdmissionController
-from inference_x.routing.base import BaseRouter
+from inference_x.routing.task_router import TaskRouter
 from inference_x.schemas.chat import ChatCompletionRequest, ChatCompletionResponse
 from inference_x.services.model_service import ModelRegistry
 
@@ -32,7 +32,7 @@ class ChatService:
         self,
         engine_pool: EnginePool,
         registry: ModelRegistry,
-        router: BaseRouter,
+        router: TaskRouter,
         admission: AdmissionController | None = None,
     ) -> None:
         self._pool = engine_pool

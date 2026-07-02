@@ -266,16 +266,6 @@ class TestMetricsService:
         rec = MetricsRecorder(storage=s)
         return MetricsService(rec)
 
-    def test_recent(self):
-        records = [_record(request_id=str(i)) for i in range(10)]
-        svc = self._svc(records)
-        assert len(svc.recent(5)) == 5
-
-    def test_all(self):
-        records = [_record(request_id=str(i)) for i in range(3)]
-        svc = self._svc(records)
-        assert len(svc.all()) == 3
-
     def test_summary_empty(self):
         svc = self._svc([])
         s = svc.summary()

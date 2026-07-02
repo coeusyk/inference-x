@@ -86,16 +86,11 @@ def _run_prompt_stream(
     )
 
 
-def _percentile(data: list[float], p: float) -> float:
-    if not data:
-        return 0.0
-    sorted_data = sorted(data)
-    k = (len(sorted_data) - 1) * p / 100
-    f = int(k)
-    c = f + 1
-    if c >= len(sorted_data):
-        return sorted_data[f]
-    return sorted_data[f] + (sorted_data[c] - sorted_data[f]) * (k - f)
+def _percentile(data: list[float], p: int) -> float:
+    """p-th percentile via linear interpolation (p in 1..99). Caller passes 50/95/99."""
+    if len(data) < 2:
+        return data[0] if data else 0.0
+    return statistics.quantiles(data, n=100, method="inclusive")[p - 1]
 
 
 def _check_vram_budget(

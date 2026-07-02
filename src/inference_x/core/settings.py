@@ -89,15 +89,6 @@ class AppSettings:
             f"Model '{name}' not found in {path}. Available: {available}"
         )
 
-    def get_server_config(self) -> dict[str, Any]:
-        """Return the server section from server.yaml, or empty dict if absent."""
-        path = Path(self.config_dir) / "server.yaml"
-        if not path.exists():
-            return {}
-        with path.open() as fh:
-            data = yaml.safe_load(fh) or {}
-        return data.get("server", {})
-
     def get_vram_tier(self):
         """Resolve the VRAM tier (config/vram_tiers.yaml) for the probed GPU.
 

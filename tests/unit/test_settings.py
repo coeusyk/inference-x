@@ -26,8 +26,6 @@ def tmp_config(tmp_path: Path) -> Path:
             """
         )
     )
-    server_yaml = tmp_path / "server.yaml"
-    server_yaml.write_text("server:\n  host: 127.0.0.1\n  port: 9000\n")
     return tmp_path
 
 
@@ -60,18 +58,6 @@ class TestAppSettings:
         settings.config_dir = str(tmp_path)
         with pytest.raises(FileNotFoundError):
             settings.get_model_config("anything")
-
-    def test_get_server_config(self, tmp_config):
-        settings = AppSettings()
-        settings.config_dir = str(tmp_config)
-        server = settings.get_server_config()
-        assert server["host"] == "127.0.0.1"
-        assert server["port"] == 9000
-
-    def test_get_server_config_missing_returns_empty(self, tmp_path):
-        settings = AppSettings()
-        settings.config_dir = str(tmp_path)
-        assert settings.get_server_config() == {}
 
     def test_loaded_models_defaults_to_default_model(self, monkeypatch):
         monkeypatch.delenv("INFERENCE_X_LOADED_MODELS", raising=False)

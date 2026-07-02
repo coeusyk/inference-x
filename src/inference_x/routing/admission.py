@@ -98,33 +98,10 @@ def _estimate_prompt_tokens(engine: Any, request: ChatCompletionRequest) -> int:
     return max(1, total_chars // _CHARS_PER_TOKEN_FALLBACK)
 
 
-class _KVReservationTracker:
-    """Thread-safe per-model counter of tokens reserved by in-flight requests."""
-
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._reserved: dict[str, int] = {}
-
-    def current(self, model: str) -> int:
-        with self._lock:
-            return self._reserved.get(model, 0)
-
-    def reserve(self, model: str, tokens: int) -> None:
-        with self._lock:
-            self._reserved[model] = self._reserved.get(model, 0) + tokens
-
-    def release(self, model: str, tokens: int) -> None:
-        with self._lock:
-            self._reserved[model] = max(0, self._reserved.get(model, 0) - tokens)
-
-
-class _InFlightSeqTracker:
-    """Thread-safe per-model counter of in-flight admitted requests (sequence slots).
-
-    Unlike _KVReservationTracker (token counts), this counts requests, since
-    vLLM's max_num_seqs is a hard cap on concurrent sequences regardless of how
-    few tokens each one uses.
-    """
+class _PerModelCounter:
+    """Thread-safe per-model counter, shared shape for both KV-token and
+    in-flight-sequence tracking below (only the unit each counts differs:
+    reserved tokens vs. admitted requests)."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -134,13 +111,9 @@ class _InFlightSeqTracker:
         with self._lock:
             return self._counts.get(model, 0)
 
-    def increment(self, model: str) -> None:
+    def add(self, model: str, amount: int) -> None:
         with self._lock:
-            self._counts[model] = self._counts.get(model, 0) + 1
-
-    def decrement(self, model: str) -> None:
-        with self._lock:
-            self._counts[model] = max(0, self._counts.get(model, 0) - 1)
+            self._counts[model] = max(0, self._counts.get(model, 0) + amount)
 
 
 class AdmissionController:
@@ -156,8 +129,8 @@ class AdmissionController:
         self._registry = registry
         self._tier = tier
         self._kv_safety_margin = kv_safety_margin
-        self._tracker = _KVReservationTracker()
-        self._seq_tracker = _InFlightSeqTracker()
+        self._tracker = _PerModelCounter()
+        self._seq_tracker = _PerModelCounter()
 
     def _context_ceiling(self, routed_model: str) -> int:
         """Highest token count (prompt + output) this model's context window allows."""
@@ -251,11 +224,11 @@ class AdmissionController:
                 effective_output = max(_MIN_CLAMPED_OUTPUT_TOKENS, int(available))
 
         reserved_tokens = prompt_tokens + effective_output
-        self._tracker.reserve(routed_model, reserved_tokens)
-        self._seq_tracker.increment(routed_model)
+        self._tracker.add(routed_model, reserved_tokens)
+        self._seq_tracker.add(routed_model, 1)
         return AdmissionResult(effective_max_tokens=effective_output, reserved_tokens=reserved_tokens)
 
     def release(self, routed_model: str, reserved_tokens: int) -> None:
         """Release a reservation made by admit() once the request has completed."""
-        self._tracker.release(routed_model, reserved_tokens)
-        self._seq_tracker.decrement(routed_model)
+        self._tracker.add(routed_model, -reserved_tokens)
+        self._seq_tracker.add(routed_model, -1)

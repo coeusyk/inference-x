@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from inference_x.observability.recorder import MetricsRecorder
-from inference_x.observability.storage import RequestRecord
 
 
 @dataclass
@@ -19,18 +18,11 @@ class MetricsSummary:
 class MetricsService:
     """Read-only inspection of recorded request metrics.
 
-    Used for testing and future inspection endpoints.
     Does not own storage — reads through the recorder's storage reference.
     """
 
     def __init__(self, recorder: MetricsRecorder) -> None:
         self._recorder = recorder
-
-    def recent(self, n: int = 100) -> list[RequestRecord]:
-        return self._recorder.storage.recent(n)
-
-    def all(self) -> list[RequestRecord]:
-        return self._recorder.storage.all()
 
     def summary(self) -> MetricsSummary:
         records = self._recorder.storage.all()
