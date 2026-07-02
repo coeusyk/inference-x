@@ -122,7 +122,17 @@ class EngineDriver:
 
     def _run(self) -> None:
         while not self._stop.is_set():
-            self._drain_submissions()
+            if self._pending:
+                # Requests are already in flight: drain any new submissions
+                # without blocking and go straight to step(). Blocking here
+                # too (see the idle branch below) capped every step() to
+                # 1/_IDLE_POLL_S regardless of model speed — a ~20 tok/s
+                # ceiling traced from an opt-125m benchmark regression after
+                # this driver thread replaced the old unthrottled per-request
+                # `while has_unfinished_requests(): step()` loop.
+                self._drain_submissions_nowait()
+            else:
+                self._drain_submissions_blocking()
             if not self._pending:
                 continue
             try:
@@ -140,12 +150,22 @@ class EngineDriver:
                     continue
                 self._dispatch(output.request_id, pending, output)
 
-    def _drain_submissions(self) -> None:
+    def _drain_submissions_blocking(self) -> None:
+        """Block up to _IDLE_POLL_S for the first submission when genuinely idle.
+
+        Only called from _run() when self._pending is already empty — this is
+        what bounds shutdown() responsiveness without spinning the CPU while
+        there is nothing to do. Must never run while requests are pending;
+        see the comment in _run().
+        """
         try:
             request_id, prompt, sampling, pending = self._submit_q.get(timeout=_IDLE_POLL_S)
         except queue.Empty:
             return
         self._register(request_id, prompt, sampling, pending)
+        self._drain_submissions_nowait()
+
+    def _drain_submissions_nowait(self) -> None:
         while True:
             try:
                 request_id, prompt, sampling, pending = self._submit_q.get_nowait()
