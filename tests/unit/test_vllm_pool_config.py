@@ -152,20 +152,26 @@ def test_single_model_respects_user_cap(fixed_footprints):
     assert scaled["gpu_memory_utilization"] <= 0.25
 
 
-def test_auto_resolves_at_startup(fixed_footprints, monkeypatch):
-    monkeypatch.setattr(
-        "inference_x.benchmarks.hardware._vram_for_utilization",
-        lambda: (6.93, 8.0, "torch"),
-    )
-    monkeypatch.setattr(
-        "inference_x.benchmarks.hardware._probe_torch_vram_gib",
-        lambda: (6.93, 8.0),
+def test_auto_matches_explicit_footprint_sizing(fixed_footprints):
+    """"auto" must size by the model's own footprint, like a non-binding explicit
+    ceiling would — not a flat (free - buffer)/total ratio ignoring model size.
+
+    Regression guard: a prior bug let "auto" grab ~(free - buffer)/total of
+    VRAM regardless of the model's footprint, so a small model could claim
+    >85% of an 8 GiB GPU (see DEC on the opt-125m benchmark investigation).
+    """
+    auto_cfg = _qwen_cfg()
+    auto_cfg["gpu_memory_utilization"] = "auto"
+    auto_scaled = scale_model_config_for_pool(auto_cfg, pool_size=1, total_vram_gib=8.0)
+
+    non_binding_cfg = _qwen_cfg()
+    non_binding_cfg["gpu_memory_utilization"] = 0.9  # above the footprint, so it never binds
+    explicit_scaled = scale_model_config_for_pool(
+        non_binding_cfg, pool_size=1, total_vram_gib=8.0
     )
 
-    cfg = _qwen_cfg()
-    cfg["gpu_memory_utilization"] = "auto"
-    scaled = scale_model_config_for_pool(cfg, pool_size=1, total_vram_gib=8.0)
-    assert scaled["gpu_memory_utilization"] == 0.82
+    assert auto_scaled["gpu_memory_utilization"] == explicit_scaled["gpu_memory_utilization"]
+    assert auto_scaled["gpu_memory_utilization"] < 0.3  # small model, not a flat 0.82
 
 
 def test_two_model_pool_uses_weight_aware_share(fixed_footprints):
@@ -215,8 +221,12 @@ def test_sequential_cap_limits_second_engine_to_free_vram(fixed_footprints):
     assert scaled["gpu_memory_utilization"] >= 0.25
 
 
-def test_auto_multi_model_uses_fresh_suggest_not_div_n(fixed_footprints):
-    """Auto in a 2-model pool samples (free − buffer) / total per engine, not ÷N."""
+def test_auto_multi_model_uses_weight_scaled_sizing(fixed_footprints):
+    """"auto" in a multi-model pool must weight-scale by footprint like an
+    explicit ceiling would, not grab a flat (free - buffer)/total ratio with a
+    0.50 floor regardless of model size (same bug class as
+    test_auto_matches_explicit_footprint_sizing, in the pool_size>1 path).
+    """
     qwen = _qwen_cfg()
     qwen["gpu_memory_utilization"] = "auto"
     opt = {
@@ -244,10 +254,10 @@ def test_auto_multi_model_uses_fresh_suggest_not_div_n(fixed_footprints):
         total_vram_gib=8.0,
         session_free_vram_gib=6.93,
     )
-    assert opt_scaled["gpu_memory_utilization"] != 0.41
+    # opt is the heavier mock footprint here, so it earns the larger weight share.
+    assert opt_scaled["gpu_memory_utilization"] > qwen_scaled["gpu_memory_utilization"]
     assert 0.25 < opt_scaled["gpu_memory_utilization"] < 0.45
-    assert qwen_scaled["gpu_memory_utilization"] != 0.41
-    assert qwen_scaled["gpu_memory_utilization"] >= 0.42
+    assert 0.15 < qwen_scaled["gpu_memory_utilization"] < 0.35
 
 
 def test_validate_pool_fits_rejects_impossible_combo(fixed_footprints):
