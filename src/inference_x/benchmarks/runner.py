@@ -18,6 +18,9 @@ import httpx
 from inference_x.benchmarks.hardware import profile_hardware
 from inference_x.benchmarks.schemas import BenchmarkResult, HardwareProfile, PromptResult
 from inference_x.services.model_service import ModelRegistry
+from inference_x.utils.vllm_pool_config import estimate_engine_footprint_gib
+
+_VRAM_BUDGET_SLACK_GB = 0.5
 
 
 def _load_suite(suite_path: str) -> tuple[str, list[dict]]:
@@ -95,6 +98,29 @@ def _percentile(data: list[float], p: float) -> float:
     return sorted_data[f] + (sorted_data[c] - sorted_data[f]) * (k - f)
 
 
+def _check_vram_budget(
+    model_name: str,
+    peak_vram_delta_gb: float,
+    model_path: str | None,
+    max_model_len: int | None,
+    quantization: str | None,
+) -> tuple[bool, str | None]:
+    """Compare a measured VRAM delta against the estimated engine footprint + slack."""
+    if model_path is None:
+        return False, None
+    budget_gb = (
+        estimate_engine_footprint_gib(model_path, max_model_len or 2048, quantization)
+        + _VRAM_BUDGET_SLACK_GB
+    )
+    if peak_vram_delta_gb <= budget_gb:
+        return False, None
+    return True, (
+        f"{model_name}: measured VRAM delta {peak_vram_delta_gb:.2f} GB exceeds "
+        f"estimated budget {budget_gb:.2f} GB (weights + KV + overhead + "
+        f"{_VRAM_BUDGET_SLACK_GB:.1f} GB slack)."
+    )
+
+
 def _peak_vram_footprint_gb(before: HardwareProfile, after: HardwareProfile) -> float:
     """VRAM footprint from GPU snapshots (works when model is already loaded).
 
@@ -122,8 +148,13 @@ class BenchmarkRunner:
         suite_version, prompts = _load_suite(suite_path)
 
         max_model_len: int | None = None
+        model_path: str | None = None
+        quantization: str | None = None
         try:
-            max_model_len = ModelRegistry.from_config(config_dir).get(model_name).max_model_len
+            entry = ModelRegistry.from_config(config_dir).get(model_name)
+            max_model_len = entry.max_model_len
+            model_path = entry.model_path
+            quantization = entry.quantization
         except (FileNotFoundError, ValueError):
             pass
 
@@ -147,6 +178,9 @@ class BenchmarkRunner:
         throughputs = [r.tokens_per_sec for r in prompt_results]
 
         peak_vram_delta = _peak_vram_footprint_gb(hardware_before, hardware_after)
+        vram_budget_exceeded, vram_budget_warning = _check_vram_budget(
+            model_name, peak_vram_delta, model_path, max_model_len, quantization
+        )
 
         return BenchmarkResult(
             model_name=model_name,
@@ -161,4 +195,6 @@ class BenchmarkRunner:
             peak_vram_delta_gb=round(peak_vram_delta, 2),
             hardware=hardware_before,
             max_model_len=max_model_len,
+            vram_budget_exceeded=vram_budget_exceeded,
+            vram_budget_warning=vram_budget_warning,
         )
