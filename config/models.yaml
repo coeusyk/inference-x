@@ -2,18 +2,24 @@ models:
   # gpu_memory_utilization: auto — (vram_free - buffer) / vram_total at startup (DEC-035).
   # max_model_len caps KV cache pre-allocation for lean local inference.
   #
-  # 8 GiB WSL2 ceiling (bf16, max_model_len 8192): dense models up to ~1.5B work reliably.
-  # Larger / hybrid models (Qwen3.5 Mamba, 3B+, 8B) need more VRAM or quantization.
+  # 8 GiB WSL2 ceiling (bf16, max_model_len 8192): dense models up to ~2B benchmarked
+  # working reliably (qwen1.5-1.8b: 73.6 tok/s, 5.71 GiB peak VRAM delta, 2026-07-02,
+  # after the auto-sizing fix below). 3B+ dense bf16 or 7B+ needs more VRAM or quantization.
   #
   # qwen2.5-7b-bf16 / qwen2.5-7b-awq below share family: qwen2.5-7b — same logical
   # model at two precisions, grouped for routing/variant_selector.py's load-time
   # selection (add-model-variant-routing). Setting INFERENCE_X_LOADED_MODELS=qwen2.5-7b
   # picks whichever variant's estimated weight size fits the resolved VRAM tier's
   # budget (bf16 preferred, falling back to awq). Neither is part of
-  # INFERENCE_X_LOADED_MODELS by default and neither fits the 6GB dev tier alongside
-  # the other models here; qwen2.5-7b-awq needs 12GB+, qwen2.5-7b-bf16 needs 24GB+ —
-  # weight sizing accounts for the "awq" quantization field via
-  # utils/vllm_pool_config.py's quant-aware bytes/param lookup.
+  # INFERENCE_X_LOADED_MODELS by default. qwen2.5-7b-bf16 needs ~13 GiB weights alone,
+  # doesn't fit 8 GiB. qwen2.5-7b-awq's *estimated* footprint (~5.9 GiB) fits an 8 GiB
+  # budget on paper but FAILED to load in practice (2026-07-02): actual weight loading
+  # was 5.29 GiB vs. ~3.6 GiB estimated, leaving no room for KV cache. Root cause:
+  # estimate_weight_gib()'s quant bytes/param is applied uniformly to all parameters,
+  # but AWQ leaves the embedding + lm_head layers unquantized (fp16) — Qwen2.5-7B has
+  # untied embeddings (tie_word_embeddings=False) and a 152k vocab, so those two layers
+  # alone are ~1.1B unquantized params (~2 GiB) the estimate doesn't account for. Needs
+  # a fix in utils/vllm_pool_config.py before qwen2.5-7b-awq is safe to rely on here.
 
   - name: opt-125m
     engine: vllm
@@ -45,6 +51,12 @@ models:
   - name: minicpm5-1b
     engine: vllm
     model_path: openbmb/MiniCPM5-1B
+    gpu_memory_utilization: auto
+    max_model_len: 8192
+
+  - name: qwen1.5-1.8b
+    engine: vllm
+    model_path: Qwen/Qwen1.5-1.8B-Chat
     gpu_memory_utilization: auto
     max_model_len: 8192
 
