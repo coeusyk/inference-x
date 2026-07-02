@@ -46,8 +46,6 @@ class TestCheckVramBudget:
         assert warning is None
 
     def test_within_budget(self):
-        # facebook/opt-125m weights are ~0.25 GiB bf16; well under a 3 GB delta... actually
-        # under budget only if delta is small — use a tiny delta to stay under any estimate.
         exceeded, warning = _check_vram_budget(
             "opt-125m", 0.01, "facebook/opt-125m", 2048, None
         )
