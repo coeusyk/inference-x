@@ -6,7 +6,7 @@
 [![vLLM](https://img.shields.io/badge/inference-vLLM-6E40C9?style=flat-square)](https://docs.vllm.ai)
 [![OpenAI-compatible](https://img.shields.io/badge/API-OpenAI--compatible-412991?style=flat-square&logo=openai&logoColor=white)](https://platform.openai.com/docs/api-reference)
 [![uv](https://img.shields.io/badge/package%20manager-uv-DE5FE9?style=flat-square)](https://docs.astral.sh/uv/)
-[![Tests](https://img.shields.io/badge/tests-302%20passing-22C55E?style=flat-square&logo=pytest&logoColor=white)](./tests)
+[![Tests](https://img.shields.io/badge/tests-427%20passing-22C55E?style=flat-square&logo=pytest&logoColor=white)](./tests)
 [![License: MIT](https://img.shields.io/badge/license-MIT-F59E0B?style=flat-square)](./LICENSE)
 
 InferenceX is a self-hosted LLM inference platform built incrementally on top of vLLM. It provides an OpenAI-compatible `POST /v1/chat/completions` endpoint, a model registry, an observability pipeline, and an interactive Textual playground — all designed to run on a single WSL2 machine with one consumer-grade GPU.
@@ -84,12 +84,13 @@ Models are downloaded from HuggingFace on first use. Pre-downloading avoids a si
 stall during server startup:
 
 ```bash
-# Using huggingface-cli (recommended)
-uv run huggingface-cli download Qwen/Qwen2.5-0.5B-Instruct
-uv run huggingface-cli download Qwen/Qwen2.5-1.5B-Instruct
-uv run huggingface-cli download openbmb/MiniCPM5-1B
-uv run huggingface-cli download TinyLlama/TinyLlama-1.1B-Chat-v1.0
-uv run huggingface-cli download facebook/opt-125m
+# Using the hf CLI (recommended — huggingface-cli is deprecated)
+uv run hf download Qwen/Qwen2.5-0.5B-Instruct
+uv run hf download Qwen/Qwen2.5-1.5B-Instruct
+uv run hf download Qwen/Qwen1.5-1.8B-Chat
+uv run hf download openbmb/MiniCPM5-1B
+uv run hf download TinyLlama/TinyLlama-1.1B-Chat-v1.0
+uv run hf download facebook/opt-125m
 
 # Or using the Python API
 uv run python -c "
@@ -105,10 +106,10 @@ For gated models (not in the default 8 GiB registry — add manually to `config/
 2. Add an entry to `config/models.yaml` (see `tests/unit/test_vllm_gated.py` for shape), then authenticate locally:
 
 ```bash
-uv run huggingface-cli login
+uv run hf auth login
 # or: export HF_TOKEN=hf_...   (see .env.example)
 
-uv run huggingface-cli download meta-llama/Meta-Llama-3-8B-Instruct
+uv run hf download meta-llama/Meta-Llama-3-8B-Instruct
 INFERENCE_X_DEFAULT_MODEL=llama3-8b ./scripts/dev.sh serve
 ```
 
@@ -217,8 +218,7 @@ Copy `.env.example` to `.env` at the repo root — both `./scripts/dev.sh serve`
 | File | Purpose |
 |------|---------|
 | `config/models.yaml` | Model registry — name, model_path, gpu_memory_utilization, max_model_len |
-| `config/routing.yaml` | Routing policy — default_model, fallback chain |
-| `config/server.yaml` | Server defaults — host (127.0.0.1), port (8000) |
+| `config/vram_tiers.yaml` | VRAM tier definitions (6gb/12gb/24gb) — utilization ceiling, max_model_len cap, batching knobs |
 | `config/logging.yaml` | Logging config — rotating file handler + console |
 
 Key environment variables:
@@ -337,7 +337,7 @@ export VLLM_USE_FLASHINFER_SAMPLER=0
 
 1. Open https://huggingface.co/meta-llama/Meta-Llama-3-8B-Instruct and request access (Meta license).
 2. Wait for approval email from HuggingFace (a token alone is not enough until access is granted).
-3. After approval: `uv run huggingface-cli login`
+3. After approval: `uv run hf auth login`
 4. Add `llama3-8b` to `config/models.yaml` if not present, then retry serve.
 
 If you do not have access yet, use a registry model instead:
@@ -355,7 +355,9 @@ INFERENCE_X_DEFAULT_MODEL=qwen2.5-0.5b ./scripts/dev.sh serve
 1. Stop other GPU processes (`make stop`, or kill leftover `uvicorn` / vLLM workers).
 2. Use a smaller registry model (`qwen2.5-0.5b`, `minicpm5-1b`, or `qwen2.5-1.5b` at `max_model_len: 8192`).
 3. Lower `max_model_len` (e.g. 2048) for tight VRAM; hybrid/Mamba models may also need `max_num_seqs`.
-4. Models above ~1.5B dense bf16 (3B+, 8B, Qwen3.5 hybrid) are omitted from the default registry on 8 GiB cards — add them only with quantization or more VRAM.
+4. Dense bf16 models up to ~2B (e.g. `qwen1.5-1.8b`) run reliably on an 8 GiB card with
+   `gpu_memory_utilization: auto`. 3B+ dense bf16 or 7B+ needs quantization (see
+   `qwen2.5-7b-awq`) or more VRAM — 7B+ bf16 is omitted from the default registry on 8 GiB cards.
 
 ### Port already in use
 

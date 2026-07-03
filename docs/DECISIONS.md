@@ -793,3 +793,102 @@ Use this document to capture non-obvious design decisions as the project evolves
   dependency). No change to the driver thread's restart policy, the streaming
   path's chunking/delta logic, `EngineDriver`'s public method signatures, or any
   other module.
+
+### DEC-044
+- Date: 2026-07-02
+- Status: accepted
+- Context: a live `make benchmark MODEL=opt-125m` run reported implausible numbers for a
+  125M-param model: 16.7 tok/s, 11030ms p50 latency, 7.06 GB peak VRAM delta. Two
+  independent, unrelated bugs were found and fixed together because both were surfaced by
+  the same benchmark run:
+  1. **VRAM over-allocation.** `scale_model_config_for_pool()` (`utils/vllm_pool_config.py`)
+     special-cased `gpu_memory_utilization: "auto"` with an early-return branch that
+     computed `(vram_free - buffer) / vram_total` (DEC-035's original formula, with a 0.50
+     floor for single-model) regardless of the model's actual weight/KV footprint. This
+     meant a 125M-param model and a 7B model requesting `auto` got sized identically —
+     whatever fraction of free VRAM happened to be available, not what the model needed.
+     `resolve_gpu_memory_utilization()`, the function implementing this branch, became
+     fully dead code once removed (confirmed via grep: zero other callers).
+  2. **Throughput/latency regression.** `EngineDriver._run()` (`engines/driver.py`,
+     introduced in DEC-039/a88b135 to fix a streaming race) called
+     `self._submit_q.get(timeout=_IDLE_POLL_S)` — a blocking 0.05s wait — on *every*
+     iteration of its loop, including while requests were already in flight. This capped
+     every `step()` call to at most 20 Hz regardless of model speed, a ceiling the old
+     unthrottled per-request loop DEC-039 replaced never had.
+- Decision:
+  - `scale_model_config_for_pool()` no longer special-cases `"auto"`. Both `"auto"` and an
+    explicit float now flow through the same footprint-aware `_single_engine_utilization()`
+    (pool_size ≤ 1) / `_weight_scaled_utilization()` + `_apply_sequential_vram_caps()`
+    (pool_size > 1) path — `"auto"` means "no user-set ceiling" (see `_user_util_cap()`),
+    not "ignore the model's footprint and grab a flat fraction of free VRAM."
+    `resolve_gpu_memory_utilization()` deleted as dead code.
+  - `EngineDriver._run()` split submission-draining into `_drain_submissions_blocking()`
+    (only called when `self._pending` is empty — genuinely idle, bounds `shutdown()`
+    responsiveness) and `_drain_submissions_nowait()` (called whenever requests are
+    already in flight — never blocks, goes straight to the next `step()`).
+- Live-verified on the RTX 4060 8 GiB dev box, opt-125m: peak VRAM delta 7.06 GB → 1.65 GB;
+  mean throughput 16.7 → 329.3 tok/s (19.7×); p50 latency 11030ms → 518ms (21×).
+- Consequences: two existing tests had asserted the buggy behavior directly
+  (`test_auto_resolves_at_startup` expected utilization `0.82`;
+  `test_auto_multi_model_uses_fresh_suggest_not_div_n` expected `qwen_scaled >= 0.42`) —
+  both rewritten to assert the corrected, footprint-based values
+  (`test_auto_matches_explicit_footprint_sizing`,
+  `test_auto_multi_model_uses_weight_scaled_sizing`). No change to compare-mode splitting
+  logic itself, `AdmissionController`, or the streaming/non-streaming dispatch contract
+  `EngineDriver` exposes — only when it's allowed to block.
+
+### DEC-045
+- Date: 2026-07-02
+- Status: accepted
+- Context: after DEC-044's fix, `qwen2.5-7b-awq` (added in DEC-037 as the first exercised
+  4-bit model, but per PHASES.md's Phase 7 post-phase note never validated live) was
+  benchmarked directly on the 8 GiB dev box for the first time. It FAILED to load:
+  `RuntimeError: GPU memory insufficient for KV cache` — `Model loading took 5.29 GiB
+  memory` against an estimated ~3.6 GiB. Root cause: `estimate_weight_gib()`
+  (`utils/vllm_pool_config.py`) applies the quantization bytes/param ratio (e.g. 0.55 for
+  AWQ) uniformly to every parameter. AWQ/GPTQ-style weight-only quantization does not
+  touch embedding lookups or (when untied) the separate lm_head projection — those stay at
+  full precision. `Qwen/Qwen2.5-7B-Instruct-AWQ` has `tie_word_embeddings=False` and a
+  152k vocab, so those two layers alone are ~1.1B unquantized params (~2 GiB) the estimate
+  missed. Separately, `minicpm5-1b` (added in an earlier session) showed a real ~2.76 GiB
+  gap between its estimated footprint (3.79 GiB) and measured peak VRAM (6.55 GiB), with no
+  root cause found — the model happened to still fit, but the sizing was materially wrong.
+- Decision:
+  - `estimate_weight_gib()` now splits embedding + (untied) lm_head params out via a new
+    `_embedding_param_count()` helper (uses HF config `hidden_size`/`vocab_size`/
+    `tie_word_embeddings`) and prices them at bf16 (2 bytes/param) separately from the rest,
+    which get the quantization ratio. Applies to any scheme with `bytes_per_param < 2`
+    (AWQ/GPTQ/int4/int8/fp8), not just AWQ specifically — conservative in all cases, since
+    it only ever adds weight back, never removes it.
+  - Added `_architecture_overhead_gib()` + a small `_ARCH_OVERHEAD_GIB` lookup table
+    (same shape as the existing quant-ratio table) for architectures with measured overhead
+    the generic weights+KV+runtime estimate doesn't model. One entry: `minicpm: 2.8` GiB,
+    documented explicitly as a fitted correction, not a diagnosed root cause. First attempt
+    keyed this off HF config `model_type` — wrong, because `openbmb/MiniCPM5-1B`'s config
+    self-reports `model_type="llama"` / `architectures=["LlamaForCausalLM"]` for tooling
+    compatibility, so `model_type` cannot distinguish it from a real Llama model. Fixed to
+    key off the model_path/repo id substring instead, confirmed live.
+  - `qwen1.5-1.8b` (`Qwen/Qwen1.5-1.8B-Chat`, ungated) added to `config/models.yaml` as the
+    first validated ~2B-class entry on 8 GiB WSL2 — `google/gemma-2-2b-it` was tried first
+    but is `gated=manual` and this deployment's `HF_TOKEN` isn't approved for it.
+- Live-verified on the RTX 4060 8 GiB dev box:
+  - `qwen1.5-1.8b`: 73.6 tok/s, 5.71 GiB peak VRAM delta — comfortable headroom.
+  - `qwen2.5-7b-awq`: after the fix, sizing rose from `utilization=0.74` to `0.849`,
+    weight loading matched the estimate (5.29 GiB), KV cache went from negative to +0.63
+    GiB, and it now loads and serves (4.7 tok/s — small KV cache limits batching, but no
+    crash). `peak_vram_delta_gb` 7.44 GB, `vram_budget_exceeded: False`.
+  - `minicpm5-1b`: after the `model_type` → model_path fix took effect, sizing rose from
+    `utilization=0.474` to `0.824`, KV cache available rose from 1.52 GiB to 4.32 GiB.
+    Re-benchmarked: 117.8 tok/s (unchanged within noise), peak VRAM delta 7.09 GB —
+    `vram_budget_exceeded: True` (measured landed right at the 2.8 GiB margin's edge,
+    correctly flagging this model as tight rather than falsely reporting comfortable
+    headroom).
+- Consequences: 427/427 unit tests pass. One existing real-config test
+  (`test_real_config_has_a_quantized_awq_variant` in `test_model_registry.py`) asserted
+  `quantized_gib < bf16_gib * 0.35` against the real (cached) HF config — the corrected
+  ratio for this untied/large-vocab model is ~0.39, so the threshold was implicitly
+  encoding the underestimate bug; raised to 0.45 with a comment explaining why. The
+  `minicpm: 2.8` GiB constant is a fitted margin from one measurement, not a mechanism —
+  if the real cause scales with `max_model_len` or concurrency rather than being fixed,
+  it will need revisiting. No change to compare-mode splitting, `gpu_memory_utilization`
+  auto logic's call sites, or the benchmark result schema.

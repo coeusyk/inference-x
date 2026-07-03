@@ -261,6 +261,16 @@ validated on real 12GB+ hardware. Tier *enforcement* against `max_num_seqs`/
 `max_model_len_cap`, the `AdmissionController`, and non-streaming continuous-batching
 fix are Phase 2 of the VRAM-aware plan (DEC-037) and remain unbuilt.
 
+**Post-phase note (2026-07-02, DEC-045):** `qwen2.5-7b-awq` was live-benchmarked on an
+8 GiB dev box for the first time and initially failed to load — `estimate_weight_gib()`
+applied the AWQ bytes/param ratio uniformly, missing that AWQ leaves embedding/lm_head
+unquantized (~2 GiB undercounted for this model's untied embeddings + 152k vocab). Fixed
+by pricing those layers separately at bf16; the model now loads and serves on 8 GiB.
+`qwen1.5-1.8b` added as the first validated ~2B-class dense-bf16 entry (73.6 tok/s, 5.71
+GiB peak VRAM). See DEC-044 for the two independent VRAM-sizing and throughput bugs this
+work also uncovered and fixed (`auto` gpu_memory_utilization bypassing footprint sizing;
+`EngineDriver` capping `step()` to ~20 Hz).
+
 ---
 
 ## Phase 8 — Admission Control (Context/KV Enforcement)

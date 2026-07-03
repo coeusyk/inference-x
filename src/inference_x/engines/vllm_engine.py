@@ -83,7 +83,7 @@ def _check_vram_budget(
 _GATED_REPO_HINT = (
     "Request access on HuggingFace, then authenticate:\n"
     "  1. Visit the model page and accept the license\n"
-    "  2. uv run huggingface-cli login\n"
+    "  2. uv run hf auth login\n"
     "  3. Or export HF_TOKEN=<your-token> before starting the server"
 )
 
