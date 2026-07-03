@@ -126,11 +126,60 @@ def test_estimate_weight_from_model_name():
         ("unknown-scheme", 1.0),  # unrecognized -> bf16 default
     ],
 )
-def test_estimate_weight_gib_is_quantization_aware(quantization, expected_ratio):
+def test_estimate_weight_gib_is_quantization_aware(monkeypatch, quantization, expected_ratio):
+    """Ratios assume no HF config (no embedding/lm_head split to apply) — the
+    split-correction behavior itself is covered by
+    test_awq_underestimate_fixed_for_untied_large_vocab below."""
     pool._hf_config_dict.cache_clear()
+    monkeypatch.setattr(pool, "_hf_config_dict", lambda path: None)
     bf16 = pool.estimate_weight_gib("Qwen/Qwen2.5-0.5B-Instruct")
     quantized = pool.estimate_weight_gib("Qwen/Qwen2.5-0.5B-Instruct", quantization)
     assert quantized == pytest.approx(bf16 * expected_ratio, rel=1e-6)
+
+
+def test_awq_underestimate_fixed_for_untied_large_vocab(monkeypatch):
+    """Regression for qwen2.5-7b-awq (2026-07-02): AWQ leaves embedding/lm_head
+    at bf16, and untied embeddings + a 152k vocab meant the old uniform-ratio
+    estimate undercounted weight VRAM by ~2 GiB, causing a real load failure.
+    No network: HF config is mocked.
+    """
+    pool._hf_config_dict.cache_clear()
+    fake_config = {
+        "hidden_size": 3584,
+        "vocab_size": 152064,
+        "tie_word_embeddings": False,
+    }
+    monkeypatch.setattr(pool, "_hf_config_dict", lambda path: fake_config)
+
+    total_params = 7_000_000_000
+    old_style_estimate_gib = (total_params * pool._bytes_per_param("awq")) / (1024**3)
+    new_estimate_gib = pool.estimate_weight_gib("Qwen/Qwen2.5-7B-Instruct-AWQ", "awq")
+
+    assert new_estimate_gib > old_style_estimate_gib
+    embed_params = 2 * 152064 * 3584  # untied: input embedding + lm_head
+    embed_gib = (embed_params * 2) / (1024**3)  # unquantized -> bf16 (2 bytes/param)
+    quantized_gib = ((total_params - embed_params) * pool._bytes_per_param("awq")) / (1024**3)
+    assert new_estimate_gib == pytest.approx(embed_gib + quantized_gib, rel=1e-6)
+
+
+def test_minicpm_gets_conservative_overhead_margin(monkeypatch):
+    """Regression for minicpm5-1b (2026-07-02): measured 6.55 GiB peak VRAM vs.
+    a 3.79 GiB estimated budget, with no confirmed architecture-specific root
+    cause. Rather than pretend the estimate is exact, apply a conservative
+    margin so the budget isn't unrealistically low.
+
+    Matched on model_path, not HF config `model_type`: openbmb/MiniCPM5-1B's
+    real config self-reports model_type="llama" (architectures=
+    ["LlamaForCausalLM"]) for tooling compatibility, so model_type can't be
+    used to distinguish it — confirmed live on this hardware (2026-07-02).
+    """
+    overhead = pool._architecture_overhead_gib("openbmb/MiniCPM5-1B")
+    assert overhead > 0
+
+    with_overhead = pool.estimate_engine_footprint_gib("openbmb/MiniCPM5-1B", 8192)
+    monkeypatch.setattr(pool, "_architecture_overhead_gib", lambda path: 0.0)
+    without_overhead = pool.estimate_engine_footprint_gib("openbmb/MiniCPM5-1B", 8192)
+    assert with_overhead > without_overhead
 
 
 def test_bytes_per_param_lookup():

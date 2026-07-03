@@ -130,9 +130,13 @@ class TestModelRegistry:
         assert entry.max_model_len == 4096
 
         # Quant-aware sizing must estimate meaningfully less VRAM than a bf16 7B model.
+        # Threshold is 0.45, not the bare 4-bit ratio (~0.275): this model has
+        # untied embeddings + a 152k vocab, and AWQ leaves embedding/lm_head at
+        # bf16, so the real ratio is higher than a uniformly-quantized model's
+        # (see estimate_weight_gib's embedding-split correction).
         quantized_gib = estimate_weight_gib(entry.model_path, entry.quantization)
         bf16_gib = estimate_weight_gib(entry.model_path, None)
-        assert quantized_gib < bf16_gib * 0.35
+        assert quantized_gib < bf16_gib * 0.45
         # Sized for the 12GB tier (config/vram_tiers.yaml), not the 6GB dev tier.
         assert quantized_gib < 6.0
 

@@ -107,11 +107,36 @@ def _params_from_name_or_path(model_path: str) -> int | None:
     return int(value * 1_000_000_000)
 
 
+def _embedding_param_count(config: dict[str, Any] | None, total_params: int) -> int:
+    """Params in the embedding + (untied) lm_head layers.
+
+    AWQ/GPTQ-style weight-only quantization calibrates the matmul weights in
+    attention/MLP blocks; embedding lookups (and, when ``tie_word_embeddings``
+    is false, the separate lm_head projection) are left at full precision.
+    Uniformly applying the quant bytes/param ratio to every parameter misses
+    this — see ``estimate_weight_gib``.
+    """
+    if not config:
+        return 0
+    hidden = int(config.get("hidden_size") or config.get("n_embd") or 0)
+    vocab = int(config.get("vocab_size") or 0)
+    if not hidden or not vocab:
+        return 0
+    multiplier = 1 if config.get("tie_word_embeddings", True) else 2
+    return min(vocab * hidden * multiplier, total_params)
+
+
 def estimate_weight_gib(model_path: str, quantization: str | None = None) -> float:
     """Estimate model weight VRAM from HuggingFace config (GiB).
 
     *quantization* is the ModelEntry.quantization value (e.g. ``"awq"``,
     ``"gptq"``, ``"int8"``); ``None`` assumes unquantized bf16/fp16 weights.
+
+    Quantized estimates split out embedding/lm_head params and price them at
+    bf16 instead of the quant ratio (see ``_embedding_param_count``) — without
+    this split, qwen2.5-7b-awq's estimate (untied embeddings, 152k vocab)
+    undercounted weight VRAM by ~2 GiB and the model failed to load in
+    practice (2026-07-02).
     """
     config = _hf_config_dict(model_path)
     params = _params_from_name_or_path(model_path)
@@ -121,7 +146,16 @@ def estimate_weight_gib(model_path: str, quantization: str | None = None) -> flo
             params = _parameter_count_from_arch(config)
     if not params:
         return _DEFAULT_WEIGHT_GIB
-    return (int(params) * _bytes_per_param(quantization)) / (1024**3)
+    params = int(params)
+
+    bytes_per_param = _bytes_per_param(quantization)
+    if bytes_per_param >= _BYTES_PER_PARAM:
+        return (params * bytes_per_param) / (1024**3)
+
+    embed_params = _embedding_param_count(config, params)
+    quantized_params = params - embed_params
+    total_bytes = quantized_params * bytes_per_param + embed_params * _BYTES_PER_PARAM
+    return total_bytes / (1024**3)
 
 
 def estimate_kv_cache_gib(model_path: str, max_model_len: int) -> float:
@@ -141,6 +175,35 @@ def estimate_kv_cache_gib(model_path: str, max_model_len: int) -> float:
     return bytes_needed / (1024**3)
 
 
+# Extra VRAM margin for architectures with measured overhead the generic
+# weights+KV+runtime estimate doesn't model, keyed by a substring of the
+# model_path/repo id. minicpm5-1b measured 6.55 GiB peak VRAM against a 3.79
+# GiB estimated budget (2026-07-02) with no confirmed root cause (possibly a
+# hybrid/non-standard component vLLM's own profiler doesn't see) — this is a
+# conservative correction to avoid a repeat under-budget failure, not a
+# diagnosed fix. Matched on model_path rather than HF config `model_type`:
+# openbmb/MiniCPM5-1B's config self-reports architectures=["LlamaForCausalLM"]
+# / model_type="llama" for tooling compatibility, so model_type can't
+# distinguish it from a real Llama model.
+_ARCH_OVERHEAD_GIB: dict[str, float] = {
+    "minicpm": 2.8,
+}
+
+
+def _architecture_overhead_gib(model_path: str) -> float:
+    """Conservative extra-VRAM margin for architectures with known-unmodeled overhead."""
+    path_lower = model_path.lower()
+    for name, overhead in _ARCH_OVERHEAD_GIB.items():
+        if name in path_lower:
+            logger.warning(
+                "Model %s has measured VRAM overhead the generic estimator doesn't "
+                "model; applying a conservative +%.1f GiB margin.",
+                model_path, overhead,
+            )
+            return overhead
+    return 0.0
+
+
 def estimate_engine_footprint_gib(
     model_path: str, max_model_len: int, quantization: str | None = None
 ) -> float:
@@ -150,6 +213,7 @@ def estimate_engine_footprint_gib(
         + estimate_kv_cache_gib(model_path, max_model_len)
         + _RUNTIME_HEADROOM_GIB
         + _CUDAGRAPH_OVERHEAD_GIB
+        + _architecture_overhead_gib(model_path)
     )
 
 
