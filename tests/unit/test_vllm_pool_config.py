@@ -248,7 +248,9 @@ def test_two_model_pool_uses_weight_aware_share(fixed_footprints):
     )
 
     assert q_scaled["gpu_memory_utilization"] < t_scaled["gpu_memory_utilization"]
-    assert q_scaled["gpu_memory_utilization"] == pytest.approx(0.175, abs=0.03)
+    # 0.2625, not the pre-DEC-046 0.175 — _multi_engine_overhead_gib's old flat
+    # ~3.35 GiB reservation left less room here than the corrected 0.6 GiB does.
+    assert q_scaled["gpu_memory_utilization"] == pytest.approx(0.2625, abs=0.03)
     assert t_scaled["gpu_memory_utilization"] >= 0.35
     assert q_scaled["max_model_len"] == 2048
 
@@ -321,9 +323,66 @@ def test_validate_pool_fits_allows_small_pair(fixed_footprints):
     validate_pool_fits([_qwen_cfg(), _tiny_cfg()], total_vram_gib=8.0)
 
 
+def test_validate_pool_fits_allows_real_compare_pair_on_8gib(monkeypatch):
+    """Regression for the make playground compare-mode failure (2026-07-03):
+    qwen2.5-0.5b + qwen2.5-1.5b at max_model_len=8192 each (~7.3 GiB combined,
+    comfortably under 8 GiB) was rejected with a *negative* allowed
+    utilization by _apply_sequential_vram_caps. Root cause was
+    _multi_engine_overhead_gib's flat ~3.35 GiB reservation (42% of an 8 GiB
+    card) on top of the next engine's full footprint, never subtracted from
+    the pool-level budget validate_pool_fits() itself already confirmed fit.
+    Live-verified after the fix: both engines load and serve real completions
+    together on an 8 GiB card with ~0.74 GiB still free (DEC-046).
+
+    Configs are real HF values (hidden_size/vocab_size/num_hidden_layers) for
+    Qwen2.5-0.5B/1.5B-Instruct, mocked to avoid a network/cache dependency.
+    """
+    pool._hf_config_dict.cache_clear()
+    configs = {
+        "Qwen/Qwen2.5-0.5B-Instruct": {
+            "hidden_size": 896,
+            "num_hidden_layers": 24,
+            "vocab_size": 151936,
+            "intermediate_size": 4864,
+            "tie_word_embeddings": True,
+        },
+        "Qwen/Qwen2.5-1.5B-Instruct": {
+            "hidden_size": 1536,
+            "num_hidden_layers": 28,
+            "vocab_size": 151936,
+            "intermediate_size": 8960,
+            "tie_word_embeddings": True,
+        },
+    }
+    monkeypatch.setattr(pool, "_hf_config_dict", lambda path: configs.get(path))
+
+    validate_pool_fits(
+        [
+            {"name": "qwen2.5-0.5b", "model_path": "Qwen/Qwen2.5-0.5B-Instruct", "max_model_len": 8192},
+            {"name": "qwen2.5-1.5b", "model_path": "Qwen/Qwen2.5-1.5B-Instruct", "max_model_len": 8192},
+        ],
+        total_vram_gib=8.0,
+    )
+
+
 def test_validate_pool_fits_rejects_dual_model_on_6gb(fixed_footprints):
+    """qwen2.5-0.5b + llama3-8b: llama3-8b alone (15 GiB mocked) can't fit any
+    pool on a 6 GiB card regardless of overhead calibration — unlike
+    qwen2.5-0.5b + tinyllama-chat, which _multi_engine_overhead_gib's old
+    flat ~3.35 GiB reservation wrongly rejected on 8 GiB (see DEC-046) and,
+    it turns out, would have wrongly rejected here too."""
     with pytest.raises(ValueError, match="need ~|cannot load sequentially"):
-        validate_pool_fits([_qwen_cfg(), _tiny_cfg()], total_vram_gib=6.0)
+        validate_pool_fits(
+            [
+                _qwen_cfg(),
+                {
+                    "name": "llama3-8b",
+                    "model_path": "meta-llama/Meta-Llama-3-8B-Instruct",
+                    "max_model_len": 4096,
+                },
+            ],
+            total_vram_gib=6.0,
+        )
 
 
 # ---------------------------------------------------------------------------

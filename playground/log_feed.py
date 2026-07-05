@@ -37,6 +37,25 @@ _VLLM_RE = re.compile(
 )
 
 
+_ERROR_SUMMARY_MAX_LEN = 280
+
+
+def _truncate_gracefully(text: str, max_len: int = _ERROR_SUMMARY_MAX_LEN) -> str:
+    """Truncate at a word boundary with an ellipsis, never mid-word/mid-number.
+
+    A hard [:max_len] slice can cut a sentence off right before its most
+    useful part (e.g. the actionable "try X instead" clause at the end) —
+    this is what made a real `make playground` VRAM error read as "...capped
+    at" with nothing after it (2026-07-03, DEC-046).
+    """
+    if len(text) <= max_len:
+        return text
+    cut = text.rfind(" ", 0, max_len)
+    if cut <= 0:
+        cut = max_len
+    return text[:cut].rstrip(" ,.;:") + "…"
+
+
 def _shorten_logger_message(message: str, *, max_len: int = 66) -> str | None:
     """Map known inference_x / uvicorn messages to short feed lines."""
     if message.startswith("Started server process"):
@@ -187,7 +206,7 @@ def extract_error_summary(log_path: Path = DEFAULT_LOG_PATH, *, tail_lines: int 
             _, _, message = rest.partition(": ")
             msg = message or rest
             if "Startup initialization failed:" in msg:
-                return msg.split("Startup initialization failed:", 1)[-1].strip()[:200]
+                return _truncate_gracefully(msg.split("Startup initialization failed:", 1)[-1].strip())
 
     for line in reversed(tail):
         structured = _STRUCTURED_RE.match(line.strip())
@@ -195,20 +214,18 @@ def extract_error_summary(log_path: Path = DEFAULT_LOG_PATH, *, tail_lines: int 
             rest = structured.group(2)
             _, _, message = rest.partition(": ")
             msg = message or rest
-            short = _shorten_logger_message(msg, max_len=200)
-            if short:
-                return short[:200]
-            return msg[:200]
+            short = _shorten_logger_message(msg, max_len=_ERROR_SUMMARY_MAX_LEN)
+            return _truncate_gracefully(short or msg)
 
     for line in reversed(tail):
         stripped = line.strip()
         if "RuntimeError:" in stripped:
-            return stripped.split("RuntimeError:", 1)[-1].strip()[:200]
+            return _truncate_gracefully(stripped.split("RuntimeError:", 1)[-1].strip())
         if "ValueError:" in stripped:
-            return stripped.split("ValueError:", 1)[-1].strip()[:200]
+            return _truncate_gracefully(stripped.split("ValueError:", 1)[-1].strip())
         if "Insufficient GPU memory" in stripped:
             idx = stripped.find("Insufficient GPU memory")
-            return stripped[idx:][:200]
+            return _truncate_gracefully(stripped[idx:])
 
     for line in reversed(tail):
         stripped = line.strip()
@@ -216,17 +233,15 @@ def extract_error_summary(log_path: Path = DEFAULT_LOG_PATH, *, tail_lines: int 
         if vllm:
             level, msg = vllm.group(1), vllm.group(2)
             if level == "ERROR" or any(p in msg for p in _vllm_failure_patterns):
-                short = _shorten_vllm_message(msg, max_len=200)
+                short = _shorten_vllm_message(msg, max_len=_ERROR_SUMMARY_MAX_LEN)
                 if short:
-                    return short[:200]
+                    return _truncate_gracefully(short)
                 if "ValueError:" in msg:
-                    return msg.split("ValueError:", 1)[-1].strip()[:200]
-                return msg[:200]
+                    return _truncate_gracefully(msg.split("ValueError:", 1)[-1].strip())
+                return _truncate_gracefully(msg)
         if any(p in stripped for p in _vllm_failure_patterns):
-            short = _shorten_vllm_message(stripped, max_len=200)
-            if short:
-                return short[:200]
-            return stripped[:200]
+            short = _shorten_vllm_message(stripped, max_len=_ERROR_SUMMARY_MAX_LEN)
+            return _truncate_gracefully(short or stripped)
 
     last_structured_info: str | None = None
     for line in tail:

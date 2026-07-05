@@ -30,6 +30,7 @@ except ImportError:
     from playground.scroll_utils import scroll_to_end
 
 from textual.app import App, ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Input, Label, Markdown, Rule, Static
 
@@ -227,7 +228,13 @@ class InferenceXApp(App[None]):
 
     CSS_PATH = Path(__file__).with_name("app.css")
     BINDINGS = [
-        ("ctrl+c", "quit", "Quit"),
+        # priority=True: Textual's Screen/ModalScreen classes claim plain ctrl+c for
+        # copy_text, which silently shadows a non-priority app-level binding for the
+        # same key whenever any screen (e.g. LoadingScreen) is pushed on top. Priority
+        # bindings are checked app-wide before the focus-chain walk, so this is the only
+        # way ctrl+c reliably quits regardless of what's on screen (matches how Textual's
+        # own ctrl+q binding works).
+        Binding("ctrl+c", "quit", "Quit", priority=True),
         ("q", "quit", "Quit"),
         ("ctrl+l", "clear_responses", "Clear"),
         ("f1", "toggle_help", "Help"),

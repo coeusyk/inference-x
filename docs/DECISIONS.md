@@ -892,3 +892,74 @@ Use this document to capture non-obvious design decisions as the project evolves
   if the real cause scales with `max_model_len` or concurrency rather than being fixed,
   it will need revisiting. No change to compare-mode splitting, `gpu_memory_utilization`
   auto logic's call sites, or the benchmark result schema.
+
+### DEC-046
+- Date: 2026-07-03
+- Status: accepted
+- Context: `make playground` with a real compare pair (qwen2.5-0.5b + qwen2.5-1.5b, both
+  ungated, dense bf16, comfortably under 8 GiB combined) failed startup with "Models
+  [qwen2.5-0.5b, qwen2.5-1.5b] cannot load sequentially on a 8 GiB GPU: Model
+  qwen2.5-0.5b cannot fit in the remaining GPU memory for this pool. Need
+  gpu_memory_utilization >= 0.116 but capped at -0.032." Two further, unrelated problems
+  surfaced from the same report: (1) the failure banner's message was truncated
+  mid-sentence ("...capped at" with nothing after), hiding the actionable
+  "Load fewer models..." clause; (2) neither ctrl+c nor any other key could dismiss the
+  failed loading screen or quit the app.
+- Root causes:
+  1. **Sequential VRAM cap double-reservation.** `validate_pool_fits()`'s own two
+     pool-level aggregate checks (sum of footprints vs. `_POOL_GPU_HEADROOM`, both using
+     an 8% total-VRAM safety margin) already confirmed this pair fits (needs ~7.29 GiB of
+     a 7.36 GiB budget). But its third check, `_apply_sequential_vram_caps()`, separately
+     reserved `_multi_engine_overhead_gib()` — `min(3.35, total_vram_gib * 0.42)`, a flat
+     ~3.35 GiB (42% of an 8 GiB card) for any GPU ≳8 GiB regardless of pool size — *on
+     top of* the next engine's full footprint (which already includes its own 0.8 GiB
+     runtime/CUDA-graph overhead). 3.35 + 4.91 GiB (qwen2.5-1.5b's own footprint) alone
+     exceeds 8 GiB, before the first engine claims anything, producing a negative allowed
+     utilization. This constant was never validated against a real model pair on real
+     hardware — the only unit test exercising this branch used mocked footprints small
+     enough to never trigger it.
+  2. **ctrl+c shadowed by Textual's own screen-level binding.** Textual 8.x's
+     `Screen`/`ModalScreen` base classes claim plain `ctrl+c` for `copy_text` (and the
+     base `App` class separately binds it to `action_help_quit`, a "press ctrl+q instead"
+     notification) — both non-priority. `InferenceXApp`'s own `("ctrl+c", "quit", "Quit")`
+     binding was also non-priority, so whenever any screen was pushed (e.g. `LoadingScreen`
+     for a normal load, not just a failure), the screen-level binding won the focus-chain
+     walk before the app's own binding was ever consulted. Confirmed via `App.run_test()`
+     (Pilot): simulating `ctrl+c` left `app.is_running is True`.
+  3. **Error truncation cut mid-sentence.** `playground/log_feed.py`'s
+     `extract_error_summary()` had ~9 separate `[:200]` hard slices; the real
+     `validate_pool_fits` message here is 255 characters, so the slice landed inside
+     "...capped at -0.032. Load fewer models...", cutting off exactly the useful
+     trailing sentence.
+- Decision:
+  1. Recalibrated `_multi_engine_overhead_gib()` from `min(3.35, total_vram_gib * 0.42)`
+     to a flat `0.6` GiB constant. The old signature took `total_vram_gib` and its
+     docstring claimed the reservation "scales with GPU size," but the `* 0.42` branch
+     only wins below ~8 GiB — every real GPU (6/8/12/24 GiB tiers) got the identical flat
+     3.35 GiB regardless, so the "scaling" was dead weight; simplified to what the
+     function actually computed. Live-verified on an 8 GiB dev box: both qwen2.5-0.5b and
+     qwen2.5-1.5b load and serve real chat completions together, ~0.74 GiB still free.
+     Only verified for a 2-engine pool. Two existing unit
+     tests that had encoded the old, unvalidated constant's behavior were corrected:
+     `test_two_model_pool_uses_weight_aware_share` (expected utilization recalculated,
+     0.175 → 0.2625) and `test_validate_pool_fits_rejects_dual_model_on_6gb` (swapped its
+     qwen+tinyllama pair — which the corrected math now also allows — for the existing
+     qwen+llama3-8b "genuinely too big" pair, preserving the test's intent of rejecting
+     infeasible pools on a small GPU). Added
+     `test_validate_pool_fits_allows_real_compare_pair_on_8gib`, a direct regression test
+     with real Qwen2.5-0.5B/1.5B HF config values (mocked, no network dependency).
+  2. `InferenceXApp.BINDINGS` and `ChatApp.BINDINGS` (`playground/app.py`,
+     `playground/chat.py`) both mark their `ctrl+c` → quit binding `priority=True` —
+     Textual checks priority bindings app-wide before the focus-chain walk, which is also
+     why `ctrl+q` already worked reliably. Verified with a Pilot-driven regression test
+     (`test_ctrl_c_quits_even_with_failed_loading_screen_on_top`) that fails without the
+     fix (confirmed by reverting it and re-running) and passes with it.
+  3. Added `_truncate_gracefully()` to `log_feed.py`: truncates at the last word boundary
+     before the limit (raised 200 → 280) with an ellipsis, instead of an arbitrary
+     mid-word/mid-sentence cut. All ~9 call sites in `extract_error_summary()` route
+     through it. Added `test_extract_error_summary_does_not_cut_off_mid_sentence`.
+- Consequences: 430/430 unit tests pass. No change to compare-mode splitting logic itself,
+  the benchmark result schema, or `AdmissionController`. The `0.6` GiB multi-engine
+  overhead figure, like DEC-045's `minicpm: 2.8` GiB, is empirically fitted from one
+  verified hardware scenario, not derived from a documented mechanism — revisit if a
+  3+-engine compare pool is added.

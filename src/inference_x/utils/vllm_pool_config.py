@@ -18,6 +18,7 @@ _CUDAGRAPH_OVERHEAD_GIB = 0.45  # vLLM 0.21+ CUDA graph memory profiling reserve
 _FREE_VRAM_SAFETY = 0.98
 _DEFAULT_WEIGHT_GIB = 1.5
 _DEFAULT_KV_GIB = 0.4
+_MULTI_ENGINE_OVERHEAD_GIB = 0.6  # non-utilization VRAM per engine transition; see _apply_sequential_vram_caps
 
 # Approximate on-GPU bytes/param by quantization scheme, matched against
 # ModelEntry.quantization (vLLM's own quant method string, lowercased).
@@ -238,9 +239,24 @@ def _weights_only_utilization(
     return estimate_weight_gib(model_path, quantization) / total_vram_gib
 
 
-def _multi_engine_overhead_gib(total_vram_gib: float) -> float:
-    """VRAM held outside utilization fractions; scales with GPU size."""
-    return min(3.35, total_vram_gib * 0.42)
+def _multi_engine_overhead_gib() -> float:
+    """VRAM held outside utilization fractions during a sequential engine transition.
+
+    Was ``min(3.35, total_vram_gib * 0.42)`` — despite the "scales with GPU
+    size" docstring, the 0.42 branch only wins below ~8 GiB total VRAM, so
+    every actual GPU (6/8/12/24 GiB tiers) got the same flat 3.35 GiB anyway.
+    That flat reservation, on top of the *next* engine's own full footprint,
+    made qwen2.5-0.5b + qwen2.5-1.5b (a real `make playground` compare pair
+    needing only ~7.3 GiB combined on an 8 GiB card) fail sequential-cap
+    validation with a *negative* allowed utilization — even though
+    validate_pool_fits()'s own pool-level aggregate checks, earlier in the
+    same call, already confirmed the pair fits. Recalibrated to a flat 0.6
+    GiB (what the formula actually was for any real GPU) after live-verifying
+    both engines load and serve real completions together on an 8 GiB card,
+    with ~0.74 GiB still free (2026-07-03). Only verified for a 2-engine
+    pool — revisit if a 3+-engine compare pool is added.
+    """
+    return _MULTI_ENGINE_OVERHEAD_GIB
 
 
 def _user_util_cap(config: dict[str, Any]) -> float | None:
@@ -319,7 +335,7 @@ def _apply_sequential_vram_caps(
             )
             for c in remaining
         )
-        overhead = _multi_engine_overhead_gib(total_vram_gib)
+        overhead = _multi_engine_overhead_gib()
         max_current = 1.0 - (overhead / total_vram_gib) - max_next_util
         capped = min(capped, max_current)
 
