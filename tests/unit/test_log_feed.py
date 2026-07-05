@@ -98,6 +98,28 @@ def test_extract_error_summary_fallback_message(tmp_path: Path):
     assert summary == "Startup failed — see logs/playground-server.log for details"
 
 
+def test_extract_error_summary_does_not_cut_off_mid_sentence(tmp_path: Path):
+    """Regression for a real make playground failure (2026-07-03): a
+    validate_pool_fits ValueError long enough to exceed the old hard [:200]
+    slice got cut off mid-sentence ("...capped at" with nothing after),
+    hiding the actionable "Load fewer models..." clause at the end."""
+    long_message = (
+        "Models [qwen2.5-0.5b, qwen2.5-1.5b] cannot load sequentially on a 8 GiB GPU: "
+        "Model qwen2.5-0.5b cannot fit in the remaining GPU memory for this pool. "
+        "Need gpu_memory_utilization >= 0.116 but capped at -0.032. Load fewer models "
+        "or use a GPU with more VRAM."
+    )
+    log = tmp_path / "server.log"
+    log.write_text(
+        f"2026-07-03 08:00:04 [CRITICAL] inference_x.api.main: "
+        f"Startup initialization failed: {long_message}\n",
+        encoding="utf-8",
+    )
+    summary = lf.extract_error_summary(log)
+    assert summary.endswith("Load fewer models or use a GPU with more VRAM.")
+    assert not summary.endswith("capped at")
+
+
 def test_extract_error_summary_timeout_on_loading_weights(tmp_path: Path):
     log = tmp_path / "server.log"
     log.write_text(

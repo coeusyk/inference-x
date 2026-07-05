@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import os
 import subprocess
-from functools import lru_cache
 from typing import Optional
 
 from inference_x.benchmarks.schemas import HardwareProfile
@@ -129,20 +128,33 @@ def _vram_for_utilization() -> tuple[float, float, str]:
     return 0.0, 0.0, "none"
 
 
-@lru_cache(maxsize=1)
-def suggest_gpu_memory_utilization() -> float:
+def suggest_gpu_memory_utilization(
+    *,
+    model_count: int = 1,
+    free_gib: float | None = None,
+    total_gib: float | None = None,
+) -> float:
     """
     Compute gpu_memory_utilization as (free_vram - buffer) / total_vram.
 
-    vLLM treats utilization as a fraction of total VRAM, so deriving the fraction
-    from free VRAM ensures the allocation stays within what is actually available.
-    Uses torch.cuda.mem_get_info when available (same view as vLLM); falls back to
-    nvidia-smi/nvml. Clamped to [0.50, 0.95]. Cached for the process lifetime.
+    For multi-model sessions, callers should pass ``model_count=1`` and re-sample
+    ``free_gib`` at each engine load (see ``scale_model_config_for_pool``).
+    The ``model_count > 1`` branch evenly splits the budget for legacy callers only::
+
+        ((free - buffer) / model_count) / total
+
+    vLLM treats utilization as a fraction of total VRAM. Uses torch.cuda.mem_get_info
+    when *free_gib* / *total_gib* are omitted (re-queried on every call).
     """
     buffer = float(os.getenv("INFERENCEX_VRAM_SAFETY_BUFFER_GB", "0.4"))
-    free_gib, total_gib, source = _vram_for_utilization()
-    if source == "none":
-        return 1.0
-    usable_gb = free_gib - buffer
+    if free_gib is None or total_gib is None:
+        free_gib, total_gib, source = _vram_for_utilization()
+        if source == "none":
+            return 1.0
+    usable_gb = max(0.0, free_gib - buffer)
+    if model_count > 1:
+        usable_gb = usable_gb / model_count
     utilization = usable_gb / total_gib
-    return round(max(0.50, min(0.95, utilization)), 2)
+    if model_count <= 1:
+        return round(max(0.50, min(0.95, utilization)), 2)
+    return round(max(0.0, min(0.95, utilization)), 2)

@@ -1,12 +1,35 @@
 models:
   # gpu_memory_utilization: auto — (vram_free - buffer) / vram_total at startup (DEC-035).
   # max_model_len caps KV cache pre-allocation for lean local inference.
+  #
+  # 8 GiB WSL2 ceiling (bf16, max_model_len 8192): dense models up to ~2B benchmarked
+  # working reliably (qwen1.5-1.8b: 73.6 tok/s, 5.71 GiB peak VRAM delta, 2026-07-02,
+  # after the auto-sizing fix below). 3B+ dense bf16 or 7B+ needs more VRAM or quantization.
+  #
+  # qwen2.5-7b-bf16 / qwen2.5-7b-awq below share family: qwen2.5-7b — same logical
+  # model at two precisions, grouped for routing/variant_selector.py's load-time
+  # selection (add-model-variant-routing). Setting INFERENCE_X_LOADED_MODELS=qwen2.5-7b
+  # picks whichever variant's estimated weight size fits the resolved VRAM tier's
+  # budget (bf16 preferred, falling back to awq). Neither is part of
+  # INFERENCE_X_LOADED_MODELS by default. qwen2.5-7b-bf16 needs ~13 GiB weights alone,
+  # doesn't fit 8 GiB. qwen2.5-7b-awq initially FAILED to load in practice (2026-07-02):
+  # estimate_weight_gib() applied the AWQ quant ratio uniformly to all parameters, but
+  # AWQ leaves the embedding + lm_head layers unquantized (fp16) — Qwen2.5-7B has untied
+  # embeddings (tie_word_embeddings=False) and a 152k vocab, so those two layers alone
+  # are ~1.1B unquantized params (~2 GiB) the estimate missed (5.29 GiB actual vs. ~3.6
+  # GiB estimated). Fixed in utils/vllm_pool_config.py: estimate_weight_gib() now prices
+  # embedding/lm_head params at bf16 separately from the rest. Not yet re-validated with
+  # a live load on this hardware — re-run the qwen2.5-7b-awq benchmark to confirm before
+  # relying on it for an 8 GiB budget.
 
   - name: opt-125m
     engine: vllm
     model_path: facebook/opt-125m
     gpu_memory_utilization: auto
-    max_model_len: 8192
+    max_model_len: 2048
+    max_completion_tokens: 256
+    instruction_tuned: false
+    repetition_penalty: 1.15
 
   - name: qwen2.5-0.5b
     engine: vllm
@@ -18,7 +41,7 @@ models:
     engine: vllm
     model_path: TinyLlama/TinyLlama-1.1B-Chat-v1.0
     gpu_memory_utilization: auto
-    max_model_len: 8192
+    max_model_len: 2048
 
   - name: qwen2.5-1.5b
     engine: vllm
@@ -26,10 +49,29 @@ models:
     gpu_memory_utilization: auto
     max_model_len: 8192
 
-  # fp16 weights ~16 GB — needs quantization on 8 GB GPUs (separate issue)
-  - name: llama3-8b
+  - name: minicpm5-1b
     engine: vllm
-    model_path: meta-llama/Meta-Llama-3-8B-Instruct
+    model_path: openbmb/MiniCPM5-1B
+    gpu_memory_utilization: auto
+    max_model_len: 8192
+
+  - name: qwen1.5-1.8b
+    engine: vllm
+    model_path: Qwen/Qwen1.5-1.8B-Chat
+    gpu_memory_utilization: auto
+    max_model_len: 8192
+
+  - name: qwen2.5-7b-bf16
+    engine: vllm
+    model_path: Qwen/Qwen2.5-7B-Instruct
+    family: qwen2.5-7b
     gpu_memory_utilization: auto
     max_model_len: 4096
-    gated: true
+
+  - name: qwen2.5-7b-awq
+    engine: vllm
+    model_path: Qwen/Qwen2.5-7B-Instruct-AWQ
+    quantization: awq
+    family: qwen2.5-7b
+    gpu_memory_utilization: auto
+    max_model_len: 4096

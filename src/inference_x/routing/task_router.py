@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-from inference_x.routing.base import BaseRouter
 from inference_x.routing.policies import DefaultModelPolicy, ExplicitModelPolicy
 from inference_x.schemas.chat import ChatCompletionRequest
 from inference_x.services.model_service import ModelRegistry
 
 
-class TaskRouter(BaseRouter):
+class TaskRouter:
     """Default router for Phase 2.
 
     Selection order:

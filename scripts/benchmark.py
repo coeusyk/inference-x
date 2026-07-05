@@ -9,7 +9,7 @@ or:
 
 Usage:
     uv run python scripts/benchmark.py --model qwen2.5-0.5b
-    uv run python scripts/benchmark.py --model qwen2.5-0.5b --output-dir docs/benchmarks
+    uv run python scripts/benchmark.py --model qwen2.5-0.5b --output-dir benchmarks/results
     make benchmark MODEL=qwen2.5-0.5b
 """
 from __future__ import annotations
@@ -33,6 +33,17 @@ def _check_server_reachable(base_url: str) -> bool:
             return resp.status_code == 200
     except (httpx.ConnectError, httpx.TimeoutException):
         return False
+
+
+def _check_model_loaded(base_url: str, model: str) -> tuple[bool, list[str]]:
+    try:
+        with httpx.Client(timeout=5.0) as client:
+            resp = client.get(f"{base_url}/health")
+            resp.raise_for_status()
+            loaded = resp.json().get("loaded_models") or []
+            return model in loaded, loaded
+    except (httpx.ConnectError, httpx.TimeoutException, httpx.HTTPError):
+        return False, []
 
 
 def main() -> None:
@@ -59,8 +70,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--output-dir",
-        default="docs/benchmarks",
-        help="Directory to save result JSON (default: docs/benchmarks)",
+        default="benchmarks/results",
+        help="Directory to save result JSON (default: benchmarks/results)",
     )
     args = parser.parse_args()
 
@@ -73,6 +84,20 @@ def main() -> None:
             "  INFERENCE_X_LOADED_MODELS=<model> ./scripts/dev.sh serve\n"
             "or:\n"
             "  make playground",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    loaded_ok, loaded_models = _check_model_loaded(base_url, args.model)
+    if not loaded_ok:
+        loaded_str = loaded_models[0] if len(loaded_models) == 1 else str(loaded_models)
+        print(
+            f"Error: Model '{args.model}' is not loaded on the server.\n"
+            f"Server has loaded: {loaded_str}\n"
+            f"Restart with:\n"
+            f"  INFERENCE_X_DEFAULT_MODEL={args.model} ./scripts/dev.sh serve\n"
+            f"or:\n"
+            f"  INFERENCE_X_LOADED_MODELS={args.model} ./scripts/dev.sh serve",
             file=sys.stderr,
         )
         sys.exit(1)

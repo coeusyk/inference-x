@@ -11,10 +11,42 @@ class ModelEntry(BaseModel):
     name: str
     engine: Literal["vllm"] = "vllm"
     model_path: str
+    family: Optional[str] = Field(
+        default=None,
+        description=(
+            "Groups variants of the same logical model (e.g. bf16/int8/awq of "
+            "qwen2.5-7b) for load-time selection via routing/variant_selector.py. "
+            "Entries with no family are their own family of one."
+        ),
+    )
     gpu_memory_utilization: Optional[float | Literal["auto"]] = "auto"
     max_model_len: Optional[int] = Field(default=None, ge=1)
+    max_num_seqs: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="vLLM concurrent sequence cap (lower for hybrid/Mamba models on tight VRAM)",
+    )
+    max_num_batched_tokens: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description=(
+            "vLLM per-step token budget override; clamped to the resolved VRAM "
+            "tier's ceiling by apply_tier_knobs(), never looser"
+        ),
+    )
     quantization: Optional[str] = None
     gated: bool = False
+    instruction_tuned: bool = True
+    max_completion_tokens: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="Per-request generation cap; overrides client max_tokens when set",
+    )
+    repetition_penalty: Optional[float] = Field(
+        default=None,
+        gt=0.0,
+        description="vLLM repetition_penalty; applied when instruction_tuned is false",
+    )
 
     @field_validator("gpu_memory_utilization")
     @classmethod
@@ -41,3 +73,6 @@ class ModelObject(BaseModel):
     id: str
     object: Literal["model"] = "model"
     owned_by: str = "inferencex"
+    quantization: Optional[str] = None
+    max_model_len: Optional[int] = None
+    estimated_weights_gib: Optional[float] = None

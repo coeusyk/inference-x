@@ -7,7 +7,7 @@ from pathlib import Path
 
 from inference_x.benchmarks.schemas import BenchmarkResult
 
-_FILENAME_RE = re.compile(r"^results-(.+)-(\d{4}-\d{2}-\d{2}T[\d\-:+Z.]+)\.json$")
+DEFAULT_RESULTS_DIR = "benchmarks/results"
 
 
 class ResultStore:
@@ -16,7 +16,7 @@ class ResultStore:
     def save(
         self,
         result: BenchmarkResult,
-        output_dir: str = "docs/benchmarks",
+        output_dir: str = DEFAULT_RESULTS_DIR,
     ) -> Path:
         """Serialize *result* to a timestamped JSON file and return its path."""
         out = Path(output_dir)
@@ -33,7 +33,7 @@ class ResultStore:
         )
         return path
 
-    def all_results(self, output_dir: str = "docs/benchmarks") -> list[BenchmarkResult]:
+    def all_results(self, output_dir: str = DEFAULT_RESULTS_DIR) -> list[BenchmarkResult]:
         """Return all BenchmarkResult objects found in *output_dir*."""
         out = Path(output_dir)
         if not out.exists():
@@ -48,7 +48,7 @@ class ResultStore:
         return results
 
     def latest_per_model(
-        self, output_dir: str = "docs/benchmarks"
+        self, output_dir: str = DEFAULT_RESULTS_DIR
     ) -> dict[str, BenchmarkResult]:
         """Return the most recent BenchmarkResult for each model name."""
         all_r = self.all_results(output_dir)

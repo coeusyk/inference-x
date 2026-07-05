@@ -118,9 +118,7 @@ class TestModelAdvisorRanking:
         rec = ranked[0].recommendation_str
         assert "qwen" in rec
         assert "tok/s" in rec
-        assert "footprint" in rec
-        assert "×" in rec
-        assert "required" in rec
+        assert "GB VRAM" in rec
 
     def test_recommendation_str_not_viable_format(self):
         results = [
@@ -146,7 +144,7 @@ class TestModelAdvisorRanking:
             _make_result("qwen-small", throughput=50.0, ttft_ms=80.0, peak_vram_delta_gb=1.2),
         ]
         advisor = ModelAdvisor()
-        ranked = _rank(advisor, _hw(vram_free=6.0, vram_total=8.0), results)
+        ranked = _rank(advisor, _hw(vram_free=4.0, vram_total=6.0), results)
         llama = next(r for r in ranked if r.model_name == "llama-8b")
         qwen = next(r for r in ranked if r.model_name == "qwen-small")
         assert llama.viable is False
@@ -162,28 +160,57 @@ class TestModelAdvisorRanking:
         for r in ranked:
             assert 0.0 <= r.score <= 100.0
 
-
-class TestColdStartMargin:
-    def test_marginal_footprint_not_viable_with_margin(self):
-        """3.0 GB warm footprint × 1.20 = 3.6 GB > 3.3 GB free — must not pass gate."""
+    def test_warm_ttft_skips_cold_start_prompt(self):
+        cold = PromptResult(
+            prompt_label="q1",
+            tokens_generated=20,
+            ttft_ms=1456.0,
+            total_latency_ms=2000.0,
+            tokens_per_sec=10.0,
+        )
+        warm = PromptResult(
+            prompt_label="q2",
+            tokens_generated=20,
+            ttft_ms=13.0,
+            total_latency_ms=800.0,
+            tokens_per_sec=40.0,
+        )
         results = [
-            _make_result("marginal", throughput=40.0, ttft_ms=100.0, peak_vram_delta_gb=3.0),
+            BenchmarkResult(
+                model_name="qwen",
+                suite_version="test",
+                timestamp="2026-06-08T12:00:00+00:00",
+                mean_throughput_tps=40.0,
+                peak_vram_delta_gb=1.0,
+                prompt_results=[cold, warm],
+            ),
+        ]
+        advisor = ModelAdvisor()
+        ranked = _rank(advisor, _hw(vram_free=6.0, vram_total=8.0), results)
+        assert ranked[0].ttft_ms == 13.0
+
+
+class TestVramSafetyBuffer:
+    def test_marginal_footprint_not_viable_with_buffer(self):
+        """5.6 GB footprint + 0.5 GB buffer = 6.1 GB > 6.0 GB total — must not pass gate."""
+        results = [
+            _make_result("marginal", throughput=40.0, ttft_ms=100.0, peak_vram_delta_gb=5.6),
         ]
         advisor = ModelAdvisor()
         ranked = _rank(advisor, _hw(vram_free=3.3, vram_total=6.0), results)
         assert ranked[0].viable is False
         assert ranked[0].score == 0.0
-        assert "3.00 GB footprint × 1.20 = 3.60 GB required" in ranked[0].recommendation_str
+        assert "5.60 GB + 0.5 GB buffer = 6.10 GB" in ranked[0].recommendation_str
 
-    def test_cold_start_margin_env_override(self, monkeypatch):
-        monkeypatch.setenv("INFERENCEX_COLD_START_MARGIN", "1.5")
+    def test_footprint_within_total_is_viable(self):
+        """5.38 GB footprint + 0.5 GB buffer = 5.88 GB <= 6.0 GB total — must pass gate."""
         results = [
-            _make_result("tight", throughput=30.0, ttft_ms=100.0, peak_vram_delta_gb=2.0),
+            _make_result("qwen", throughput=40.0, ttft_ms=13.0, peak_vram_delta_gb=5.38),
         ]
         advisor = ModelAdvisor()
-        ranked = _rank(advisor, _hw(vram_free=3.0, vram_total=6.0), results)
-        assert ranked[0].viable is False
-        assert "× 1.50 = 3.00 GB required" in ranked[0].recommendation_str
+        ranked = _rank(advisor, _hw(vram_free=0.5, vram_total=6.0), results)
+        assert ranked[0].viable is True
+        assert ranked[0].score > 0.0
 
 
 class TestModelAdvisorHardware:
@@ -220,6 +247,24 @@ class TestModelAdvisorHardware:
         assert len(report.ranked) == 1
         assert report.ranked[0].model_name == "small-model"
         assert not any("Skipped" in w for w in report.warnings)
+
+    def test_rejects_substring_gpu_name_match(self, make_hardware):
+        """RTX 3060 benchmark must not match RTX 3060 Ti (different GPU)."""
+        rtx3060 = make_hardware(gpu_name="RTX 3060", vram_total_gb=6.0, vram_free_gb=4.9)
+        rtx3060ti = make_hardware(gpu_name="RTX 3060 Ti", vram_total_gb=8.0, vram_free_gb=6.0)
+        results = [
+            _make_result(
+                "cached-model",
+                throughput=40.0,
+                ttft_ms=100.0,
+                peak_vram_delta_gb=2.0,
+                hardware=rtx3060,
+            ),
+        ]
+        advisor = ModelAdvisor()
+        report = advisor.rank(rtx3060ti, results)
+        assert report.ranked == []
+        assert any("Skipped cached-model" in w for w in report.warnings)
 
     def test_legacy_result_without_hardware_warns_but_ranks(self):
         results = [

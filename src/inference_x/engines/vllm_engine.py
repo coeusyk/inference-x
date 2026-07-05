@@ -3,13 +3,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import queue
+import re
 import threading
-import uuid
 from collections.abc import AsyncGenerator
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from typing import Any
 
 from inference_x.engines.base import BaseEngine
+from inference_x.engines.driver import EngineDriver, EngineDriverDeadError
 from inference_x.utils.cuda_env import ensure_vllm_runtime_env
 from inference_x.utils.vllm_pool_config import scale_model_config_for_pool
 from inference_x.schemas.chat import (
@@ -23,6 +24,12 @@ from inference_x.schemas.chat import (
 logger = logging.getLogger(__name__)
 
 _VLLM_AVAILABLE: bool | None = None
+# Serialize llm_engine.step() across engines in one process (vLLM V1 forward context).
+# Each engine's EngineDriver acquires this same lock around its step() calls when
+# pool_size > 1 — giving a driver its own private lock instead would silently
+# reintroduce the cross-engine race this was added to prevent.
+_POOL_STEP_LOCK = threading.Lock()
+_COMPLETION_TIMEOUT_S = 300.0  # safety net against a wedged driver thread/queue stall
 
 
 def _probe_cuda_vram() -> dict[str, float | bool]:
@@ -76,7 +83,7 @@ def _check_vram_budget(
 _GATED_REPO_HINT = (
     "Request access on HuggingFace, then authenticate:\n"
     "  1. Visit the model page and accept the license\n"
-    "  2. uv run huggingface-cli login\n"
+    "  2. uv run hf auth login\n"
     "  3. Or export HF_TOKEN=<your-token> before starting the server"
 )
 
@@ -203,9 +210,24 @@ def _map_vllm_init_error(model_name: str, model_path: str, exc: Exception) -> Ru
             "lower max_model_len (e.g. 2048) in config/models.yaml. "
             "Stop other GPU processes (nvidia-smi) before retrying."
         )
+    if "mamba cache blocks" in lower or "max_num_seqs" in lower:
+        return RuntimeError(
+            f"GPU memory insufficient for Mamba/state cache loading {model_name}. "
+            "Hybrid models (e.g. Qwen3.5) need more VRAM headroom than dense models. "
+            "Set max_num_seqs (e.g. 64) and/or lower max_model_len in config/models.yaml, "
+            "or raise gpu_memory_utilization."
+        )
     if "not found" in lower:
         return RuntimeError(
             f"Model not found: {model_path}. Check model_path in config/models.yaml."
+        )
+    if "greater than the derived max_model_len" in lower:
+        limit_match = re.search(r"derived max_model_len \(max_position_embeddings=([\d.]+)", msg)
+        limit_hint = limit_match.group(1).rstrip(".0") if limit_match else "the model limit"
+        return RuntimeError(
+            f"max_model_len in config/models.yaml for {model_name} exceeds the "
+            f"model's position limit ({limit_hint}). Lower max_model_len for "
+            f"{model_name} in config/models.yaml."
         )
     if "nvcc" in lower or "cuda_home" in lower:
         return RuntimeError(
@@ -265,6 +287,7 @@ class VLLMEngine(BaseEngine):
         engine_index: int = 0,
         free_vram_gib: float | None = None,
         total_vram_gib: float | None = None,
+        session_free_vram_gib: float | None = None,
     ) -> None:
         _load_vllm()
         if not _VLLM_AVAILABLE:
@@ -281,6 +304,7 @@ class VLLMEngine(BaseEngine):
             engine_index=engine_index,
             free_vram_gib=free_vram_gib,
             total_vram_gib=total_vram_gib or _probe_cuda_vram().get("total_gib") or 8.0,
+            session_free_vram_gib=session_free_vram_gib,
         )
         required = {"name", "model_path"}
         missing = required - model_config.keys()
@@ -289,7 +313,12 @@ class VLLMEngine(BaseEngine):
 
         self._model_name: str = model_config["name"]
         self._model_path: str = model_config["model_path"]
+        self._pool_size = pool_size
+        self._max_completion_tokens: int | None = model_config.get("max_completion_tokens")
+        self._instruction_tuned: bool = bool(model_config.get("instruction_tuned", True))
+        self._repetition_penalty: float | None = model_config.get("repetition_penalty")
         self._healthy = False
+        self._kv_capacity_tokens: int | None = None
         self._engine_lock = threading.Lock()
 
         hf_token = resolve_hf_token()
@@ -298,6 +327,7 @@ class VLLMEngine(BaseEngine):
         kwargs: dict[str, Any] = {
             "model": self._model_path,
             "dtype": "auto",
+            "trust_remote_code": True,
         }
         if hf_token:
             kwargs["hf_token"] = hf_token
@@ -306,6 +336,20 @@ class VLLMEngine(BaseEngine):
         max_model_len = model_config.get("max_model_len")
         if max_model_len is not None:
             kwargs["max_model_len"] = max_model_len
+        max_num_seqs = model_config.get("max_num_seqs")
+        if max_num_seqs is not None:
+            kwargs["max_num_seqs"] = max_num_seqs
+        max_num_batched_tokens = model_config.get("max_num_batched_tokens")
+        if max_num_batched_tokens is not None:
+            kwargs["max_num_batched_tokens"] = max_num_batched_tokens
+        block_size = model_config.get("block_size")
+        if block_size is not None:
+            kwargs["block_size"] = block_size
+        kv_cache_dtype = model_config.get("kv_cache_dtype")
+        if kv_cache_dtype is not None:
+            kwargs["kv_cache_dtype"] = kv_cache_dtype
+        if model_config.get("enable_prefix_caching") is not None:
+            kwargs["enable_prefix_caching"] = model_config["enable_prefix_caching"]
         if model_config.get("quantization"):
             kwargs["quantization"] = model_config["quantization"]
         if pool_size > 1:
@@ -337,6 +381,9 @@ class VLLMEngine(BaseEngine):
             self._llm: LLM = LLM(**kwargs)
             self._supports_chat = self._detect_chat_support()
             self._healthy = True
+            self._log_kv_cache_stats()
+            step_lock = _POOL_STEP_LOCK if pool_size > 1 else self._engine_lock
+            self._driver = EngineDriver(self._llm.llm_engine, step_lock)
             logger.info(
                 "vLLM engine ready: model=%s chat_template=%s",
                 self._model_name,
@@ -344,6 +391,52 @@ class VLLMEngine(BaseEngine):
             )
         except Exception as exc:
             raise _map_vllm_init_error(self._model_name, self._model_path, exc) from exc
+
+    def _log_kv_cache_stats(self) -> None:
+        """Log vLLM KV-cache sizing after engine init (mirrors vLLM '# GPU blocks' lines).
+
+        Also records ``self._kv_capacity_tokens`` so the /v1/metrics route can report
+        real KV-pool capacity instead of the pre-load estimate in vllm_pool_config.
+        """
+        try:
+            llm_engine = self._llm.llm_engine
+            # vLLM 0.22.1's V1 LLMEngine keeps CacheConfig under vllm_config, not as a
+            # direct attribute (llm_engine.cache_config is None on this version) —
+            # verified by introspecting a loaded engine, see plan Task #4 smoke test.
+            cache_config = getattr(
+                getattr(llm_engine, "vllm_config", None), "cache_config", None
+            )
+            num_blocks = getattr(cache_config, "num_gpu_blocks", None)
+            block_size = getattr(cache_config, "block_size", None)
+            if num_blocks is not None and block_size is not None:
+                self._kv_capacity_tokens = int(num_blocks) * int(block_size)
+                logger.info(
+                    "KV cache for model=%s: %d GPU blocks × %d tokens/block "
+                    "(~%d tokens capacity)",
+                    self._model_name,
+                    num_blocks,
+                    block_size,
+                    self._kv_capacity_tokens,
+                )
+        except Exception as exc:
+            logger.debug("KV cache stats unavailable for %s: %s", self._model_name, exc)
+
+    @property
+    def model_name(self) -> str:
+        return self._model_name
+
+    @property
+    def model_path(self) -> str:
+        return self._model_path
+
+    @property
+    def kv_capacity_tokens(self) -> int | None:
+        """Real post-load KV-cache capacity in tokens (num_gpu_blocks * block_size).
+
+        ``None`` if unavailable (e.g. vLLM not loaded, or cache_config introspection
+        failed — see _log_kv_cache_stats).
+        """
+        return getattr(self, "_kv_capacity_tokens", None)
 
     def _detect_chat_support(self) -> bool:
         try:
@@ -369,13 +462,43 @@ class VLLMEngine(BaseEngine):
         parts.append("Assistant:")
         return "\n".join(parts)
 
+    def count_prompt_tokens(self, request: ChatCompletionRequest) -> int:
+        """Real prompt token count via this model's tokenizer, for admission control.
+
+        Accessed via getattr() by routing/admission.py (BaseEngine doesn't declare
+        this — same optional-attribute pattern as kv_capacity_tokens in
+        api/routes/metrics.py). Falls back to a chars/4 estimate — the same
+        heuristic AdmissionController uses for engines without a tokenizer at
+        all — if tokenization fails for any reason.
+        """
+        try:
+            prompt = self._stream_prompt(request)
+            tokenizer = self._llm.get_tokenizer()
+            return len(tokenizer.encode(prompt))
+        except Exception as exc:
+            logger.debug(
+                "count_prompt_tokens fallback for model=%s: %s", self._model_name, exc
+            )
+            total_chars = sum(len(m.content) for m in request.messages)
+            return max(1, total_chars // 4)
+
+    def _resolve_max_tokens(self, request: ChatCompletionRequest) -> int:
+        if self._max_completion_tokens is not None:
+            return self._max_completion_tokens
+        return request.max_tokens if request.max_tokens is not None else 512
+
     def _sampling_params(self, request: ChatCompletionRequest):
         SamplingParams = globals()["SamplingParams"]
-        return SamplingParams(
-            temperature=request.temperature if request.temperature is not None else 0.7,
-            max_tokens=request.max_tokens if request.max_tokens is not None else 512,
-            top_p=request.top_p if request.top_p is not None else 0.95,
-        )
+        kwargs: dict[str, Any] = {
+            "temperature": request.temperature if request.temperature is not None else 0.7,
+            "max_tokens": self._resolve_max_tokens(request),
+            "top_p": request.top_p if request.top_p is not None else 0.95,
+        }
+        if not self._instruction_tuned:
+            kwargs["repetition_penalty"] = (
+                self._repetition_penalty if self._repetition_penalty is not None else 1.15
+            )
+        return SamplingParams(**kwargs)
 
     def _stream_prompt(self, request: ChatCompletionRequest) -> str:
         if not self._supports_chat:
@@ -395,23 +518,25 @@ class VLLMEngine(BaseEngine):
             return self._messages_to_prompt(request.messages)
 
     def _run_completion(self, request: ChatCompletionRequest):
-        """Blocking completion using the startup-loaded sync engine."""
-        sampling = self._sampling_params(request)
-        vllm_messages = [{"role": m.role, "content": m.content} for m in request.messages]
+        """Blocking completion via the shared EngineDriver (see engines/driver.py).
 
-        with self._engine_lock:
-            if self._supports_chat:
-                return self._llm.chat(
-                    messages=vllm_messages,  # type: ignore[arg-type]
-                    sampling_params=sampling,
-                    use_tqdm=False,
-                )
-            prompt = self._messages_to_prompt(request.messages)
-            return self._llm.generate(
-                prompts=[prompt],
-                sampling_params=sampling,
-                use_tqdm=False,
-            )
+        Both this method and generate_stream submit through the same per-engine
+        driver thread — the only caller of add_request/step() for this engine —
+        instead of each running its own step() loop. See DEC-038 for the race
+        that made a per-request step() loop unsafe for non-streaming completions,
+        and DEC-039 for the driver-thread fix.
+        """
+        sampling = self._sampling_params(request)
+        prompt = self._stream_prompt(request)
+        future = self._driver.submit_complete(prompt, sampling)
+        try:
+            output = future.result(timeout=_COMPLETION_TIMEOUT_S)
+        except FuturesTimeoutError as exc:
+            raise RuntimeError(
+                f"vLLM completion timed out after {_COMPLETION_TIMEOUT_S}s "
+                f"for model={self._model_name}"
+            ) from exc
+        return [output]
 
     async def generate_stream(
         self, request: ChatCompletionRequest
@@ -420,49 +545,20 @@ class VLLMEngine(BaseEngine):
             yield "Streaming not available (vLLM not loaded)"
             return
 
-        sync_queue: queue.Queue[str | None] = queue.Queue()
-
-        def worker() -> None:
-            sampling = self._sampling_params(request)
-            prompt = self._stream_prompt(request)
-            request_id = f"cmpl-stream-{uuid.uuid4().hex}"
-            llm_engine = self._llm.llm_engine
-            previous_text = ""
-
-            try:
-                with self._engine_lock:
-                    llm_engine.add_request(request_id, prompt, sampling)
-                    while llm_engine.has_unfinished_requests():
-                        step_outputs = llm_engine.step()
-                        if not step_outputs:
-                            continue
-                        for output in step_outputs:
-                            if output.request_id != request_id or not output.outputs:
-                                continue
-                            text = output.outputs[0].text or ""
-                            if text.startswith(previous_text):
-                                chunk = text[len(previous_text) :]
-                            else:
-                                chunk = text
-                            previous_text = text
-                            if chunk:
-                                sync_queue.put(chunk)
-                            if output.finished:
-                                return
-            finally:
-                sync_queue.put(None)
-
+        sampling = self._sampling_params(request)
+        prompt = self._stream_prompt(request)
         try:
-            thread = threading.Thread(target=worker, daemon=True)
-            thread.start()
-            while True:
-                chunk = await asyncio.to_thread(sync_queue.get)
-                if chunk is None:
-                    break
-                yield chunk
-            thread.join()
-        except Exception as exc:
+            out_queue = self._driver.submit_stream(prompt, sampling)
+        except EngineDriverDeadError as exc:
             raise RuntimeError(f"vLLM streaming generation failed: {exc}") from exc
+
+        while True:
+            chunk = await asyncio.to_thread(out_queue.get)
+            if chunk is None:
+                return
+            if isinstance(chunk, BaseException):
+                raise RuntimeError(f"vLLM streaming generation failed: {chunk}") from chunk
+            yield chunk
 
     async def generate(self, request: ChatCompletionRequest) -> ChatCompletionResponse:
         try:
@@ -494,4 +590,27 @@ class VLLMEngine(BaseEngine):
         )
 
     def is_healthy(self) -> bool:
+        driver = getattr(self, "_driver", None)
+        if driver is not None and driver.is_dead:
+            return False
         return self._healthy
+
+    def shutdown(self) -> None:
+        """Stop the vLLM engine subprocess and release multiprocessing resources."""
+        llm = getattr(self, "_llm", None)
+        if llm is None:
+            return
+        self._healthy = False
+        driver = getattr(self, "_driver", None)
+        if driver is not None:
+            driver.shutdown()
+        try:
+            with self._engine_lock:
+                llm.llm_engine.engine_core.shutdown()
+        except Exception as exc:
+            logger.warning(
+                "Error shutting down vLLM engine for %s: %s", self._model_name, exc
+            )
+        finally:
+            self._llm = None  # type: ignore[assignment]
+            logger.info("vLLM engine shut down: model=%s", self._model_name)

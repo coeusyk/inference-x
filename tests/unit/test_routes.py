@@ -6,10 +6,12 @@ is never imported in this test — it runs on any machine without a GPU.
 import pytest
 from fastapi.testclient import TestClient
 
-from inference_x.api.deps import get_chat_service, get_registry
+from inference_x.api.deps import get_chat_service, get_engine_pool, get_metrics_service, get_registry
 from inference_x.api.main import app
 from inference_x.engines.base import BaseEngine
 from inference_x.engines.pool import EnginePool
+from inference_x.observability.recorder import MetricsRecorder
+from inference_x.observability.storage import InMemoryStorage
 from inference_x.routing.task_router import TaskRouter
 from inference_x.schemas.chat import (
     ChatCompletionChoice,
@@ -17,9 +19,11 @@ from inference_x.schemas.chat import (
     ChatCompletionRequest,
     ChatCompletionResponse,
     ChatCompletionUsage,
+    ChatMessage,
 )
 from inference_x.schemas.model import ModelEntry
 from inference_x.services.chat_service import ChatService
+from inference_x.services.metrics_service import MetricsService
 from inference_x.services.model_service import ModelRegistry
 
 _TEST_MODEL = "test-model"
@@ -51,6 +55,39 @@ class _StubEngine(BaseEngine):
     async def generate_stream(self, request: ChatCompletionRequest):
         yield "Hello "
         yield "from stub"
+
+    def is_healthy(self) -> bool:
+        return self._healthy
+
+
+class _AdmissionAwareEngine(BaseEngine):
+    """Stub engine exposing count_prompt_tokens/kv_capacity_tokens so
+    AdmissionController's context and KV-saturation gates are exercisable
+    from route-level tests (real VLLMEngine isn't importable without a GPU)."""
+
+    def __init__(self, prompt_tokens: int = 5, kv_capacity_tokens: int | None = None) -> None:
+        self._healthy = True
+        self._prompt_tokens = prompt_tokens
+        self.kv_capacity_tokens = kv_capacity_tokens
+
+    def count_prompt_tokens(self, request: ChatCompletionRequest) -> int:
+        return self._prompt_tokens
+
+    async def generate(self, request: ChatCompletionRequest) -> ChatCompletionResponse:
+        return ChatCompletionResponse(
+            model=request.model,
+            choices=[
+                ChatCompletionChoice(
+                    index=0,
+                    message=ChatCompletionMessage(content="ok"),
+                    finish_reason="stop",
+                )
+            ],
+            usage=ChatCompletionUsage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+        )
+
+    async def generate_stream(self, request: ChatCompletionRequest):
+        yield "ok"
 
     def is_healthy(self) -> bool:
         return self._healthy
@@ -204,6 +241,94 @@ class TestChatCompletionsEndpoint:
             assert body["error"]["type"] == "internal_error"
         app.dependency_overrides.clear()
 
+    def test_prompt_exceeding_max_context_tokens_returns_400(self):
+        """AdmissionController rejects a prompt over the client's own
+        max_context_tokens ceiling with a sanitized 400 (DEC-037 Phase 2)."""
+        engine = _AdmissionAwareEngine(prompt_tokens=50)
+        registry = _make_stub_registry()
+        router = TaskRouter(registry, _TEST_MODEL)
+        pool = EnginePool({_TEST_MODEL: engine})
+        svc = ChatService(engine_pool=pool, registry=registry, router=router)
+        app.dependency_overrides[get_chat_service] = lambda: svc
+        with TestClient(app) as c:
+            payload = dict(self._payload)
+            payload["max_context_tokens"] = 10
+            resp = c.post("/v1/chat/completions", json=payload)
+            assert resp.status_code == 400
+            body = resp.json()
+            assert body["error"]["type"] == "invalid_request_error"
+        app.dependency_overrides.clear()
+
+    def test_kv_saturation_returns_429_with_retry_after(self):
+        """A batch-tier request is rejected (not silently truncated) when an
+        in-flight reservation has already consumed the KV safety budget."""
+        engine = _AdmissionAwareEngine(prompt_tokens=5, kv_capacity_tokens=20)
+        registry = _make_stub_registry()
+        router = TaskRouter(registry, _TEST_MODEL)
+        pool = EnginePool({_TEST_MODEL: engine})
+        svc = ChatService(engine_pool=pool, registry=registry, router=router)
+        # Simulate an in-flight request holding most of the KV budget
+        # (safety margin 0.9 * capacity 20 = 18 tokens) without releasing it.
+        svc._admission.admit(
+            _TEST_MODEL,
+            ChatCompletionRequest(
+                model=_TEST_MODEL,
+                messages=[ChatMessage(role="user", content="x")],
+                max_tokens=12,
+                priority="batch",
+            ),
+            engine,
+        )
+        app.dependency_overrides[get_chat_service] = lambda: svc
+        with TestClient(app) as c:
+            payload = dict(self._payload)
+            payload["max_tokens"] = 10
+            payload["priority"] = "batch"
+            resp = c.post("/v1/chat/completions", json=payload)
+            assert resp.status_code == 429
+            assert "Retry-After" in resp.headers
+            body = resp.json()
+            assert body["error"]["type"] == "rate_limit_error"
+        app.dependency_overrides.clear()
+
+    def test_sequence_concurrency_saturation_returns_429(self):
+        """An interactive-priority request is also rejected (no clamp path exists
+        for a sequence slot) when the resolved max_num_seqs ceiling is already
+        full (add-engine-knob-surfacing)."""
+        from dataclasses import dataclass
+
+        from inference_x.routing.admission import AdmissionController
+
+        @dataclass
+        class _FakeTier:
+            max_model_len_cap: int
+            max_num_seqs: int
+
+        engine = _AdmissionAwareEngine(prompt_tokens=5)
+        registry = _make_stub_registry()
+        router = TaskRouter(registry, _TEST_MODEL)
+        pool = EnginePool({_TEST_MODEL: engine})
+        admission = AdmissionController(
+            registry, tier=_FakeTier(max_model_len_cap=4096, max_num_seqs=1)
+        )
+        svc = ChatService(engine_pool=pool, registry=registry, router=router, admission=admission)
+        # Simulate one in-flight request already holding the model's only sequence slot.
+        admission.admit(
+            _TEST_MODEL,
+            ChatCompletionRequest(
+                model=_TEST_MODEL, messages=[ChatMessage(role="user", content="x")]
+            ),
+            engine,
+        )
+        app.dependency_overrides[get_chat_service] = lambda: svc
+        with TestClient(app) as c:
+            resp = c.post("/v1/chat/completions", json=self._payload)
+            assert resp.status_code == 429
+            assert "Retry-After" in resp.headers
+            body = resp.json()
+            assert body["error"]["type"] == "rate_limit_error"
+        app.dependency_overrides.clear()
+
 
 # ---------------------------------------------------------------------------
 # Models endpoint
@@ -233,6 +358,29 @@ class TestModelsEndpoint:
         assert "id" in model
         assert model["object"] == "model"
         assert model["owned_by"] == "inferencex"
+        assert model["quantization"] is None
+        assert model["estimated_weights_gib"] > 0
+
+    def test_model_object_reflects_quantization_and_max_model_len(self, client):
+        """A quantized entry must surface its variant + context cap for client selection."""
+        registry = ModelRegistry(
+            [
+                ModelEntry(
+                    name="quant-model",
+                    model_path="Qwen/Qwen2.5-7B-Instruct-AWQ",
+                    quantization="awq",
+                    max_model_len=4096,
+                )
+            ]
+        )
+        app.dependency_overrides[get_registry] = lambda: registry
+        with TestClient(app) as c:
+            resp = c.get("/v1/models")
+            model = resp.json()["data"][0]
+            assert model["quantization"] == "awq"
+            assert model["max_model_len"] == 4096
+            assert model["estimated_weights_gib"] > 0
+        app.dependency_overrides.clear()
 
     def test_reflects_models_yaml(self, client):
         """Models endpoint should list every entry from config/models.yaml."""
@@ -247,3 +395,55 @@ class TestModelsEndpoint:
             ids = {m["id"] for m in resp.json()["data"]}
             assert ids == set(real_registry.names())
         app.dependency_overrides.clear()
+
+
+# ---------------------------------------------------------------------------
+# Metrics endpoint
+# ---------------------------------------------------------------------------
+
+class TestMetricsEndpoint:
+    @pytest.fixture()
+    def metrics_client(self):
+        registry = _make_stub_registry()
+        pool = EnginePool({_TEST_MODEL: _StubEngine()})
+        recorder = MetricsRecorder(storage=InMemoryStorage())
+
+        app.dependency_overrides[get_registry] = lambda: registry
+        app.dependency_overrides[get_engine_pool] = lambda: pool
+        app.dependency_overrides[get_metrics_service] = lambda: MetricsService(recorder)
+        app.dependency_overrides[get_chat_service] = _stub_service_factory(healthy=True)
+        with TestClient(app) as c:
+            yield c, recorder
+        app.dependency_overrides.clear()
+
+    def test_returns_200(self, metrics_client):
+        client, _ = metrics_client
+        resp = client.get("/v1/metrics")
+        assert resp.status_code == 200
+
+    def test_empty_metrics_shape(self, metrics_client):
+        client, _ = metrics_client
+        resp = client.get("/v1/metrics")
+        body = resp.json()
+        assert body["total_requests"] == 0
+        assert body["avg_latency_ms"] is None
+        assert body["avg_ttft_ms"] is None
+
+    def test_vram_breakdown_lists_loaded_stub_model(self, metrics_client):
+        client, _ = metrics_client
+        resp = client.get("/v1/metrics")
+        body = resp.json()
+        model_names = [m["name"] for m in body["vram"]["models"]]
+        assert _TEST_MODEL in model_names
+        entry = next(m for m in body["vram"]["models"] if m["name"] == _TEST_MODEL)
+        assert entry["estimated_weights_gib"] > 0
+        # _StubEngine has no kv_capacity_tokens attribute — must degrade to None, not error.
+        assert entry["kv_capacity_tokens"] is None
+
+    def test_reflects_recorded_requests(self, metrics_client):
+        client, recorder = metrics_client
+        recorder.record(path="/v1/chat/completions", method="POST", status_code=200, latency_ms=12.0)
+        resp = client.get("/v1/metrics")
+        body = resp.json()
+        assert body["total_requests"] == 1
+        assert body["avg_latency_ms"] == 12.0

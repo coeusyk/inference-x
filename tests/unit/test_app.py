@@ -8,6 +8,7 @@ import httpx
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "playground"))
 
+import app as app_module
 from app import InferenceXApp, fetch_health, fetch_models, parse_sse_line, parse_sse_stream
 from url_validation import validate_base_url
 
@@ -143,3 +144,38 @@ def test_validate_base_url_rejects_non_http_scheme():
     err = validate_base_url("file:///etc/passwd")
     assert err is not None
     assert "scheme" in err.lower()
+
+
+async def test_ctrl_c_quits_even_with_failed_loading_screen_on_top(monkeypatch):
+    """Regression (2026-07-03, DEC-046): Textual's Screen/ModalScreen classes
+    claim plain ctrl+c for copy_text, which silently shadowed InferenceXApp's
+    own non-priority ctrl+c->quit binding whenever any screen (e.g. a failed
+    LoadingScreen) was pushed on top — the app became unkillable via ctrl+c.
+    Fixed by marking the app's binding priority=True, which Textual checks
+    app-wide before the focus-chain walk that let the screen's binding win.
+    """
+
+    async def fake_ensure_models_loaded(base_url, models, *, on_status=None, on_log=None, load_timeout_s=600):
+        if on_log:
+            on_log("X Application startup failed")
+        return False
+
+    import log_feed
+
+    monkeypatch.setattr(app_module, "ensure_models_loaded", fake_ensure_models_loaded)
+    monkeypatch.setattr(
+        log_feed,
+        "extract_error_summary",
+        lambda *a, **k: "cannot load sequentially on a 8 GiB GPU",
+    )
+
+    app = InferenceXApp(base_url="http://127.0.0.1:8000", compare=("qwen2.5-0.5b", "qwen2.5-1.5b"))
+    async with app.run_test() as pilot:
+        for _ in range(20):
+            await pilot.pause()
+        assert any(screen.__class__.__name__ == "LoadingScreen" for screen in app.screen_stack)
+
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+
+        assert app.is_running is False

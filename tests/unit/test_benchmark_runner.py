@@ -1,7 +1,7 @@
 """Unit tests for BenchmarkRunner VRAM footprint calculation."""
 from __future__ import annotations
 
-from inference_x.benchmarks.runner import _peak_vram_footprint_gb
+from inference_x.benchmarks.runner import _check_vram_budget, _peak_vram_footprint_gb
 from inference_x.benchmarks.schemas import HardwareProfile
 
 
@@ -37,3 +37,25 @@ class TestPeakVramFootprint:
         before = _hw(total=0.0, free=0.0, has_gpu=False)
         after = _hw(total=0.0, free=0.0, has_gpu=False)
         assert _peak_vram_footprint_gb(before, after) == 0.0
+
+
+class TestCheckVramBudget:
+    def test_no_model_path_skips_check(self):
+        exceeded, warning = _check_vram_budget("m", 99.0, None, 2048, None)
+        assert exceeded is False
+        assert warning is None
+
+    def test_within_budget(self):
+        exceeded, warning = _check_vram_budget(
+            "opt-125m", 0.01, "facebook/opt-125m", 2048, None
+        )
+        assert exceeded is False
+        assert warning is None
+
+    def test_exceeds_budget(self):
+        exceeded, warning = _check_vram_budget(
+            "opt-125m", 500.0, "facebook/opt-125m", 2048, None
+        )
+        assert exceeded is True
+        assert warning is not None
+        assert "opt-125m" in warning

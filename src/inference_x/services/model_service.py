@@ -58,5 +58,17 @@ class ModelRegistry:
     def names(self) -> list[str]:
         return list(self._models)
 
+    def variants(self, family: str) -> list[ModelEntry]:
+        """Return every entry belonging to *family*, in insertion order.
+
+        An entry with no `family` set is its own family of one, keyed by its
+        own `name` — so `variants("some-model-name")` still returns that
+        single entry for ungrouped models, unaffected by this method's
+        existence (routing/variant_selector.py relies on this fallback).
+        """
+        return [
+            m for m in self._models.values() if (m.family or m.name) == family
+        ]
+
     def __contains__(self, name: str) -> bool:
         return name in self._models

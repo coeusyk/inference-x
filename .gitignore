@@ -9,6 +9,9 @@ __pycache__/
 .pytest_cache/
 logs/
 
+# Machine-specific benchmark results — run make benchmark locally
+benchmarks/results/
+*.benchmark.json
+
 # Private writing — not for the public repo
-docs/ARTICLE_DRAFT.md
-docs/ARTICLE_NOTES.md
+article-final.md

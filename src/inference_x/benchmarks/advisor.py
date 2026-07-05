@@ -3,16 +3,16 @@
 Scoring weights:
   40% throughput  — most visible performance signal
   30% TTFT        — inverted (lower is better) — latency matters for interactivity
-  20% VRAM headroom — model must fit in available free VRAM
+  20% VRAM headroom — model must fit in total VRAM with safety buffer
   10% quantization  — placeholder (currently 1.0 for all models, reserved for INT8/FP8)
 
-A model whose effective VRAM requirement (warm footprint × cold-start margin) exceeds
-hardware.vram_free_gb is hard-gated: score = 0, viable = False regardless of other metrics.
+A model whose VRAM footprint plus safety buffer exceeds hardware.vram_total_gb is
+hard-gated: score = 0, viable = False regardless of other metrics.
 CPU-only hardware (has_gpu=False) skips the VRAM gate and sets vram_headroom = 1.0.
 """
 from __future__ import annotations
 
-import os
+import statistics
 
 from inference_x.benchmarks.schemas import (
     AdvisorReport,
@@ -21,17 +21,7 @@ from inference_x.benchmarks.schemas import (
     HardwareProfile,
 )
 
-COLD_START_MARGIN: float = 1.20
-
-
-def cold_start_margin() -> float:
-    """Return the cold-start VRAM multiplier (overridable via env var)."""
-    return float(os.getenv("INFERENCEX_COLD_START_MARGIN", str(COLD_START_MARGIN)))
-
-
-def effective_vram_required_gb(footprint_gb: float) -> float:
-    """VRAM required at cold load, given a warm benchmark footprint."""
-    return footprint_gb * cold_start_margin()
+VRAM_SAFETY_BUFFER_GB = 0.5  # reserve for driver overhead and system processes
 
 
 def _safe_div(a: float, b: float, fallback: float = 0.0) -> float:
@@ -39,12 +29,9 @@ def _safe_div(a: float, b: float, fallback: float = 0.0) -> float:
 
 
 def _hardware_matches(saved: HardwareProfile, current: HardwareProfile) -> bool:
-    saved_name = (saved.gpu_name or "").lower()
-    current_name = (current.gpu_name or "").lower()
-    if saved_name and current_name:
-        if saved_name not in current_name and current_name not in saved_name:
-            return False
-    elif saved_name != current_name:
+    saved_name = (saved.gpu_name or "").lower().strip()
+    current_name = (current.gpu_name or "").lower().strip()
+    if saved_name and current_name and saved_name != current_name:
         return False
     if abs(saved.vram_total_gb - current.vram_total_gb) > 0.5:
         return False
@@ -57,10 +44,13 @@ def _format_gpu_label(hw: HardwareProfile) -> str:
     return "CPU only"
 
 
-def _format_vram_requirement(footprint_gb: float) -> str:
-    margin = cold_start_margin()
-    required = effective_vram_required_gb(footprint_gb)
-    return f"{footprint_gb:.2f} GB footprint × {margin:.2f} = {required:.2f} GB required"
+def _warm_ttft_ms(result: BenchmarkResult) -> float:
+    warm_results = (
+        result.prompt_results[1:]
+        if len(result.prompt_results) > 1
+        else result.prompt_results
+    )
+    return statistics.mean(p.ttft_ms for p in warm_results) if warm_results else 0.0
 
 
 class ModelAdvisor:
@@ -119,25 +109,28 @@ class ModelAdvisor:
             return AdvisorReport(ranked=[], warnings=warnings)
 
         max_throughput = max(r.mean_throughput_tps for r in eligible)
-        max_ttft = max(
-            (r.prompt_results[0].ttft_ms if r.prompt_results else 0.0) for r in eligible
-        )
+        max_ttft = max(_warm_ttft_ms(r) for r in eligible)
 
         advisor_results: list[AdvisorResult] = []
 
         for result in eligible:
             throughput = result.mean_throughput_tps
-            ttft = result.prompt_results[0].ttft_ms if result.prompt_results else 0.0
+            ttft = _warm_ttft_ms(result)
             vram_used = result.peak_vram_delta_gb
-            effective_required = effective_vram_required_gb(vram_used)
 
-            # Hard gate: cold-load requirement must fit in free VRAM
-            if hardware.has_gpu and effective_required >= hardware.vram_free_gb:
+            if hardware.has_gpu:
+                vram_required = vram_used + VRAM_SAFETY_BUFFER_GB
+                viable_by_vram = vram_required <= hardware.vram_total_gb
+            else:
+                viable_by_vram = True
+
+            if not viable_by_vram:
                 score = 0.0
                 viable = False
                 rec = (
-                    f"{result.model_name} — {_format_vram_requirement(vram_used)}, "
-                    f"only {hardware.vram_free_gb:.1f}GB free. Skip."
+                    f"{result.model_name} — requires {vram_used:.2f} GB + "
+                    f"{VRAM_SAFETY_BUFFER_GB:.1f} GB buffer = {vram_required:.2f} GB, "
+                    f"only {hardware.vram_total_gb:.1f} GB total. Skip."
                 )
             else:
                 viable = True
@@ -148,21 +141,19 @@ class ModelAdvisor:
                 # TTFT component (lower is better, inverted, normalized 0–1)
                 ttft_score = 1.0 - _safe_div(ttft, max_ttft)
 
-                # VRAM headroom component (free capacity after model load, clamped 0–1)
+                # VRAM headroom component (remaining capacity after load, clamped 0–1)
                 if not hardware.has_gpu:
                     vram_score = 1.0
                 else:
-                    if hardware.vram_free_gb > 0:
-                        vram_score = max(
-                            0.0,
-                            min(
-                                1.0,
-                                (hardware.vram_free_gb - effective_required)
-                                / hardware.vram_free_gb,
-                            ),
-                        )
-                    else:
-                        vram_score = 1.0
+                    vram_required = vram_used + VRAM_SAFETY_BUFFER_GB
+                    vram_score = max(
+                        0.0,
+                        min(
+                            1.0,
+                            (hardware.vram_total_gb - vram_required)
+                            / hardware.vram_total_gb,
+                        ),
+                    )
 
                 # Quantization placeholder (always 1.0 — no quantization data yet)
                 quant_score = 1.0
@@ -176,7 +167,7 @@ class ModelAdvisor:
 
                 rec = (
                     f"{result.model_name} — {throughput:.0f} tok/s, "
-                    f"{ttft:.0f}ms TTFT, {_format_vram_requirement(vram_used)}"
+                    f"{ttft:.0f}ms TTFT, {vram_used:.2f} GB VRAM"
                 )
 
             advisor_results.append(

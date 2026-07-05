@@ -119,7 +119,13 @@ class ChatApp(App[None]):
     CSS_PATH = Path(__file__).with_name("chat.css")
 
     BINDINGS = [
-        Binding("ctrl+c", "quit", "Quit"),
+        # priority=True: Textual's Screen/ModalScreen classes claim plain ctrl+c for
+        # copy_text, which silently shadows a non-priority app-level binding for the
+        # same key whenever any screen (e.g. LoadingScreen) is pushed on top. Priority
+        # bindings are checked app-wide before the focus-chain walk, so this is the only
+        # way ctrl+c reliably quits regardless of what's on screen (matches how Textual's
+        # own ctrl+q binding works).
+        Binding("ctrl+c", "quit", "Quit", priority=True),
         Binding("ctrl+n", "new_conversation", "New chat"),
     ]
 

@@ -89,14 +89,20 @@ class AppSettings:
             f"Model '{name}' not found in {path}. Available: {available}"
         )
 
-    def get_server_config(self) -> dict[str, Any]:
-        """Return the server section from server.yaml, or empty dict if absent."""
-        path = Path(self.config_dir) / "server.yaml"
-        if not path.exists():
-            return {}
-        with path.open() as fh:
-            data = yaml.safe_load(fh) or {}
-        return data.get("server", {})
+    def get_vram_tier(self):
+        """Resolve the VRAM tier (config/vram_tiers.yaml) for the probed GPU.
+
+        Uses profile_hardware() for vram_total_gb — the same nvidia-ml-py →
+        nvidia-smi → CPU-only fallback chain the benchmark advisor relies on.
+        Import is local to avoid pulling benchmarks.hardware into every settings
+        consumer (e.g. lightweight unit tests that stub AppSettings directly).
+        """
+        from inference_x.benchmarks.hardware import profile_hardware
+        from inference_x.utils.vram_tiers import load_tiers, resolve_tier
+
+        hw = profile_hardware()
+        tiers = load_tiers(self.config_dir)
+        return resolve_tier(hw.vram_total_gb, tiers)
 
 
 @lru_cache(maxsize=1)

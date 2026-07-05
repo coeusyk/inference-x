@@ -346,7 +346,7 @@ Each entry can include a `system` prompt and a `label` for display.
 
 ```bash
 uv run python playground/client.py --base-url http://my-gpu-server:8000 \
-  --model llama3-8b "Summarise the Transformer paper."
+  --model qwen2.5-1.5b "Summarise the Transformer paper."
 ```
 
 ---

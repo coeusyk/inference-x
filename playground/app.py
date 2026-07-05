@@ -30,6 +30,7 @@ except ImportError:
     from playground.scroll_utils import scroll_to_end
 
 from textual.app import App, ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Input, Label, Markdown, Rule, Static
 
@@ -109,6 +110,7 @@ class ResponsePanel(Vertical):
         self.model = model
         self.content = ""
         self.started_at: float | None = None
+        self.finished_at: float | None = None
         self.completed = False
 
     def compose(self) -> ComposeResult:
@@ -124,6 +126,7 @@ class ResponsePanel(Vertical):
     def clear_response(self) -> None:
         self.content = ""
         self.started_at = None
+        self.finished_at = None
         self.completed = False
         try:
             self.query_one(".empty-state", Static).display = True
@@ -140,6 +143,7 @@ class ResponsePanel(Vertical):
     def start(self) -> None:
         self.content = ""
         self.started_at = time.perf_counter()
+        self.finished_at = None
         self.completed = False
         try:
             self.query_one(".empty-state", Static).display = False
@@ -161,6 +165,7 @@ class ResponsePanel(Vertical):
 
     def finish(self, prompt: str) -> None:
         self.completed = True
+        self.finished_at = time.perf_counter()
         prompt_tokens = len(prompt.split())
         completion_tokens = len(self.content.split())
         total_tokens = prompt_tokens + completion_tokens
@@ -178,6 +183,7 @@ class ResponsePanel(Vertical):
 
     def set_error(self, message: str) -> None:
         self.completed = True
+        self.finished_at = time.perf_counter()
         self.content = message
         try:
             self.query_one(".empty-state", Static).display = False
@@ -192,7 +198,8 @@ class ResponsePanel(Vertical):
     def elapsed_seconds(self) -> float:
         if self.started_at is None:
             return 0.0
-        return time.perf_counter() - self.started_at
+        end = self.finished_at if self.finished_at is not None else time.perf_counter()
+        return end - self.started_at
 
     def refresh_title(self) -> None:
         try:
@@ -221,7 +228,13 @@ class InferenceXApp(App[None]):
 
     CSS_PATH = Path(__file__).with_name("app.css")
     BINDINGS = [
-        ("ctrl+c", "quit", "Quit"),
+        # priority=True: Textual's Screen/ModalScreen classes claim plain ctrl+c for
+        # copy_text, which silently shadows a non-priority app-level binding for the
+        # same key whenever any screen (e.g. LoadingScreen) is pushed on top. Priority
+        # bindings are checked app-wide before the focus-chain walk, so this is the only
+        # way ctrl+c reliably quits regardless of what's on screen (matches how Textual's
+        # own ctrl+q binding works).
+        Binding("ctrl+c", "quit", "Quit", priority=True),
         ("q", "quit", "Quit"),
         ("ctrl+l", "clear_responses", "Clear"),
         ("f1", "toggle_help", "Help"),
@@ -442,7 +455,12 @@ class InferenceXApp(App[None]):
                     token = parse_sse_line(line)
                     if token:
                         panel.append_token(token)
-        panel.finish(prompt)
+        if not panel.content.strip():
+            panel.set_error(
+                "No response tokens received. The model may be out of VRAM or busy."
+            )
+        else:
+            panel.finish(prompt)
 
     # ── Internal render helpers ────────────────────────────────────────────
 

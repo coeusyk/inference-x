@@ -8,7 +8,8 @@ from collections.abc import AsyncGenerator
 from inference_x.core.settings import get_settings
 from inference_x.engines.base import BaseEngine
 from inference_x.engines.pool import EnginePool
-from inference_x.routing.base import BaseRouter
+from inference_x.routing.admission import AdmissionController
+from inference_x.routing.task_router import TaskRouter
 from inference_x.schemas.chat import ChatCompletionRequest, ChatCompletionResponse
 from inference_x.services.model_service import ModelRegistry
 
@@ -19,27 +20,44 @@ class ChatService:
     Phase 4 multi-model: the service dispatches to whichever engine in the pool
     matches the routed model name.  A pool with a single entry behaves identically
     to the previous single-engine setup.
+
+    Phase 7/2 (VRAM-aware admission, see DEC-037): every request passes through
+    an AdmissionController after routing and before dispatch, which enforces
+    context-length limits and clamps/rejects under KV-pool pressure. Callers
+    that construct ChatService directly (tests, stub engines) get a default
+    controller with no VRAM tier — behaves like the pre-admission 4096-token cap.
     """
 
     def __init__(
         self,
         engine_pool: EnginePool,
         registry: ModelRegistry,
-        router: BaseRouter,
+        router: TaskRouter,
+        admission: AdmissionController | None = None,
     ) -> None:
         self._pool = engine_pool
         self._registry = registry
         self._router = router
+        self._admission = admission or AdmissionController(registry)
 
     async def complete(self, request: ChatCompletionRequest) -> ChatCompletionResponse:
         """Route and execute a chat completion request.
 
         Raises:
-            ValueError: routed model not in engine pool.
+            ValueError: routed model not in engine pool, or request rejected
+                by admission control (context too long).
+            EngineSaturatedError: KV pool saturated for a batch-tier request.
             RuntimeError: engine inference failure.
         """
-        engine = self._resolve_engine(request)
-        return await engine.generate(request)
+        routed_model, engine = self._resolve_engine(request)
+        admitted = self._admission.admit(routed_model, request, engine)
+        effective_request = request.model_copy(
+            update={"max_tokens": admitted.effective_max_tokens}
+        )
+        try:
+            return await engine.generate(effective_request)
+        finally:
+            self._admission.release(routed_model, admitted.reserved_tokens)
 
     async def stream_response(
         self, request: ChatCompletionRequest
@@ -49,11 +67,15 @@ class ChatService:
         Applies a per-token timeout (INFERENCE_X_STREAM_TIMEOUT_S) so that a
         stalled engine does not hold the connection open indefinitely.
         """
-        engine = self._resolve_engine(request)
+        routed_model, engine = self._resolve_engine(request)
+        admitted = self._admission.admit(routed_model, request, engine)
+        effective_request = request.model_copy(
+            update={"max_tokens": admitted.effective_max_tokens}
+        )
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
         timeout_s = get_settings().stream_timeout_s
 
-        gen = engine.generate_stream(request)
+        gen = engine.generate_stream(effective_request)
         try:
             while True:
                 try:
@@ -84,27 +106,12 @@ class ChatService:
                 yield f"data: {json.dumps(payload, separators=(',', ':'))}\n\n"
         finally:
             await gen.aclose()
+            self._admission.release(routed_model, admitted.reserved_tokens)
 
         yield "data: [DONE]\n\n"
 
-    _GLOBAL_MAX_TOKENS = 4096
-
-    def _enforce_max_tokens_cap(self, routed_model: str, request: ChatCompletionRequest) -> None:
-        """Reject max_tokens above min(4096, model max_model_len) when configured."""
-        cap = self._GLOBAL_MAX_TOKENS
-        if routed_model in self._registry:
-            entry = self._registry.get(routed_model)
-            if entry.max_model_len is not None:
-                cap = min(cap, entry.max_model_len)
-        requested = request.max_tokens if request.max_tokens is not None else 512
-        if requested > cap:
-            raise ValueError(
-                f"max_tokens {requested} exceeds the limit of {cap} for model '{routed_model}'"
-            )
-
-    def _resolve_engine(self, request: ChatCompletionRequest) -> BaseEngine:
+    def _resolve_engine(self, request: ChatCompletionRequest) -> tuple[str, BaseEngine]:
         routed_model = self._router.select(request)
-        self._enforce_max_tokens_cap(routed_model, request)
 
         loaded = self._pool.loaded_models()
         if routed_model not in loaded:
@@ -116,7 +123,7 @@ class ChatService:
                 f"(or add it to the existing list)."
             )
 
-        return self._pool.get(routed_model)
+        return routed_model, self._pool.get(routed_model)
 
     def engine_healthy(self) -> bool:
         return self._pool.all_healthy()
