@@ -35,7 +35,14 @@ If your change would violate a decision in `DECISIONS.md` or cross a file bounda
 
 - Authentication / multi-user support (DEC-DEFER-01 — out of scope for local-only deployment)
 - Rate limiting (DEC-DEFER-02)
-- Non-vLLM inference backends at this time
+- Implementing a second inference backend, or introducing backend-neutral
+  packages/contracts (e.g. `inference_x/execution/`), without a dedicated
+  accepted change that authorizes a concrete second implementation (DEC-047).
+  vLLM is the only supported backend today; backend plurality is a long-term
+  architectural direction, not a scheduled deliverable.
+  Thin Engine Boundary hygiene (for example, an engine factory in
+  `engines/registry.py` and durable capability declarations on `BaseEngine`)
+  is in scope when it aligns with the current accepted architecture.
 - Breaking changes to the OpenAI-compatible API contract
 - New playground tabs or major UI additions without a prior discussion
 
@@ -86,7 +93,7 @@ From `AGENTS.md`:
 |---|---|
 | `src/inference_x/api/` | FastAPI routes, deps, error mapping — nothing else |
 | `src/inference_x/services/` | Orchestration and use-case logic |
-| `src/inference_x/engines/` | Engine interfaces and vLLM implementation |
+| `src/inference_x/engines/` | Engine interfaces, registry/factory, and concrete inference implementations (vLLM today) |
 | `src/inference_x/routing/` | Model selection policies |
 | `src/inference_x/observability/` | Middleware, metrics, storage, exporters |
 | `src/inference_x/schemas/` | Request/response models only |

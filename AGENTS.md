@@ -69,13 +69,29 @@ Phase 1 expectations:
 
 ## Anti-scope rules
 
-Do not add these before the relevant phase:
+Do not add these before the relevant phase / an authorizing ADR:
 - model routing policies beyond a minimal Phase 1 dependency
 - observability dashboards or storage backends
 - playground UI work
-- multiple engine implementations
-- premature abstractions that do not yet support a second implementation
+- a second concrete inference backend (requires a future accepted ADR; DEC-047)
+- `inference_x/execution/` or other backend-neutral packages/contracts until
+  justified by at least two concrete backend implementations (DEC-047)
+- optional-extra `vllm` (DEC-007 stands until a second-backend vertical slice)
 - config sprawl without validation
+
+## Engine Boundary (DEC-047)
+
+- Backend plurality is a long-term architectural direction; vLLM is the sole
+  supported backend today; no second backend is scheduled.
+- Allowed hygiene includes:
+  - `engines/registry` factory
+  - durable capability methods on `BaseEngine` (at minimum `count_prompt_tokens`)
+  - typed, observable admission degradation when a capability is unavailable
+- Forbidden until justified: thick Execution Contract, speculative backend-neutral
+  IR, implementing a second backend without a future ADR.
+- Engine Boundary hygiene must not gate Phase B (AsyncLLM).
+- Do not knowingly hard-code new vLLM-only assumptions into the composition root,
+  `BaseEngine` surface, or admission capability discovery.
 
 ## Validation rules
 

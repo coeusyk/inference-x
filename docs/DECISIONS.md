@@ -963,3 +963,220 @@ Use this document to capture non-obvious design decisions as the project evolves
   overhead figure, like DEC-045's `minicpm: 2.8` GiB, is empirically fitted from one
   verified hardware scenario, not derived from a documented mechanism — revisit if a
   3+-engine compare pool is added.
+
+### DEC-047
+- Date: 2026-08-04
+- Status: accepted
+- Title: Engine Boundary and backend plurality
+- Context: Engine Boundary and backend plurality. Reviews of a proposed thick
+  Execution Contract (`inference_x/execution/`) and two subsequent architecture
+  reviews established a thin Engine Boundary direction, but that consensus was
+  not yet recorded in-repo. Current state of the repository:
+  - `engines/base.py`: `BaseEngine` is an ABC whose docstring asserts that adding
+    a second engine must not require changes here; methods accept and return
+    `schemas.chat` wire types; no capability methods are declared on the contract.
+  - `api/deps.py`: the composition root constructs `VLLMEngine` directly
+    (~line 108). There is no factory dispatch on `ModelEntry.engine`.
+  - `engines/registry.py`: empty (0 bytes), despite being the natural home for
+    construction.
+  - `schemas/model.py`: `engine: Literal["vllm"]` structurally forbids naming a
+    second backend in config.
+  - `routing/admission.py`: discovers `count_prompt_tokens` and
+    `kv_capacity_tokens` via `getattr`, with documented fail-open when absent —
+    so a future second backend that omits those attributes would silently skip
+    admission gates.
+  - Governance conflict: `CONTRIBUTING.md` lists "Non-vLLM inference backends at
+    this time" under what does not fit; `AGENTS.md` anti-scope forbids "multiple
+    engine implementations" before the relevant phase; DEC-007 keeps `vllm` as a
+    required dependency after optional-`vllm` broke `uv sync` / smoke; meanwhile
+    `docs/REVIEW-2026-08-03-architecture.md` Phase D5 names an engine factory,
+    optional-`vllm`, and a `llama-server` proxy as the consumer-hardware unlock.
+  This decision is needed now so implementation and governance stop oscillating
+  between "vLLM application forever" and "build a multi-backend framework early,"
+  and so Engine Boundary hygiene cannot accidentally gate Phase B (AsyncLLM).
+- Problem:
+  1. Decorative engine boundary — docs claim a stable interface while the
+     composition root hardcodes the concrete backend.
+  2. Duck-typed capability discovery — admission and metrics reach past
+     `BaseEngine` via `getattr` and fail open silently.
+  3. Governance vs vision conflict — the product thesis implies backends become
+     implementation details over the project's lifetime, but policy docs forbid
+     non-vLLM work without stating plurality as a long-term architectural
+     objective (distinct from a delivery commitment).
+  4. Premature thick abstraction risk — a dual wire/execution type system under
+     `inference_x/execution/` was proposed before a second concrete
+     implementation exists, which would freeze internal DTOs ahead of AsyncLLM
+     and ahead of any second backend.
+- Decision:
+  1. **Backend plurality (architectural principle).** Inference-X is
+     architecturally designed to support multiple inference backends over its
+     lifetime. At the time of this decision, vLLM remains the sole supported
+     backend. No second backend is scheduled or committed for a specific
+     release. Architectural changes should avoid unnecessarily coupling new
+     runtime components to vLLM internals, but backend-neutral abstractions must
+     not be introduced until justified by a second concrete implementation.
+  2. **Thin Engine Boundary (accepted hygiene).**
+     - Populate `engines/registry.py` with `create_engine(...)` as the sole
+       construction path used by the app composition root (`api/deps.py`).
+     - Declare durable capability methods on `BaseEngine` with default
+       `None` / unsupported semantics; at minimum `count_prompt_tokens(...)`.
+     - Admission (and metrics) call declared methods; no new silent `getattr`
+       discovery for those capabilities.
+     - Keep wire schemas (`schemas.chat`) as the engine I/O types until a
+       second concrete backend forces extraction.
+  3. **Capability durability split.**
+     - **Durable:** tokenizer / prompt-token counting (backend-agnostic gate
+       input).
+     - **Provisional:** `kv_capacity_tokens` and in-process KV reservation
+       semantics — may be rescoped or deleted under REVIEW Phase B4
+       (admission rescope); must not be frozen as a cross-backend contract by
+       this decision.
+  4. **Admission fail policy (until B4).** Preserve current
+     fail-open-when-unavailable behavior, but make degradation typed and
+     observable (structured log when a gate is skipped because a capability is
+     `None`). Do not silently tighten to fail-closed in this decision.
+  5. **Sequencing (nonblocking).**
+     - Phase A (truthful metrics / seed / CI) remains first for product truth.
+     - Phase B (AsyncLLM) remains the next high-leverage runtime milestone and
+       **must not** be gated on Engine Boundary hygiene.
+     - Factory + durable capabilities are additive, parallelizable hygiene (or
+       foldable into later D5) — never a blocking program milestone before
+       AsyncLLM.
+     - Phase C (manifest) and Phase D5 (second-backend vertical slice) remain
+       as described in `docs/REVIEW-2026-08-03-architecture.md`; D5 requires a
+       future ADR / change that authorizes a concrete second implementation.
+  6. **DEC-007 relationship.** `vllm` remains a required dependency.
+     Optional-`vllm` is **not** authorized by this decision. Revisit DEC-007
+     only when a second backend vertical slice is accepted.
+  7. **Backend Abstraction Principle.** Backend-neutral abstractions must not
+     be introduced until they are justified by at least two concrete backend
+     implementations. Until that point: build only what the repository requires
+     today; avoid speculative backend-neutral packages or contracts; avoid
+     knowingly hard-coding new vLLM-specific assumptions into architectural
+     boundaries such as the composition root, the `BaseEngine` contract, or
+     admission capability discovery. This principle applies to architectural
+     boundaries, not to backend implementation details.
+- Architectural principle: Inference-X is an inference runtime, not a vLLM
+  application. The runtime owns architectural policy. Backends own inference
+  execution. Architectural decisions should preserve the ability for additional
+  backends to exist in the future without requiring current subsystems to be
+  rewritten. However, backend-neutral abstractions must only be introduced when
+  justified by multiple concrete implementations. This decision establishes
+  backend plurality as a long-term architectural direction, not as an
+  implementation commitment or delivery roadmap.
+- Explicit non-decisions (deferred by this ADR):
+  - `inference_x/execution/` package and dual wire↔execution DTOs
+  - Backend-neutral Execution Contract freeze
+  - Optional-extra `vllm`
+  - `engines/backends/vllm/` relocation
+  - AST import-boundary enforcement as a gate
+  - Second backend implementation (llama.cpp / llama-server or otherwise)
+  - AsyncLLM / `EngineDriver` deletion (Phase B)
+  - Memory Manager, Planner, Scheduler, or Inference OS packaging
+  - `vram_tiers.yaml` neutral / backend-native split
+  - Widening `ModelEntry.engine` beyond validated registry keys without a
+    second registered backend
+  - Changing the public OpenAI HTTP surface
+- Ownership:
+  - **BaseEngine** — Owns: generation façade and declared capabilities. Knows:
+    request/response types currently in use; capability `None` semantics. Must
+    never know: HTTP/FastAPI; other backends; admission policy; model selection.
+  - **engines/registry** — Owns: instantiation dispatch by engine type. Knows:
+    registered backend constructors; model config dicts needed to construct.
+    Must never know: admission; routing policy; OpenAI wire minting.
+  - **Admission (`routing/`)** — Owns: whether a request may run; gate policy.
+    Knows: declared engine capabilities; registry model limits; priority
+    semantics. Must never know: vLLM internals; CUDA; Driver/`step()` loop.
+  - **API / services** — Owns: wire validation; composition-root wiring; OpenAI
+    response minting. Knows: settings, pool, router, admission. Must never
+    know: backend-native serving loops.
+  - **Concrete backend (`VLLMEngine` + driver)** — Owns: inference execution for
+    vLLM. Knows: vLLM APIs, local runtime state, translating current request
+    types to native calls. Must never know: HTTP schemas as *owned* long-term
+    vocabulary (today borrowed); other backends; global scheduling policy.
+- Alternatives considered:
+  - **Keep as-is.** Rejected: leaves the decorative boundary and the governance
+    contradiction in place; a second backend later becomes an architectural
+    migration rather than an implementation project.
+  - **Thick Execution Contract** (`inference_x/execution/`, dual wire/execution
+    types, optional-`vllm`, `backends/vllm/` move in one milestone). Rejected:
+    premature abstraction before a second implementation; high churn against
+    Phase B (AsyncLLM); contradicts DEC-007 and current anti-scope if bundled.
+  - **Thin Engine Boundary + plurality without timeline (this decision).**
+    Accepted.
+  - **vLLM-only for ≥12 months (with or without a research note).** Rejected:
+    reframes the project identity as a vLLM application and biases future
+    subsystems (planner, scheduler, memory) toward vLLM-shaped boundaries;
+    forces reopening this ADR when plurality becomes unavoidable.
+- Consequences:
+  - **Positive:** composition root becomes architecturally honest; engine
+    capabilities become explicit; backend plurality is established as a
+    long-term architectural direction without requiring premature abstractions;
+    AsyncLLM remains unblocked; DEC-007 remains unchanged.
+  - **Negative:** engines still import wire schemas (accepted smell until a
+    second backend forces extraction); provisional KV capability remains until
+    B4; contributors must distinguish "plurality as direction" from "build
+    abstractions now."
+  - **Deferred work:** sync `CONTRIBUTING.md`, `AGENTS.md`, and a short note in
+    `docs/ARCHITECTURE.md` once this decision is accepted; OpenSpec change when
+    implementing factory / capabilities; concrete second backend only via a
+    future accepted change.
+  - **Technical debt accepted:** wire-as-engine-API; import-time CUDA/vLLM
+    patches in `api/main.py` (known coupling; not cured here).
+  - **Future opportunities:** when a second backend lands, extract execution
+    types under the Backend Abstraction Principle; revisit optional-`vllm`
+    (DEC-007) only with that vertical slice.
+- Risks:
+  - **Architectural:** plurality language misread as permission to introduce
+    `execution/` or other backend-neutral packages early — mitigated by Explicit
+    non-decisions and the Backend Abstraction Principle.
+  - **Migration:** factory and durable capabilities touch `deps`, admission, and
+    tests — low risk if scoped as hygiene.
+  - **Governance:** accepting this ADR without updating `CONTRIBUTING.md` /
+    `AGENTS.md` leaves the prior conflict in force — listed under Exit criteria.
+  - **Future backend support:** promoting provisional KV admission onto a stable
+    cross-backend contract before Phase B4 — mitigated by the durability split.
+- Sequencing relative to REVIEW phases:
+  - Phase A → Phase B (AsyncLLM) → B4 admission rescope → Phase C (manifest)
+    remain the product/runtime spine.
+  - DEC-047 factory + durable capabilities are nonblocking relative to that
+    spine (dashed dependency only).
+  - A future ADR authorizing a concrete second backend precedes D5; execution-
+    type extraction, if needed, follows a second implementation (rule of two).
+  - Provisional KV capability policy is decided with or after B4, not frozen
+    here.
+- Governance (required once this decision is accepted):
+  - `docs/DECISIONS.md` — this entry; status moves from `proposed` to
+    `accepted`.
+  - `CONTRIBUTING.md` — replace "Non-vLLM inference backends at this time" with
+    language that: vLLM is the sole supported backend today; plurality is a
+    long-term architectural objective; no second backend is scheduled; do not
+    add backends without a dedicated accepted change.
+  - `AGENTS.md` — align anti-scope: forbid *implementing* multiple engines or
+    `inference_x/execution/` until justified by a second concrete
+    implementation; allow thin factory / durable capabilities; state the
+    plurality objective.
+  - `docs/ARCHITECTURE.md` — short engine-boundary note: factory ownership; no
+    `execution/` package yet; hygiene must not gate AsyncLLM.
+  - OpenSpec — required only when implementing factory / capabilities code; not
+    required to accept this ADR text.
+- Exit criteria (architectural; DEC-047 is fully implemented when all hold):
+  1. This entry is `accepted` in `docs/DECISIONS.md`.
+  2. `CONTRIBUTING.md` and `AGENTS.md` no longer contradict backend plurality
+     versus anti-scope without explanation.
+  3. App engine construction goes through `engines/registry` factory (no direct
+     `VLLMEngine(` in `api/deps.py`).
+  4. Admission uses declared durable capability methods; degradation when
+     unsupported is observable; no new `getattr` discovery for those methods.
+  5. No `inference_x/execution/` package exists as a deliverable of this
+     decision.
+  6. `vllm` remains a required dependency (DEC-007 intact).
+  7. Phase B / AsyncLLM is not blocked on items 3–4.
+- Supersession: This decision remains in force until explicitly superseded by a
+  future DEC. In particular, any decision introducing a second concrete
+  inference backend, backend-neutral execution packages, optional backend
+  dependency layouts, or changes to the Engine Boundary ownership model must
+  explicitly reference and supersede DEC-047 where appropriate.
+  Acceptance of this ADR establishes repository policy for the Engine Boundary;
+  it does not by itself authorize factory/capability implementation, AsyncLLM
+  work, or a second backend — those require their own accepted changes.
