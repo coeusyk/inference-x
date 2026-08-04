@@ -268,6 +268,34 @@ class TestChatCompletionsEndpoint:
             assert body["error"]["type"] == "invalid_request_error"
         app.dependency_overrides.clear()
 
+    def test_strict_rejects_with_400_where_the_default_clamps(self):
+        """§9 C.7: strict: true rejects where the default clamps; both covered.
+
+        DEC-052 — strict may only convert a substitution into a rejection, so the
+        default path here must still succeed and report the substitution rather
+        than hiding it.
+        """
+        engine = _AdmissionAwareEngine(prompt_tokens=50)
+        registry = _make_stub_registry()
+        router = TaskRouter(registry, _TEST_MODEL)
+        pool = EnginePool({_TEST_MODEL: engine})
+        svc = ChatService(engine_pool=pool, registry=registry, router=router)
+        app.dependency_overrides[get_chat_service] = lambda: svc
+        with TestClient(app) as c:
+            payload = dict(self._payload)
+            payload["max_context_tokens"] = 200
+            payload["max_tokens"] = 4000
+
+            lenient = c.post("/v1/chat/completions", json=payload)
+            assert lenient.status_code == 200
+            codes = {w["code"] for w in lenient.json()["warnings"]}
+            assert "max_tokens_clamped_to_context" in codes
+
+            strict = c.post("/v1/chat/completions", json={**payload, "strict": True})
+            assert strict.status_code == 400
+            assert strict.json()["error"]["type"] == "invalid_request_error"
+        app.dependency_overrides.clear()
+
     def test_kv_saturation_returns_429_with_retry_after(self):
         """A batch-tier request is rejected (not silently truncated) when an
         in-flight reservation has already consumed the KV safety budget."""

@@ -248,16 +248,22 @@ async def test_stream_chat_tokens_raises_on_http_error(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_stream_chat_tokens_ignores_terminal_and_usage_events(monkeypatch):
-    """OS-2 compatibility invariant C4: the playground parser is unmodified.
+    """Compatibility invariant: the playground parser is unmodified.
 
     DEC-049 added two event kinds before ``data: [DONE]`` — a terminal event
     with an empty delta and a finish reason, and (when requested) a usage event
-    with an empty choices array. Neither carries delta text, so this consumer
-    must ignore both and yield exactly the same tokens it did before they
-    existed. If this test fails, the SSE change broke a live client.
+    with an empty choices array. DEC-053 added a third at the head, carrying the
+    resolved block and warnings. None of the three carries delta text, so this
+    consumer must ignore all of them and yield exactly the same tokens it did
+    before they existed. If this test fails, the SSE change broke a live client.
     """
     lines = (
-        _sse_lines("a", "b")
+        [
+            # OS-4/DEC-053 added a third event kind, at the head of the stream.
+            'data: {"id":"x","object":"chat.completion.chunk","choices":[],'
+            '"resolved":{"model":"m","max_tokens":512},"warnings":[]}',
+        ]
+        + _sse_lines("a", "b")
         + [
             'data: {"id":"x","object":"chat.completion.chunk",'
             '"choices":[{"delta":{},"index":0,"finish_reason":"stop"}]}',

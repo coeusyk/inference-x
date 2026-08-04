@@ -102,6 +102,59 @@ class TestChatService:
         assert resp.choices[0].message.content == "ok"
 
     @pytest.mark.asyncio
+    async def test_complete_attaches_resolved_and_warnings(self):
+        """The service attaches them; the engine never constructs them (DEC-047)."""
+        svc = _make_service()
+        resp = await svc.complete(self._req())
+        assert resp.resolved is not None
+        assert resp.resolved.model == "test"
+        assert resp.resolved.max_tokens == 512
+        # The stub engine builds its response without either field.
+        assert isinstance(resp.warnings, list)
+
+    @pytest.mark.asyncio
+    async def test_complete_resolved_reports_the_clamped_value(self):
+        svc = _make_service()
+        req = ChatCompletionRequest(
+            model="test",
+            messages=[ChatMessage(role="user", content="hello")],
+            max_tokens=4000,
+            max_context_tokens=200,
+        )
+        resp = await svc.complete(req)
+        assert resp.resolved is not None
+        assert resp.resolved.max_tokens < 4000
+        assert {w.code for w in resp.warnings} == {"max_tokens_clamped_to_context"} | {
+            w.code for w in resp.warnings if w.type == "degraded"
+        }
+
+    @pytest.mark.asyncio
+    async def test_strict_does_not_change_an_accepted_execution(self):
+        """DEC-052 §3: accepted under both modes -> byte-identical output.
+
+        This is the CI-checkable form of "strict changes response policy, never
+        runtime policy". If strict ever gains a runtime effect, this fails.
+        """
+        svc = _make_service()
+
+        def _req(strict: bool) -> ChatCompletionRequest:
+            return ChatCompletionRequest(
+                model="test",
+                messages=[ChatMessage(role="user", content="hello")],
+                seed=42,
+                strict=strict,
+            )
+
+        lenient = await svc.complete(_req(strict=False))
+        strict = await svc.complete(_req(strict=True))
+
+        assert (
+            lenient.choices[0].message.content.encode()
+            == strict.choices[0].message.content.encode()
+        )
+        assert lenient.resolved == strict.resolved
+
+    @pytest.mark.asyncio
     async def test_stream_response_formats_sse(self):
         svc = _make_service()
         req = ChatCompletionRequest(
@@ -111,7 +164,9 @@ class TestChatService:
         )
         events = [event async for event in svc.stream_response(req)]
         assert events[-1] == "data: [DONE]\n\n"
-        payload = json.loads(events[0].removeprefix("data: ").strip())
+        # events[0] is the pre-generation metadata event (DEC-053); the first
+        # content event follows it.
+        payload = json.loads(events[1].removeprefix("data: ").strip())
         assert payload["object"] == "chat.completion.chunk"
         assert payload["choices"][0]["delta"]["content"] == "ok"
 
@@ -202,7 +257,10 @@ def _parse(events: list[str]) -> list[object]:
 
 
 class TestStreamingContract:
-    """Authoritative protocol specification for the SSE event sequence (DEC-049).
+    """Authoritative protocol specification for the SSE event sequence.
+
+    DEC-049 fixed the order; DEC-053 extended it at the head with exactly one
+    pre-generation metadata event and forbade anything after the usage event.
 
     These assertions are the contract. If an implementation change makes one
     fail, the implementation is wrong — do not relax the assertion to match it.
@@ -220,14 +278,22 @@ class TestStreamingContract:
 
     @pytest.mark.asyncio
     async def test_default_stream_has_no_usage_event(self):
-        """No stream_options -> content, terminal, [DONE]. Exactly three events."""
+        """No stream_options -> resolution, content, terminal, [DONE]. Exactly four."""
         events = _parse(
             [e async for e in _make_service().stream_response(self._req())]
         )
 
-        assert len(events) == 3
+        assert len(events) == 4
 
-        content, terminal, done = events
+        resolution, content, terminal, done = events
+
+        # Pre-generation event: empty choices, resolved block, warnings array.
+        assert resolution["object"] == "chat.completion.chunk"
+        assert resolution["choices"] == []
+        assert resolution["resolved"]["model"] == "test"
+        assert "warnings" in resolution
+        assert "usage" not in resolution
+
         assert content["object"] == "chat.completion.chunk"
         assert content["choices"][0]["delta"] == {"content": "ok"}
         assert content["choices"][0]["finish_reason"] is None
@@ -240,11 +306,11 @@ class TestStreamingContract:
         assert done == "[DONE]"
 
         # All events share one completion id.
-        assert content["id"] == terminal["id"]
+        assert resolution["id"] == content["id"] == terminal["id"]
 
     @pytest.mark.asyncio
     async def test_include_usage_appends_one_usage_event_before_done(self):
-        """include_usage -> content, terminal, usage, [DONE]. Exactly four."""
+        """include_usage -> resolution, content, terminal, usage, [DONE]. Exactly five."""
         events = _parse(
             [
                 e
@@ -254,9 +320,10 @@ class TestStreamingContract:
             ]
         )
 
-        assert len(events) == 4
+        assert len(events) == 5
 
-        content, terminal, usage, done = events
+        resolution, content, terminal, usage, done = events
+        assert resolution["choices"] == []
         assert content["choices"][0]["delta"] == {"content": "ok"}
         assert terminal["choices"][0]["finish_reason"] == "stop"
 
@@ -272,8 +339,78 @@ class TestStreamingContract:
         assert done == "[DONE]"
 
     @pytest.mark.asyncio
+    async def test_nothing_is_emitted_after_the_usage_event(self):
+        """DEC-053: usage is the last event before [DONE], on every path.
+
+        Clients use the usage chunk as an end sentinel — OpenAI documents it as
+        the chunk streamed before [DONE]. An event slipped in between would be
+        dropped, or would terminate parsing early.
+        """
+        events = _parse(
+            [
+                e
+                async for e in _make_service().stream_response(
+                    self._req(stream_options={"include_usage": True})
+                )
+            ]
+        )
+
+        usage_index = next(
+            i for i, e in enumerate(events) if isinstance(e, dict) and "usage" in e
+        )
+        assert events[usage_index + 1] == "[DONE]"
+        assert usage_index == len(events) - 2
+
+    @pytest.mark.asyncio
+    async def test_resolution_precedes_every_content_event(self):
+        """DEC-053: the pre-generation phase ends before the first token."""
+        events = _parse(
+            [e async for e in _make_service().stream_response(self._req())]
+        )
+
+        def _has_content(e) -> bool:
+            return (
+                isinstance(e, dict)
+                and bool(e.get("choices"))
+                and bool(e["choices"][0].get("delta", {}).get("content"))
+            )
+
+        resolution_index = next(
+            i for i, e in enumerate(events) if isinstance(e, dict) and "resolved" in e
+        )
+        first_content = next(i for i, e in enumerate(events) if _has_content(e))
+        assert resolution_index == 0
+        assert resolution_index < first_content
+
+        # Exactly one pre-generation event — cardinality is fixed (DEC-053).
+        assert sum(1 for e in events if isinstance(e, dict) and "resolved" in e) == 1
+
+    @pytest.mark.asyncio
+    async def test_resolution_reports_the_clamped_value_not_the_requested_one(self):
+        """`resolved` is built from the effective request, never the original."""
+        events = _parse(
+            [
+                e
+                async for e in _make_service().stream_response(
+                    self._req(max_tokens=4000, max_context_tokens=200)
+                )
+            ]
+        )
+
+        resolution = events[0]
+        assert resolution["resolved"]["max_tokens"] < 4000
+        codes = {w["code"] for w in resolution["warnings"]}
+        assert "max_tokens_clamped_to_context" in codes
+
+    @pytest.mark.asyncio
     async def test_timeout_emits_error_then_done_and_nothing_else(self, monkeypatch):
-        """Timeout -> error, [DONE]. No terminal event, no usage event."""
+        """Timeout -> resolution, error, [DONE]. No terminal event, no usage event.
+
+        The pre-generation event has already gone out by the time the engine
+        stalls — that is the point of putting it at the head rather than before
+        [DONE] (DEC-053). It is the path where knowing what the server resolved
+        matters most, and a trailer would have lost it.
+        """
 
         class _HangingEngine(BaseEngine):
             async def generate(self, request):  # pragma: no cover - unused
@@ -301,8 +438,9 @@ class TestStreamingContract:
             [e async for e in svc.stream_response(self._req(stream_options={"include_usage": True}))]
         )
 
-        assert len(events) == 2
-        error, done = events
+        assert len(events) == 3
+        resolution, error, done = events
+        assert "resolved" in resolution
         assert "error" in error
         assert done == "[DONE]"
         # include_usage was requested, but a timed-out stream accounted nothing.

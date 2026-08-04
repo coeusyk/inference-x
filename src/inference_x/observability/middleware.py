@@ -235,6 +235,31 @@ def _extract_sse_usage(line: bytes) -> tuple[int, int] | None:
         return None
 
 
+def _has_content_delta(line: bytes) -> bool:
+    """True if *line* is an SSE event carrying generated text.
+
+    TTFT is anchored to the first such event, not to the first byte off the wire.
+    Since DEC-053 every stream opens with a pre-generation metadata event that is
+    emitted before the engine is even consulted; timestamping that would fold
+    admission latency into TTFT and silently make every /v1/metrics figure
+    incomparable with the ones recorded before it existed. ``benchmarks/runner.py``
+    already measures from the first content event — this keeps the two consumers
+    saying the same thing.
+    """
+    text = line.decode("utf-8", errors="ignore").strip()
+    if not text.startswith("data:"):
+        return False
+    data = text[len("data:") :].strip()
+    if not data or data == "[DONE]":
+        return False
+    try:
+        payload = json.loads(data)
+        choices = payload.get("choices") or []
+        return bool(choices and choices[0].get("delta", {}).get("content"))
+    except Exception:
+        return False
+
+
 async def _wrap_and_record_sse(
     body_iterator: AsyncIterator,
     *,
@@ -262,11 +287,11 @@ async def _wrap_and_record_sse(
     try:
         async for chunk in body_iterator:
             raw = chunk if isinstance(chunk, bytes) else chunk.encode()
-            if ttft_ms is None:
-                ttft_ms = (time.perf_counter() - start) * 1000
             buffer += raw
             while b"\n\n" in buffer:
                 line, buffer = buffer.split(b"\n\n", 1)
+                if ttft_ms is None and _has_content_delta(line):
+                    ttft_ms = (time.perf_counter() - start) * 1000
                 usage = _extract_sse_usage(line)
                 if usage is not None:
                     prompt_tokens, completion_tokens = usage

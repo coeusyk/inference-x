@@ -64,6 +64,66 @@ class ChatCompletionRequest(BaseModel):
         "backend sampler when set (DEC-051). Absent/null omits seed from "
         "SamplingParams. Does not claim end-to-end determinism.",
     )
+    strict: bool = Field(
+        default=False,
+        description="When true, a request the server would have executed with a "
+        "substituted parameter is rejected with 400 instead (DEC-052). Strict "
+        "only converts substitution into rejection — it never changes the "
+        "substitution itself, and it never rejects on degraded warnings, which "
+        "would turn admission fail-closed (DEC-047 §4).",
+    )
+
+
+class ResponseWarning(BaseModel):
+    """One thing the server did that the client did not ask for (OS-4).
+
+    `type` is the axis a client branches on, and it has exactly two members:
+
+    - `substituted` — the server ran something different from what was asked.
+      This is the set `strict` rejects on (DEC-052).
+    - `degraded` — the server could not verify something and proceeded anyway.
+      This never rejects, under either `strict` value: rejecting here would
+      convert admission's fail-open posture into fail-closed (DEC-047 §4).
+
+    `code` is the stable machine identifier — what `strict` keys on and what
+    tests assert. The closed set is registered in DEC-053. `message` is human
+    text and the only field free to change without a spec change. `field` names
+    the affected request field, or None for a gate that maps to no single field.
+    """
+
+    type: Literal["substituted", "degraded"]
+    code: str
+    message: str
+    field: Optional[str] = None
+
+
+class ResolvedRequest(BaseModel):
+    """The request the server actually executed — the Effective Request (OS-4).
+
+    Membership follows a derivability rule rather than curation: a field appears
+    here **iff** it exists on `ChatCompletionRequest`, minus `messages` (content,
+    not a parameter) and minus the transport/policy controls `stream`,
+    `stream_options` and `strict`. `tests/unit/test_schemas.py` enforces the rule,
+    so a field added to the request later forces an explicit decision here rather
+    than silently omitting itself.
+
+    It is a full echo rather than a diff: a diff needs the original to be
+    interpretable, and only a self-contained echo can be re-submitted as-is with
+    the caller's own messages.
+
+    Load-time engine and tier settings do not appear here. They are process-level
+    state, and a per-request block that reports them conflates two lifetimes. A
+    tier cap that *caused* a clamp surfaces as that clamp's warning instead.
+    """
+
+    model: str
+    temperature: Optional[float] = None
+    max_tokens: Optional[int] = None
+    top_p: Optional[float] = None
+    max_context_tokens: Optional[int] = None
+    max_output_tokens: Optional[int] = None
+    priority: Literal["interactive", "batch"] = "interactive"
+    seed: Optional[int] = None
 
 
 class ChatCompletionMessage(BaseModel):
@@ -108,3 +168,15 @@ class ChatCompletionResponse(BaseModel):
     model: str
     choices: list[ChatCompletionChoice]
     usage: ChatCompletionUsage
+    resolved: Optional[ResolvedRequest] = Field(
+        default=None,
+        description="The request the server actually executed (OS-4). Attached by "
+        "ChatService, never by an engine — the Engine Boundary does not learn "
+        "about admission. Defaults to None so direct construction keeps working; "
+        "on the service path it is always populated.",
+    )
+    warnings: list[ResponseWarning] = Field(
+        default_factory=list,
+        description="Every substitution the server made and every check it could "
+        "not perform (OS-4). Empty, never absent, when nothing was substituted.",
+    )

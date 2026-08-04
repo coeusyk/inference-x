@@ -469,11 +469,18 @@ class VLLMEngine(BaseEngine):
     def count_prompt_tokens(self, request: ChatCompletionRequest) -> int:
         """Real prompt token count via this model's tokenizer, for admission control.
 
-        Accessed via getattr() by routing/admission.py (BaseEngine doesn't declare
-        this — same optional-attribute pattern as kv_capacity_tokens in
-        api/routes/metrics.py). Falls back to a chars/4 estimate — the same
-        heuristic AdmissionController uses for engines without a tokenizer at
-        all — if tokenization fails for any reason.
+        Overrides the BaseEngine capability declared per DEC-047 §3, which
+        routing/admission.py now calls directly rather than discovering with
+        getattr. Narrowing the declared ``int | None`` to ``int`` is deliberate:
+        this engine always produces a number, falling back to a chars/4 estimate
+        — the same heuristic AdmissionController uses for engines with no
+        tokenizer at all — if tokenization fails for any reason.
+
+        A consequence worth naming: because this returns an estimate rather than
+        None on tokenizer failure, admission cannot tell that path from a real
+        count and emits no `prompt_tokens_estimated` warning for it. Recorded as a
+        known limitation of OS-4 rather than changed here — the engine's own
+        fallback contract is out of that change's scope.
         """
         try:
             prompt = self._stream_prompt(request)

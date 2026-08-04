@@ -486,6 +486,50 @@ class TestObservabilityMiddleware:
         assert rec.total_tokens == 11
         assert rec.tokens_per_sec is not None and rec.tokens_per_sec > 0
 
+    def test_ttft_is_anchored_to_the_first_content_event(self):
+        """DEC-053: the pre-generation event must not enter the measurement.
+
+        Left on the first raw chunk, TTFT would silently absorb admission latency
+        and every /v1/metrics figure would stop being comparable with the ones
+        recorded before the event existed — a discontinuity introduced by
+        accident rather than by decision.
+        """
+        from inference_x.observability.middleware import _has_content_delta
+
+        pre_generation = (
+            b'data: {"id":"c","object":"chat.completion.chunk","choices":[],'
+            b'"resolved":{"model":"m"},"warnings":[]}'
+        )
+        content = (
+            b'data: {"id":"c","object":"chat.completion.chunk",'
+            b'"choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}'
+        )
+        terminal = (
+            b'data: {"id":"c","object":"chat.completion.chunk",'
+            b'"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}'
+        )
+        usage = (
+            b'data: {"id":"c","object":"chat.completion.chunk","choices":[],'
+            b'"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}'
+        )
+
+        assert _has_content_delta(pre_generation) is False
+        assert _has_content_delta(content) is True
+        assert _has_content_delta(terminal) is False
+        assert _has_content_delta(usage) is False
+        assert _has_content_delta(b"data: [DONE]") is False
+
+    def test_pre_generation_event_yields_no_token_figure(self):
+        """C4: the usage extractor must ignore it — no `usage` key to find."""
+        from inference_x.observability.middleware import _extract_sse_usage
+
+        pre_generation = (
+            b'data: {"id":"c","object":"chat.completion.chunk","choices":[],'
+            b'"resolved":{"model":"m"},"warnings":[{"type":"degraded",'
+            b'"code":"kv_gate_skipped","message":"x","field":null}]}'
+        )
+        assert _extract_sse_usage(pre_generation) is None
+
     def test_streaming_mid_stream_engine_failure_still_records_partial_progress(
         self, obs_client
     ):

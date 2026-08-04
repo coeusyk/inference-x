@@ -10,8 +10,30 @@ from inference_x.engines.base import BaseEngine
 from inference_x.engines.pool import EnginePool
 from inference_x.routing.admission import AdmissionController
 from inference_x.routing.task_router import TaskRouter
-from inference_x.schemas.chat import ChatCompletionRequest, ChatCompletionResponse
+from inference_x.schemas.chat import (
+    ChatCompletionRequest,
+    ChatCompletionResponse,
+    ResolvedRequest,
+)
 from inference_x.services.model_service import ModelRegistry
+
+_RESOLVED_FIELDS = tuple(ResolvedRequest.model_fields)
+
+
+def _resolved(effective_request: ChatCompletionRequest) -> ResolvedRequest:
+    """Serialize the Effective Request — what the server actually ran (OS-4).
+
+    Built from *effective_request*, never from the client's original: building it
+    from the original would report what was asked for rather than what ran, which
+    inverts the point of the block.
+
+    Field membership is derived from ``ResolvedRequest`` rather than listed here,
+    so the derivability rule has exactly one home and this function cannot drift
+    from it (see ResolvedRequest, and the schema test that enforces the rule).
+    """
+    return ResolvedRequest(
+        **{name: getattr(effective_request, name) for name in _RESOLVED_FIELDS}
+    )
 
 
 class ChatService:
@@ -55,23 +77,41 @@ class ChatService:
             update={"max_tokens": admitted.effective_max_tokens}
         )
         try:
-            return await engine.generate(effective_request)
+            response = await engine.generate(effective_request)
         finally:
             self._admission.release(routed_model, admitted.reserved_tokens)
+        # Attached here, never by the engine: the Engine Boundary does not learn
+        # about admission (DEC-047).
+        return response.model_copy(
+            update={
+                "resolved": _resolved(effective_request),
+                "warnings": list(admitted.warnings),
+            }
+        )
 
     async def stream_response(
         self, request: ChatCompletionRequest
     ) -> AsyncGenerator[str, None]:
         """Route a chat request and yield OpenAI-compatible SSE events.
 
-        Event order is fixed (DEC-049, OS-2 R3) and is the protocol:
+        Event order is fixed (DEC-049 and OS-2 R3, extended at the head by
+        DEC-053) and is the protocol:
 
+        0. exactly one pre-generation event with ``choices: []`` carrying
+           ``resolved`` and ``warnings``, always, before any content;
         1. zero or more content events, each with ``finish_reason: null``;
         2. exactly one terminal event with an empty delta and a real
            ``finish_reason``;
         3. one usage event with ``choices: []`` — only when the client asked via
            ``stream_options.include_usage`` and the engine accounted usage;
         4. ``data: [DONE]``, always last.
+
+        Event 0 sits at the head rather than before ``[DONE]`` because everything
+        it carries is fixed the moment ``admit()`` returns, and a trailer would
+        be lost on the timeout path — the path where knowing what the server
+        resolved matters most (DEC-053). Nothing is ever emitted after the usage
+        event: OpenAI documents that chunk as the one streamed before ``[DONE]``
+        and clients use it as an end sentinel.
 
         The terminal event is separate rather than folded into the last content
         event, because the service cannot know a content event is the last one
@@ -95,6 +135,16 @@ class ChatService:
 
         def _event(payload: dict) -> str:
             return f"data: {json.dumps(payload, separators=(',', ':'))}\n\n"
+
+        yield _event(
+            {
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "choices": [],
+                "resolved": _resolved(effective_request).model_dump(),
+                "warnings": [w.model_dump() for w in admitted.warnings],
+            }
+        )
 
         gen = engine.generate_stream(effective_request)
         try:

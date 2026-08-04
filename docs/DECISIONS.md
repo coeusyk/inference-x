@@ -1518,3 +1518,88 @@ Use this document to capture non-obvious design decisions as the project evolves
   behaviour aside from additive Effective Request surfaces (`resolved` /
   `warnings`).
 - Supersession: remains in force until a future DEC explicitly widens `strict`.
+
+### DEC-053
+- Date: 2026-08-04
+- Status: accepted
+- Title: Pre-generation and post-generation metadata lifecycle (OS-4)
+- Context: Phase A OS-4 (`docs/PHASE-A-EXECUTION-PLAN.md` §4, §9 C.6;
+  `docs/REVIEW-2026-08-04-os4-architecture-freeze.md`). OS-4 surfaces the
+  Effective Request (`resolved`) and typed degradation (`warnings`) on the
+  streamed path as well as the non-streamed one, which adds an event to the SSE
+  order DEC-049 fixed. Phase B3 will add per-request timings and Phase C will
+  add replay metadata to the same stream.
+- Problem: Without a rule saying *which* metadata may be emitted *when*, each
+  later phase re-argues placement, and a fact emitted in the wrong phase is
+  either lost on the error path or physically un-emittable in its assigned slot.
+  Two loose framings were considered and rejected below.
+- Decision:
+  1. **Pre-generation phase.** A streamed response has a pre-generation metadata
+     phase that ends when the first token is sampled. An event MAY be emitted in
+     that phase **if and only if** every field it carries is fully determined and
+     immutable at the moment the effective request is finalized. A fact that can
+     change during or after generation MUST NOT be emitted in this phase.
+  2. **Cardinality.** The pre-generation phase contains **exactly one** event.
+     Adding a second is a modification of the platform requirement, not an
+     extension of it.
+  3. **Post-generation phase.** Events after the terminal event carry only facts
+     about what generation produced. The usage event is the last event before
+     `data: [DONE]`. **No event is emitted after the usage event** — OpenAI
+     documents the usage chunk as the one streamed before `[DONE]` and clients
+     use it as an end sentinel.
+  4. The rule is streaming-only. `ChatCompletionResponse` has no phases and
+     carries `resolved` and `warnings` in one body regardless.
+- Alternatives considered:
+  - **Anchor on "determined before the first token is sampled."** Rejected: it
+    is near-tautological (an emitted event is trivially determined before
+    emission), and it leaks. Queue/wait time is determined when the engine
+    begins processing — before the first token but *after* the prologue is
+    already on the wire — so that anchor classifies as pre-generation a fact
+    that cannot occupy the slot, splitting the Phase B3 timing class in two.
+  - **"One prologue event" as the invariant.** Rejected as the *invariant*:
+    cardinality constrains how many events there are and says nothing about what
+    may go in them. Kept as the current instantiation (decision 2) instead.
+  - **"One or more" cardinality in the normative wire text.** Rejected: it
+    weakens the exact-sequence assertion DEC-049/OS-2 explicitly protected, for
+    a second event that does not exist.
+  - **Carry `resolved` as a trailer before `[DONE]`.** Rejected: the facts are
+    determined at admission, a trailer is lost on the timeout path, the client
+    cannot act on a clamp until the generation it no longer wants has finished,
+    and it collides with the slot Phase B3 needs.
+- Consequences:
+  - **TTFT is measured from the first content event**, not the first SSE chunk.
+    `observability/middleware.py` is changed accordingly by OS-4;
+    `benchmarks/runner.py` already did this. Phase B3 inherits the definition.
+  - **`resolved ⊂ prologue`.** Two independent rules: *derivability* governs
+    what is in `resolved` (a field appears iff it exists on
+    `ChatCompletionRequest`, minus `messages` and the transport/policy controls);
+    *determinacy* governs what is in the prologue. The prologue is the superset.
+    A later phase must not conclude "prologue means `resolved`" and widen
+    `resolved` to fit something that is merely prologue-eligible — model
+    revision and any replay handle are the concrete cases.
+  - **Trace/request ids, if introduced, are minted at admission**, making them
+    pre-generation and therefore available on the error path — where DEC-049
+    emits an error event and `[DONE]` with no terminal and no usage event, and
+    where correlation matters most.
+  - **Warning-code registry.** The closed set OS-4 introduces:
+
+    | `type` | `code` | `field` |
+    |---|---|---|
+    | `substituted` | `max_tokens_clamped_to_context` | `max_tokens` |
+    | `substituted` | `max_tokens_clamped_to_kv_budget` | `max_tokens` |
+    | `degraded` | `prompt_tokens_estimated` | `messages` |
+    | `degraded` | `kv_gate_skipped` | — |
+    | `degraded` | `sequence_gate_skipped` | — |
+
+    Adding a code is a spec change. All OS-4 warnings are pre-generation; a
+    post-generation warning, if one ever exists, attaches to the usage event
+    rather than being retrofitted into the prologue.
+  - Negative: a first-party consumer that timestamped first-chunk-received must
+    be updated. Exactly one existed (`observability/middleware.py`).
+- Compatibility: additive. The pre-generation event carries `choices: []` and no
+  top-level `usage`, so `middleware._extract_sse_usage`, `benchmarks/runner.py`
+  and `playground/streaming.py` all skip it unmodified. DEC-049's event order is
+  extended at the head, never after the usage event.
+- Supersession: does not supersede DEC-049 — it constrains what may be added to
+  the order DEC-049 fixed. Remains in force until a future DEC changes the phase
+  boundary or the cardinality.

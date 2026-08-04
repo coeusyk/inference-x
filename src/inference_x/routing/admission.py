@@ -19,8 +19,8 @@ Three independent gates, each keyed on real numbers where they're available:
 2. Context length: prompt_tokens + requested_output_tokens must fit the
    model's context window (min of ModelEntry.max_model_len, the resolved VRAM
    tier's max_model_len_cap, and the request's own max_context_tokens, if
-   set). Prompt tokens come from the engine's tokenizer when it exposes
-   count_prompt_tokens(); otherwise a chars/4 heuristic is used.
+   set). Prompt tokens come from BaseEngine.count_prompt_tokens(), the declared
+   capability (DEC-047 §3); when it returns None a chars/4 heuristic is used.
 
 3. KV-pool pressure: a per-model in-memory counter tracks tokens reserved by
    in-flight requests, compared against the engine's real post-load
@@ -33,6 +33,14 @@ All three gates degrade to "don't block" when the underlying number is
 unavailable (no resolved tier, no tokenizer, no reported KV capacity) —
 consistent with the rest of this codebase's fail-open-with-a-log posture for
 advisory/best-effort signals (e.g. VRAM tier resolution in api/deps.py).
+
+Since OS-4 that degradation is typed rather than silent: every skipped gate and
+every estimated input produces a ResponseWarning of type "degraded" alongside a
+structured log record, and every clamp produces one of type "substituted". The
+warnings ride out on the response so a client can see what the server did
+(PHASE-A-EXECUTION-PLAN §9 C.6/C.8). Making it observable is the whole change —
+what admission *decides* is unchanged, and no degraded condition ever rejects,
+because that would turn fail-open into fail-closed (DEC-047 §4).
 """
 from __future__ import annotations
 
@@ -41,7 +49,8 @@ import threading
 from dataclasses import dataclass
 from typing import Any
 
-from inference_x.schemas.chat import ChatCompletionRequest
+from inference_x.engines.base import BaseEngine
+from inference_x.schemas.chat import ChatCompletionRequest, ResponseWarning
 from inference_x.services.model_service import ModelRegistry
 
 logger = logging.getLogger(__name__)
@@ -71,31 +80,80 @@ class EngineSaturatedError(Exception):
         self.retry_after_s = retry_after_s
 
 
+class StrictModeViolationError(ValueError):
+    """The request asked for `strict` and the server would have substituted.
+
+    Subclasses ValueError so it is handled by the existing sanitized 400 handler
+    (api/errors.value_error_handler) without a new registration — the same route
+    ContextTooLongError takes.
+
+    Raised only where a "substituted" warning would otherwise be emitted, from
+    inside that same branch (DEC-052: one predicate, two outcomes). Never raised
+    for a "degraded" condition — see the module docstring.
+    """
+
+
 @dataclass(frozen=True)
 class AdmissionResult:
     """Outcome of a successful admission check."""
 
     effective_max_tokens: int
     reserved_tokens: int
+    warnings: tuple[ResponseWarning, ...] = ()
 
 
-def _estimate_prompt_tokens(engine: Any, request: ChatCompletionRequest) -> int:
-    """Prompt token count for admission math.
+def _warn(
+    sink: list[ResponseWarning],
+    *,
+    type: str,
+    code: str,
+    message: str,
+    field_name: str | None = None,
+) -> None:
+    """Append a warning and log the same condition — one mechanism, two sinks.
 
-    Prefers the engine's own tokenizer (VLLMEngine.count_prompt_tokens) via
-    getattr — mirrors the existing getattr(engine, "kv_capacity_tokens", None)
-    pattern in api/routes/metrics.py, since BaseEngine doesn't declare either
-    as part of its abstract contract. Falls back to a chars/4 heuristic for
-    engines that don't expose a tokenizer (e.g. test stubs).
+    Building the structured log and the response warning as two independent
+    mechanisms guarantees the second one drifts from the first, so they are
+    emitted here together or not at all (PHASE-A-EXECUTION-PLAN §3.4c).
     """
-    counter = getattr(engine, "count_prompt_tokens", None)
-    if callable(counter):
-        try:
-            return int(counter(request))
-        except Exception as exc:
-            logger.debug("count_prompt_tokens failed, using chars/4 fallback: %s", exc)
+    sink.append(
+        ResponseWarning(type=type, code=code, message=message, field=field_name)  # type: ignore[arg-type]
+    )
+    logger.info("admission %s: code=%s field=%s %s", type, code, field_name, message)
+
+
+def _prompt_tokens(
+    engine: BaseEngine,
+    request: ChatCompletionRequest,
+    warnings: list[ResponseWarning],
+) -> int:
+    """Prompt token count for admission math, via the declared capability.
+
+    Calls BaseEngine.count_prompt_tokens() — declared since OS-4 per DEC-047 §3,
+    rather than probed with getattr. `None` means this engine has no tokenizer to
+    ask, which is a supported state: the chars/4 heuristic stands in and the
+    substitution is reported instead of being silently absorbed.
+
+    This heuristic is an admission *gate input*, never a reported figure — the
+    one authorized use of character-based estimation left in the codebase
+    (PHASE-A-EXECUTION-PLAN §9 A.3).
+    """
+    counted = engine.count_prompt_tokens(request)
+    if counted is not None:
+        return int(counted)
     total_chars = sum(len(m.content) for m in request.messages)
-    return max(1, total_chars // _CHARS_PER_TOKEN_FALLBACK)
+    estimate = max(1, total_chars // _CHARS_PER_TOKEN_FALLBACK)
+    _warn(
+        warnings,
+        type="degraded",
+        code="prompt_tokens_estimated",
+        field_name="messages",
+        message=(
+            f"Engine reported no prompt-token count; admission used a "
+            f"chars/{_CHARS_PER_TOKEN_FALLBACK} estimate of {estimate} tokens."
+        ),
+    )
+    return estimate
 
 
 class _PerModelCounter:
@@ -158,14 +216,15 @@ class AdmissionController:
         self,
         routed_model: str,
         request: ChatCompletionRequest,
-        engine: Any,
+        engine: BaseEngine,
     ) -> AdmissionResult:
         """Validate *request* against context and KV limits for *routed_model*.
 
-        Returns the admitted (possibly clamped) max_tokens and the token count
-        reserved against the KV tracker — the caller MUST call release() with
-        that same reserved_tokens value once the request completes (success or
-        failure), typically from a try/finally around engine dispatch.
+        Returns the admitted (possibly clamped) max_tokens, the token count
+        reserved against the KV tracker, and every warning describing what this
+        method substituted or could not check. The caller MUST call release()
+        with that same reserved_tokens value once the request completes (success
+        or failure), typically from a try/finally around engine dispatch.
 
         Raises:
             ContextTooLongError: prompt alone exceeds the context ceiling, or
@@ -175,9 +234,23 @@ class AdmissionController:
                 batch-tier (429; caller should retry later), or the model's
                 sequence-concurrency ceiling is already full (429 for either
                 priority — there is no clamp path for a sequence slot).
+            StrictModeViolationError: request.strict is set and this method would
+                otherwise have clamped a parameter (400).
         """
+        warnings: list[ResponseWarning] = []
+
         effective_max_num_seqs = self._effective_max_num_seqs(routed_model)
-        if effective_max_num_seqs is not None:
+        if effective_max_num_seqs is None:
+            _warn(
+                warnings,
+                type="degraded",
+                code="sequence_gate_skipped",
+                message=(
+                    "No VRAM tier resolved; the sequence-concurrency gate did not "
+                    "run for this request."
+                ),
+            )
+        else:
             in_flight = self._seq_tracker.current(routed_model)
             if in_flight >= effective_max_num_seqs:
                 raise EngineSaturatedError(
@@ -191,7 +264,7 @@ class AdmissionController:
         if request.max_context_tokens is not None:
             context_ceiling = min(context_ceiling, request.max_context_tokens)
 
-        prompt_tokens = _estimate_prompt_tokens(engine, request)
+        prompt_tokens = _prompt_tokens(engine, request, warnings)
         if prompt_tokens > context_ceiling:
             raise ContextTooLongError(
                 f"Prompt is {prompt_tokens} tokens, which exceeds the "
@@ -207,10 +280,40 @@ class AdmissionController:
                     f"({effective_output} tokens) exceeds the {context_ceiling}-token "
                     f"context limit for model '{routed_model}'."
                 )
+            # DEC-052: one predicate, two outcomes. The condition that raises under
+            # strict is textually the condition that warns by default — there is no
+            # second `if` for the two to drift apart on.
+            if request.strict:
+                raise StrictModeViolationError(
+                    f"strict: requested output ({effective_output} tokens) does not fit "
+                    f"the {context_ceiling}-token context limit for model "
+                    f"'{routed_model}' with a {prompt_tokens}-token prompt; "
+                    f"the server would have clamped it to {room}."
+                )
+            _warn(
+                warnings,
+                type="substituted",
+                code="max_tokens_clamped_to_context",
+                field_name="max_tokens",
+                message=(
+                    f"Requested {effective_output} output tokens; clamped to {room} to "
+                    f"fit the {context_ceiling}-token context limit."
+                ),
+            )
             effective_output = room
 
         capacity = getattr(engine, "kv_capacity_tokens", None)
-        if capacity is not None:
+        if capacity is None:
+            _warn(
+                warnings,
+                type="degraded",
+                code="kv_gate_skipped",
+                message=(
+                    "Engine reported no KV capacity; the KV-pressure gate did not "
+                    "run for this request."
+                ),
+            )
+        else:
             budget = capacity * self._kv_safety_margin
             reserved_now = self._tracker.current(routed_model)
             available = budget - reserved_now - prompt_tokens
@@ -221,12 +324,33 @@ class AdmissionController:
                         f"({reserved_now}/{int(budget)} tokens reserved); retry shortly.",
                         retry_after_s=1.0,
                     )
-                effective_output = max(_MIN_CLAMPED_OUTPUT_TOKENS, int(available))
+                clamped = max(_MIN_CLAMPED_OUTPUT_TOKENS, int(available))
+                if request.strict:
+                    raise StrictModeViolationError(
+                        f"strict: model '{routed_model}' has {int(available)} tokens of "
+                        f"KV budget available for {effective_output} requested output "
+                        f"tokens; the server would have clamped it to {clamped}."
+                    )
+                _warn(
+                    warnings,
+                    type="substituted",
+                    code="max_tokens_clamped_to_kv_budget",
+                    field_name="max_tokens",
+                    message=(
+                        f"Requested {effective_output} output tokens; clamped to "
+                        f"{clamped} to fit the available KV budget."
+                    ),
+                )
+                effective_output = clamped
 
         reserved_tokens = prompt_tokens + effective_output
         self._tracker.add(routed_model, reserved_tokens)
         self._seq_tracker.add(routed_model, 1)
-        return AdmissionResult(effective_max_tokens=effective_output, reserved_tokens=reserved_tokens)
+        return AdmissionResult(
+            effective_max_tokens=effective_output,
+            reserved_tokens=reserved_tokens,
+            warnings=tuple(warnings),
+        )
 
     def release(self, routed_model: str, reserved_tokens: int) -> None:
         """Release a reservation made by admit() once the request has completed."""

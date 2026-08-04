@@ -163,7 +163,11 @@ as a residual gap against §9 C.8 rather than silently absorbed into scope.
 
 `tests/unit/test_schemas.py`, `tests/unit/test_admission.py`,
 `tests/unit/test_chat_service.py`, `tests/unit/test_routes.py`,
-`tests/unit/test_observability.py`.
+`tests/unit/test_observability.py`, and — for the consumer-compatibility
+assertions in Validation 6 — `tests/unit/test_streaming.py` (playground parser)
+and `tests/unit/test_benchmark_runner.py` (benchmark runner). Those two files
+assert that `playground/streaming.py` and `benchmarks/runner.py` parse the new
+stream **without being modified**; the tests move, the consumers do not.
 
 ### Modified — docs
 
