@@ -87,7 +87,10 @@ async def test_generate_stream_yields_incremental_chunks_from_llm_engine():
     with patch("inference_x.engines.vllm_engine._VLLM_AVAILABLE", True):
         chunks = [chunk async for chunk in engine.generate_stream(req)]
 
-    assert chunks == ["Hello", " world"]
+    assert [c.content for c in chunks if c.content] == ["Hello", " world"]
+    terminal = chunks[-1]
+    assert terminal.finish_reason == "stop"
+    assert terminal.usage is not None
     engine._driver.shutdown()
 
 
@@ -114,7 +117,8 @@ async def test_generate_stream_does_not_use_async_llm_engine():
     with patch("inference_x.engines.vllm_engine._VLLM_AVAILABLE", True):
         chunks = [chunk async for chunk in engine.generate_stream(req)]
 
-    assert chunks == ["ok"]
+    assert [c.content for c in chunks if c.content] == ["ok"]
+    assert chunks[-1].finish_reason == "stop"
     assert getattr(engine, "_async_llm", None) is None
     engine._driver.shutdown()
 
@@ -229,3 +233,48 @@ def test_count_prompt_tokens_falls_back_to_chars_over_4_on_error():
         model="test-model", messages=[ChatMessage(role="user", content="12345678")]
     )
     assert engine.count_prompt_tokens(req) == 2  # 8 chars // 4
+
+
+@pytest.mark.asyncio
+async def test_streamed_and_non_streamed_usage_agree():
+    """OS-2 acceptance criterion 2: the two paths report the same counts.
+
+    Both derive usage from `derive_terminal_metadata`, so agreement is
+    structural rather than coincidental — this test pins that. Note the counts
+    come from vLLM's token_ids (5), not from counting words in "Hello world"
+    (2), which is exactly what DEC-049 replaced.
+    """
+    final = _FakeRequestOutput(
+        request_id="",
+        outputs=[
+            _FakeCompletion(
+                text="Hello world",
+                finish_reason="stop",
+                token_ids=[10, 11, 12, 13, 14],
+            )
+        ],
+        finished=True,
+    )
+
+    stream_engine = _make_engine([[final]])
+    req = ChatCompletionRequest(
+        model="test-model",
+        messages=[ChatMessage(role="user", content="hi")],
+        stream=True,
+    )
+    with patch("inference_x.engines.vllm_engine._VLLM_AVAILABLE", True):
+        chunks = [c async for c in stream_engine.generate_stream(req)]
+    stream_engine._driver.shutdown()
+    streamed_usage = chunks[-1].usage
+
+    # Non-streaming path over an identical RequestOutput.
+    complete_engine = _make_engine([[final]])
+    complete_engine._run_completion = lambda request: [final]
+    resp = await complete_engine.generate(req)
+    complete_engine._driver.shutdown()
+
+    assert streamed_usage is not None
+    assert streamed_usage.completion_tokens == resp.usage.completion_tokens == 5
+    assert streamed_usage.prompt_tokens == resp.usage.prompt_tokens == 3
+    assert streamed_usage.total_tokens == resp.usage.total_tokens == 8
+    assert chunks[-1].finish_reason == resp.choices[0].finish_reason == "stop"

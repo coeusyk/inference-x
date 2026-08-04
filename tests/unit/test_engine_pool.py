@@ -3,7 +3,11 @@ import pytest
 
 from inference_x.engines.base import BaseEngine
 from inference_x.engines.pool import EnginePool
-from inference_x.schemas.chat import ChatCompletionRequest, ChatCompletionResponse
+from inference_x.schemas.chat import (
+    ChatCompletionRequest,
+    ChatCompletionResponse,
+    ChatStreamChunk,
+)
 
 
 class _StubEngine(BaseEngine):
@@ -14,7 +18,8 @@ class _StubEngine(BaseEngine):
         raise NotImplementedError
 
     async def generate_stream(self, request: ChatCompletionRequest):
-        yield "stub"
+        yield ChatStreamChunk(content="stub")
+        yield ChatStreamChunk(content="", finish_reason="stop")
 
     def is_healthy(self) -> bool:
         return self._healthy

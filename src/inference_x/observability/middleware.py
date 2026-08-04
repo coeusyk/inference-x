@@ -13,13 +13,18 @@ status/headers so the client receives an identical payload.
 For streaming (SSE) chat completion 200 responses, the body is NOT buffered —
 that would defeat the point of streaming. Instead ``body_iterator`` is wrapped
 so chunks still pass through immediately, while the wrapper measures
-time-to-first-chunk (TTFT) and accumulates an approximate completion-token
-count (whitespace word count over each chunk's delta content — the same
-approximation the playground UI and benchmarks/runner.py already use, because
-streaming responses carry no final `usage` block; see DEC-023). The wrapper
-records exactly one RequestRecord when the stream ends, so the unconditional
-record() call at the bottom of dispatch() is skipped for this branch to avoid
-double-counting.
+time-to-first-chunk (TTFT) and reads engine-accounted token counts from the
+terminal usage event (DEC-049). The wrapper records exactly one RequestRecord
+when the stream ends, so the unconditional record() call at the bottom of
+dispatch() is skipped for this branch to avoid double-counting.
+
+That usage event is only present when the client sets
+``stream_options.include_usage``. When it is absent, this wrapper records TTFT
+and latency but **no token counts and no tokens/sec** — deliberately. Until
+DEC-049 it counted whitespace-delimited words in each delta and reported that
+as a token count; the figure was wrong by a model-dependent margin and it fed
+/v1/metrics. Reporting nothing is correct; reporting an estimate is not. Do not
+reintroduce a fallback here.
 
 Known limitation: an engine failure *after* headers are sent (mid-stream) is
 not observable as `error=True` here. Starlette's BaseHTTPMiddleware runs the
@@ -200,28 +205,34 @@ async def _buffer_and_extract_tokens(
         return body_bytes, None, None, None
 
 
-def _count_sse_delta_tokens(line: bytes) -> int:
-    """Approximate completion-token count for one ``data: {...}`` SSE line.
+def _extract_sse_usage(line: bytes) -> tuple[int, int] | None:
+    """Return ``(prompt_tokens, completion_tokens)`` from an SSE usage event.
 
-    Uses a whitespace word count over the chunk's ``delta.content`` — the same
-    approximation used client-side by the playground and by
-    benchmarks/runner.py's ``_run_prompt_stream`` (streaming responses don't
-    carry a final ``usage`` block from vLLM; see DEC-023). Returns 0 for
-    ``[DONE]``, malformed, or non-``data:`` lines.
+    The usage event is the one with ``choices: []`` and a ``usage`` object,
+    emitted before ``data: [DONE]`` when the client set
+    ``stream_options.include_usage`` (DEC-049). Returns None for every other
+    line, including ``[DONE]`` and malformed input.
+
+    There is deliberately no fallback. Before DEC-049 this module counted
+    whitespace-delimited words in each delta and reported that as a token count;
+    it was wrong by a model-dependent margin and it fed /v1/metrics. When no
+    usage event arrives, the caller records no token figure at all — an absent
+    number is honest, an estimated one is not.
     """
     text = line.decode("utf-8", errors="ignore").strip()
     if not text.startswith("data:"):
-        return 0
+        return None
     data = text[len("data:") :].strip()
     if not data or data == "[DONE]":
-        return 0
+        return None
     try:
         payload = json.loads(data)
-        delta = (payload.get("choices") or [{}])[0].get("delta", {})
-        content = delta.get("content", "")
-        return len(content.split()) if content else 0
+        usage = payload.get("usage")
+        if not isinstance(usage, dict):
+            return None
+        return int(usage.get("prompt_tokens", 0)), int(usage.get("completion_tokens", 0))
     except Exception:
-        return 0
+        return None
 
 
 async def _wrap_and_record_sse(
@@ -243,7 +254,8 @@ async def _wrap_and_record_sse(
     ``error=True`` here.
     """
     ttft_ms: float | None = None
-    tokens_generated = 0
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
     buffer = b""
     status_code = 200
     had_error = False
@@ -255,7 +267,9 @@ async def _wrap_and_record_sse(
             buffer += raw
             while b"\n\n" in buffer:
                 line, buffer = buffer.split(b"\n\n", 1)
-                tokens_generated += _count_sse_delta_tokens(line)
+                usage = _extract_sse_usage(line)
+                if usage is not None:
+                    prompt_tokens, completion_tokens = usage
             yield raw
     except Exception:
         had_error = True
@@ -263,9 +277,16 @@ async def _wrap_and_record_sse(
         raise
     finally:
         elapsed_ms = (time.perf_counter() - start) * 1000
+        # No usage event -> no token figures and no derived rate. Absent, never
+        # estimated and never zero (DEC-049).
         tokens_per_sec = (
-            tokens_generated / elapsed_ms * 1000
-            if elapsed_ms > 0 and tokens_generated
+            completion_tokens / elapsed_ms * 1000
+            if completion_tokens and elapsed_ms > 0
+            else None
+        )
+        total_tokens = (
+            prompt_tokens + completion_tokens
+            if prompt_tokens is not None and completion_tokens is not None
             else None
         )
         try:
@@ -275,8 +296,9 @@ async def _wrap_and_record_sse(
                 status_code=status_code,
                 latency_ms=elapsed_ms,
                 model=model,
-                completion_tokens=tokens_generated or None,
-                total_tokens=tokens_generated or None,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
                 error=had_error,
                 ttft_ms=ttft_ms,
                 tokens_per_sec=tokens_per_sec,

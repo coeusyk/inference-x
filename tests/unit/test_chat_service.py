@@ -13,6 +13,7 @@ from inference_x.schemas.chat import (
     ChatCompletionResponse,
     ChatCompletionUsage,
     ChatMessage,
+    ChatStreamChunk,
 )
 from inference_x.schemas.model import ModelEntry
 from inference_x.services.chat_service import ChatService
@@ -35,10 +36,14 @@ def _make_service(
     model_name: str = "test",
     healthy: bool = True,
     raise_on_generate: bool = False,
+    engine: BaseEngine | None = None,
 ) -> ChatService:
     registry = _make_registry(model_name)
     router = TaskRouter(registry, model_name)
-    pool = _make_pool(model_name, healthy=healthy, raise_on_generate=raise_on_generate)
+    if engine is not None:
+        pool = EnginePool({model_name: engine})
+    else:
+        pool = _make_pool(model_name, healthy=healthy, raise_on_generate=raise_on_generate)
     return ChatService(engine_pool=pool, registry=registry, router=router)
 
 
@@ -65,7 +70,14 @@ class _StubEngine(BaseEngine):
     async def generate_stream(self, request: ChatCompletionRequest):
         if self._raise:
             raise RuntimeError("stub streaming error")
-        yield "ok"
+        yield ChatStreamChunk(content="ok")
+        yield ChatStreamChunk(
+            content="",
+            finish_reason="stop",
+            usage=ChatCompletionUsage(
+                prompt_tokens=3, completion_tokens=1, total_tokens=4
+            ),
+        )
 
     def is_healthy(self) -> bool:
         return self._healthy
@@ -162,7 +174,8 @@ class TestChatService:
                 )
 
             async def generate_stream(self, request: ChatCompletionRequest):
-                yield f"from {self._name}"
+                yield ChatStreamChunk(content=f"from {self._name}")
+                yield ChatStreamChunk(content="", finish_reason="stop")
 
             def is_healthy(self) -> bool:
                 return True
@@ -175,3 +188,122 @@ class TestChatService:
 
         assert resp_a.choices[0].message.content == "from alpha"
         assert resp_b.choices[0].message.content == "from beta"
+
+
+def _parse(events: list[str]) -> list[object]:
+    """Decode an SSE event list to payloads, keeping ``[DONE]`` as a marker."""
+    out: list[object] = []
+    for event in events:
+        assert event.startswith("data: "), f"malformed SSE event: {event!r}"
+        assert event.endswith("\n\n"), f"event not terminated by blank line: {event!r}"
+        body = event.removeprefix("data: ").strip()
+        out.append("[DONE]" if body == "[DONE]" else json.loads(body))
+    return out
+
+
+class TestStreamingContract:
+    """Authoritative protocol specification for the SSE event sequence (DEC-049).
+
+    These assertions are the contract. If an implementation change makes one
+    fail, the implementation is wrong — do not relax the assertion to match it.
+    Each test asserts the COMPLETE ordered sequence and the exact event count,
+    not merely that some expected substring appears somewhere.
+    """
+
+    def _req(self, **kw) -> ChatCompletionRequest:
+        return ChatCompletionRequest(
+            model="test",
+            messages=[ChatMessage(role="user", content="hello")],
+            stream=True,
+            **kw,
+        )
+
+    @pytest.mark.asyncio
+    async def test_default_stream_has_no_usage_event(self):
+        """No stream_options -> content, terminal, [DONE]. Exactly three events."""
+        events = _parse(
+            [e async for e in _make_service().stream_response(self._req())]
+        )
+
+        assert len(events) == 3
+
+        content, terminal, done = events
+        assert content["object"] == "chat.completion.chunk"
+        assert content["choices"][0]["delta"] == {"content": "ok"}
+        assert content["choices"][0]["finish_reason"] is None
+        assert "usage" not in content
+
+        assert terminal["choices"][0]["delta"] == {}
+        assert terminal["choices"][0]["finish_reason"] == "stop"
+        assert "usage" not in terminal
+
+        assert done == "[DONE]"
+
+        # All events share one completion id.
+        assert content["id"] == terminal["id"]
+
+    @pytest.mark.asyncio
+    async def test_include_usage_appends_one_usage_event_before_done(self):
+        """include_usage -> content, terminal, usage, [DONE]. Exactly four."""
+        events = _parse(
+            [
+                e
+                async for e in _make_service().stream_response(
+                    self._req(stream_options={"include_usage": True})
+                )
+            ]
+        )
+
+        assert len(events) == 4
+
+        content, terminal, usage, done = events
+        assert content["choices"][0]["delta"] == {"content": "ok"}
+        assert terminal["choices"][0]["finish_reason"] == "stop"
+
+        # The usage event carries an empty choices array, per OpenAI.
+        assert usage["choices"] == []
+        assert usage["usage"] == {
+            "prompt_tokens": 3,
+            "completion_tokens": 1,
+            "total_tokens": 4,
+        }
+        assert usage["id"] == content["id"]
+
+        assert done == "[DONE]"
+
+    @pytest.mark.asyncio
+    async def test_timeout_emits_error_then_done_and_nothing_else(self, monkeypatch):
+        """Timeout -> error, [DONE]. No terminal event, no usage event."""
+
+        class _HangingEngine(BaseEngine):
+            async def generate(self, request):  # pragma: no cover - unused
+                raise AssertionError("not used")
+
+            async def generate_stream(self, request):
+                import asyncio
+
+                await asyncio.sleep(10)
+                yield ChatStreamChunk(content="never")
+
+            def is_healthy(self) -> bool:
+                return True
+
+        svc = _make_service(engine=_HangingEngine())
+
+        class _Settings:
+            stream_timeout_s = 0.01
+
+        monkeypatch.setattr(
+            "inference_x.services.chat_service.get_settings", lambda: _Settings()
+        )
+
+        events = _parse(
+            [e async for e in svc.stream_response(self._req(stream_options={"include_usage": True}))]
+        )
+
+        assert len(events) == 2
+        error, done = events
+        assert "error" in error
+        assert done == "[DONE]"
+        # include_usage was requested, but a timed-out stream accounted nothing.
+        assert not any(isinstance(e, dict) and "usage" in e for e in events)

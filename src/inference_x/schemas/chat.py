@@ -12,6 +12,20 @@ class ChatMessage(BaseModel):
     content: str = Field(..., max_length=32_000)
 
 
+class StreamOptions(BaseModel):
+    """OpenAI-compatible `stream_options` object (DEC-049).
+
+    Only `include_usage` is supported. An absent `stream_options` is equivalent
+    to `include_usage=False`.
+    """
+
+    include_usage: bool = Field(
+        default=False,
+        description="When true, the stream emits a final chunk with an empty "
+        "choices array carrying engine-accounted usage, before data: [DONE].",
+    )
+
+
 class ChatCompletionRequest(BaseModel):
     model: str
     messages: list[ChatMessage] = Field(..., min_length=1, max_length=50)
@@ -39,6 +53,11 @@ class ChatCompletionRequest(BaseModel):
         "when the engine is saturated. Client-supplied and unauthenticated — do not treat "
         "as a trust boundary.",
     )
+    stream_options: Optional[StreamOptions] = Field(
+        default=None,
+        description="OpenAI-compatible streaming options. Absent means "
+        "include_usage=False — no usage chunk is emitted.",
+    )
 
 
 class ChatCompletionMessage(BaseModel):
@@ -56,6 +75,24 @@ class ChatCompletionUsage(BaseModel):
     prompt_tokens: int
     completion_tokens: int
     total_tokens: int
+
+
+class ChatStreamChunk(BaseModel):
+    """One event on the engine streaming channel (DEC-049).
+
+    This is the `BaseEngine.generate_stream` element type — the Engine Boundary's
+    streaming vocabulary. It deliberately lives in `schemas.chat` beside the wire
+    models: DEC-047 forbids a backend-neutral execution package, and a second
+    type system for the same information is exactly what that prohibits.
+
+    Content events set `content` and leave `finish_reason` and `usage` None.
+    The terminal event sets `finish_reason`, and sets `usage` when the backend
+    can account it. Per-request timings are Phase B3 and are not carried here.
+    """
+
+    content: str = ""
+    finish_reason: Optional[Literal["stop", "length", "error"]] = None
+    usage: Optional[ChatCompletionUsage] = None
 
 
 class ChatCompletionResponse(BaseModel):
