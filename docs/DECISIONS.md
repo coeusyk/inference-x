@@ -1479,3 +1479,42 @@ Use this document to capture non-obvious design decisions as the project evolves
   `execution/`; no Engine Boundary change; no second backend.
 - Supersession: remains in force until a future DEC changes the sampling-input
   contract. Phase C may *add* guarantees without rewriting G1–G5.
+
+### DEC-052
+- Date: 2026-08-04
+- Status: accepted
+- Title: `strict` may only convert substitution into rejection
+- Context: Phase A OS-4 (`docs/PHASE-A-EXECUTION-PLAN.md` §4, §9 C.7). Request
+  flag `strict: bool = false` must reject where the default clamps, without
+  becoming a general “do not batch / fail if cache cold / reject on revision
+  drift” runtime-policy switch for Phase B/C.
+- Problem: Loose wording (“strict changes response policy, never runtime
+  policy”) is too weak to enforce — rejection changes whether the request runs
+  at all. Without a sharp invariant, later phases will overload `strict` with
+  unrelated runtime policy.
+- Decision:
+  1. **`strict` may only convert a substitution into a rejection. It may never
+     change the substitution itself.** Under `strict`, outcomes partition into
+     `{rejected, executed exactly as asked}`. It never produces
+     `{executed differently}`.
+  2. **One predicate, two outcomes.** The condition that emits a default-mode
+     `ResponseWarning` with `type: "substituted"` is exactly the condition that
+     raises under `strict`. Verified by tests that enumerate both sets.
+  3. **Acceptance check:** for any request accepted under both modes, given an
+     identical seed, the completion content is byte-identical.
+  4. Phase B/C needs (batch isolation, cold-cache fail, revision pin, etc.) get
+     **their own fields**; they must not be folded into `strict`.
+- Alternatives considered:
+  - **Loose “response policy only” wording.** Rejected: not CI-checkable;
+    admits overload.
+  - **Let `strict` grow into a policy bundle.** Rejected: destroys the single
+    meaning that makes C.7 falsifiable.
+- Consequences:
+  - Positive: `strict` stays one thing; Phase B/C cannot smuggle runtime policy
+    through it without a new DEC.
+  - Negative: callers wanting broader “strict serving” need additional flags
+    later.
+- Compatibility: default / absent `strict` preserves today’s clamp-and-continue
+  behaviour aside from additive Effective Request surfaces (`resolved` /
+  `warnings`).
+- Supersession: remains in force until a future DEC explicitly widens `strict`.
