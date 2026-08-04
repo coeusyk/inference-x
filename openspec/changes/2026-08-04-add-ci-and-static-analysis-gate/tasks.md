@@ -52,35 +52,33 @@
   the type checker. All three pass with **no modifications under `src/` or
   `tests/`**.
   → 430 passed; `ruff` clean; `mypy` clean over 51 source files.
-- [ ] 3.2 Confirm the check is green on the unmodified development branch.
-  → **Cannot be done locally.** The three commands are green on unmodified
-  `develop`, but the *workflow* has never executed. Requires 2.7 plus a push.
+- [x] 3.2 Confirm the check is green on the unmodified development branch.
+  → Verified: Actions run 30884557880 on `dcd0736` / `develop` —
+    conclusion `success`, job `checks` (pytest, ruff, mypy all green).
+    https://github.com/coeusyk/inference-x/actions/runs/30884557880
 - [x] 3.3 **Negative test — required.** On a scratch branch, one at a time and
   reverting each before the next, confirm the check goes red for: (a) a failing
   assertion in an existing test; (b) a lint violation; (c) a type error in a module
   outside the baseline. Delete the scratch branch afterwards. A gate observed only
   green has not been validated.
-  → All three confirmed red (exit 1): (a) failing assertion → `1 failed, 430
-  passed`; (b) `F821` undefined name → `Found 1 error`; (c) `[assignment]` type
-  error in a new module → `Found 1 error in 1 file (checked 52 source files)`.
-  Deviation: probes were **new untracked files**, deleted after each run, rather
-  than edits to tracked files — same evidence, no risk of an unreverted edit.
-  Probe (c) also demonstrates the no-wildcard property: a newly added module is
-  type-checked by default.
-- [ ] 3.4 Enable the workflow as a required status check on the long-lived
+  → Local probes during implementation (exit 1 each). Hosted enforcement probes
+    after branch protection: PR #7 pytest fail, PR #8 ruff fail, PR #9 mypy fail —
+    each `checks` FAILURE and `mergeable_state: blocked`; PRs closed and branches
+    deleted.
+- [x] 3.4 Enable the workflow as a required status check on the long-lived
   branches. This is a repository-settings action by a maintainer, not a file in the
   diff.
-  → Maintainer action. Required check name will be `checks`.
-- [ ] 3.5 On a throwaway pull request, confirm a red run **blocks merge** rather
+  → `develop` and `main`: required status check `checks`, `strict: true`,
+    `enforce_admins: true`, force-push/delete disabled.
+- [x] 3.5 On a throwaway pull request, confirm a red run **blocks merge** rather
   than merely reporting failure. Repository integration criterion 9 is about the
   setting, not the file.
-  → Depends on 3.4.
-- [ ] 3.6 Record the cold-run wall clock. Observation only — no threshold is
+  → PRs #7/#8/#9: `mergeable_state: blocked` while `checks` failed.
+- [x] 3.6 Record the cold-run wall clock. Observation only — no threshold is
   introduced. If installation cost looks prohibitive, escalate it; do not alter the
   dependency shape (see Constraints).
-  → Local warm run: 16s total (pytest 12.0s). A hosted cold run is dominated by
-  `uv sync` pulling vllm + torch and is **unmeasured**; this is Risk 3 and stays
-  open until the workflow first executes.
+  → Hosted success run 30884557880: ~127s wall clock (`run_duration_ms: 127000`).
+    Not prohibitive; no dependency-shape change.
 - [x] 3.7 Re-run `openspec validate --strict` for this change after the section 4
   documentation edits. It was green when these artifacts were authored; this
   re-run guards the edits, not the original authoring.
@@ -109,9 +107,14 @@
 
 ## 5. Archive
 
-- [ ] 5.1 Confirm every acceptance criterion in `proposal.md` holds.
+- [x] 5.1 Confirm every acceptance criterion in `proposal.md` holds.
+  → Infrastructure 1–8 and Repository integration 9–11 satisfied (workflow green
+    on develop; required check configured; merge blocked on failed probes;
+    DEC-048 + CONTRIBUTING present).
 - [ ] 5.2 Archive this change once merged and the required check is confirmed
   enforcing.
+  → Enforcement confirmed. Archive recommended as the next housekeeping step
+    (can ride with HK-1 or a one-line archive PR).
 
 ## Discovered during implementation
 
