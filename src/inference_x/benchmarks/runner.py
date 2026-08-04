@@ -42,6 +42,10 @@ def _run_prompt_stream(
         "messages": [{"role": "user", "content": prompt_text}],
         "max_tokens": 256,
         "stream": True,
+        # Ask for the terminal usage event (DEC-049). Without it the server
+        # reports no token count, and this runner would have nothing truthful
+        # to measure throughput from.
+        "stream_options": {"include_usage": True},
     }
 
     tokens_generated = 0
@@ -63,12 +67,16 @@ def _run_prompt_stream(
                     continue
                 try:
                     chunk = json.loads(data)
+                    usage = chunk.get("usage")
+                    if isinstance(usage, dict):
+                        # Engine-accounted count from the terminal usage event.
+                        tokens_generated = int(usage.get("completion_tokens", 0))
+                        continue
                     delta = (chunk.get("choices") or [{}])[0].get("delta", {})
                     content = delta.get("content", "")
-                    if content:
-                        if ttft_ms is None:
-                            ttft_ms = (time.perf_counter() - t_start) * 1000
-                        tokens_generated += len(content.split())
+                    if content and ttft_ms is None:
+                        # TTFT still comes from the first content event.
+                        ttft_ms = (time.perf_counter() - t_start) * 1000
                 except (json.JSONDecodeError, IndexError):
                     continue
 

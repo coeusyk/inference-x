@@ -73,7 +73,10 @@ class FakeLLMEngine:
             outputs.append(
                 _FakeRequestOutput(
                     request_id=request_id,
-                    outputs=[_FakeCompletion(text=text)],
+                    # One token id per character: deliberately different from the
+                    # whitespace word count DEC-049 removed, so a test asserting
+                    # engine-accounted usage cannot pass by accident.
+                    outputs=[_FakeCompletion(text=text, token_ids=list(range(len(text))))],
                     finished=finished,
                 )
             )
@@ -94,6 +97,11 @@ def _drain_stream(out_queue, timeout: float = 5.0) -> list:
             return chunks
         chunks.append(chunk)
     raise AssertionError("stream did not terminate within timeout")
+
+
+def _drain_text(out_queue, timeout: float = 5.0) -> list[str]:
+    """Content deltas only, dropping the terminal metadata chunk (DEC-049)."""
+    return [c.content for c in _drain_stream(out_queue, timeout) if c.content]
 
 
 def test_single_completion_request():
@@ -137,7 +145,20 @@ def test_stream_yields_incremental_deltas():
     try:
         out_queue = driver.submit_stream("prompt-A", object())
         chunks = _drain_stream(out_queue)
-        assert chunks == ["Hello", " world"]
+
+        # Content deltas are unchanged; the driver now appends one terminal
+        # chunk carrying engine-accounted metadata before the None sentinel.
+        assert [c.content for c in chunks if c.content] == ["Hello", " world"]
+
+        terminal = chunks[-1]
+        assert terminal.content == ""
+        assert terminal.finish_reason == "stop"
+        assert terminal.usage is not None
+        # Engine-accounted: one id per character of "Hello world" (11), not the
+        # whitespace word count (2) this replaced.
+        assert terminal.usage.completion_tokens == 11
+        assert terminal.usage.prompt_tokens == 3
+        assert terminal.usage.total_tokens == 14
     finally:
         driver.shutdown()
 
@@ -151,8 +172,8 @@ def test_two_concurrent_streams_do_not_cross_contaminate():
         queue_a = driver.submit_stream("prompt-A", object())
         queue_b = driver.submit_stream("prompt-B", object())
 
-        chunks_a = _drain_stream(queue_a)
-        chunks_b = _drain_stream(queue_b)
+        chunks_a = _drain_text(queue_a)
+        chunks_b = _drain_text(queue_b)
 
         assert "".join(chunks_a) == "Hi there"
         assert "".join(chunks_b) == "Yo dude"

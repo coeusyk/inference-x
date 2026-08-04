@@ -20,6 +20,7 @@ from inference_x.schemas.chat import (
     ChatCompletionResponse,
     ChatCompletionUsage,
     ChatMessage,
+    ChatStreamChunk,
 )
 from inference_x.schemas.model import ModelEntry
 from inference_x.services.chat_service import ChatService
@@ -53,8 +54,15 @@ class _StubEngine(BaseEngine):
         )
 
     async def generate_stream(self, request: ChatCompletionRequest):
-        yield "Hello "
-        yield "from stub"
+        yield ChatStreamChunk(content="Hello ")
+        yield ChatStreamChunk(content="from stub")
+        yield ChatStreamChunk(
+            content="",
+            finish_reason="stop",
+            usage=ChatCompletionUsage(
+                prompt_tokens=2, completion_tokens=3, total_tokens=5
+            ),
+        )
 
     def is_healthy(self) -> bool:
         return self._healthy
@@ -87,7 +95,8 @@ class _AdmissionAwareEngine(BaseEngine):
         )
 
     async def generate_stream(self, request: ChatCompletionRequest):
-        yield "ok"
+        yield ChatStreamChunk(content="ok")
+        yield ChatStreamChunk(content="", finish_reason="stop")
 
     def is_healthy(self) -> bool:
         return self._healthy
@@ -224,7 +233,7 @@ class TestChatCompletionsEndpoint:
 
             async def generate_stream(self, request: ChatCompletionRequest):
                 raise RuntimeError("inference exploded")
-                yield ""
+                yield ChatStreamChunk(content="")
 
             def is_healthy(self) -> bool:
                 return True

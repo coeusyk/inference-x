@@ -111,3 +111,143 @@ the highest-precision variant that fits the available VRAM budget at load time.
   continue to operate only on the concrete, already-resolved model name
 - AND all existing unit tests continue to pass unchanged
 
+### Requirement: Streamed token counts originate from the engine
+The platform SHALL derive every completion-token figure it reports from engine
+accounting. It MUST NOT approximate token counts from response text, and it MUST
+report no figure rather than an estimated one.
+
+#### Scenario: Streamed and non-streamed counts agree
+- **WHEN** the same prompt and sampling parameters are sent once as a streaming
+  request with usage requested, and once as a non-streaming request
+- **THEN** both report the same `completion_tokens`
+- **AND** both values originate from the engine's own accounting
+
+#### Scenario: Usage is unavailable
+- **WHEN** a streamed request completes without usage being requested
+- **THEN** the platform records no completion-token figure for that request
+- **AND** it records neither zero nor a value derived from counting words in the
+  response text
+
+#### Scenario: Text is never counted as tokens
+- **WHEN** any component reports a completion-token count
+- **THEN** that count came from the engine
+- **AND** no code path derives a reported token count from response text
+
+### Requirement: Engine streaming contract carries terminal metadata
+The engine streaming interface SHALL yield structured chunks capable of carrying
+delta text, a finish reason, and usage, so that a backend can report what it
+actually did. The chunk type MUST live in the existing wire-schema package; no
+backend-neutral execution package may be introduced (DEC-047, DEC-049).
+
+#### Scenario: Content chunk
+- **WHEN** an engine emits generated text mid-stream
+- **THEN** the chunk carries the delta text
+- **AND** its finish reason and usage are both absent
+
+#### Scenario: Terminal chunk
+- **WHEN** an engine finishes generating
+- **THEN** it emits a final chunk carrying the finish reason
+- **AND** that chunk carries usage when the backend can account it
+
+#### Scenario: Boundary is not widened further
+- **WHEN** the streaming contract changes
+- **THEN** the chunk type is defined in the wire-schema package
+- **AND** no `inference_x/execution/` package, dual type system, or
+  wire-to-execution translation layer is introduced
+
+### Requirement: OpenAI-compatible streaming event order
+The platform SHALL emit server-sent events for a streamed chat completion in a
+fixed, OpenAI-compatible order, and SHALL emit a usage event only when the client
+requests one.
+
+#### Scenario: Default stream without usage requested
+- **WHEN** a client streams a chat completion without requesting usage
+- **THEN** it receives zero or more content events, each carrying a null finish
+  reason
+- **AND** then exactly one terminal event carrying an empty delta and a non-null
+  finish reason
+- **AND** then `[DONE]` as the final event
+- **AND** no usage event is emitted
+
+#### Scenario: Usage requested
+- **WHEN** a client streams a chat completion and requests usage
+- **THEN** it additionally receives exactly one usage event, after the terminal
+  event and before `[DONE]`
+- **AND** that event carries an empty choices array and a populated usage object
+
+#### Scenario: Stream times out
+- **WHEN** the per-token stream timeout elapses
+- **THEN** the platform emits its error event and stops generating
+- **AND** `[DONE]` is still emitted as the final event
+- **AND** no terminal event and no usage event are emitted
+
+#### Scenario: Existing consumers are unaffected
+- **WHEN** a client that terminates on `[DONE]` and ignores events carrying no
+  delta text reads a stream containing terminal and usage events
+- **THEN** it behaves exactly as it did before those events existed
+
+#### Scenario: Change is applied
+- **WHEN** this change is archived
+- **THEN** the engine streaming contract yields structured chunks
+- **AND** no component derives a reported token count from response text
+- **AND** the superseding decision record states that previously reported
+  streamed token counts and every throughput figure derived from them are not
+  comparable with figures produced afterwards
+
+### Requirement: Optional request seed reaches the sampler
+The platform SHALL accept an optional integer `seed` on
+`POST /v1/chat/completions` as a first-class field of `ChatCompletionRequest`.
+When `seed` is set and the live vLLM engine builds sampling parameters, the
+runtime SHALL pass that integer into the backend sampling API exactly as
+received, without rewriting, clamping, or normalizing backend sentinel
+semantics. When `seed` is absent or null, the runtime SHALL omit `seed` from
+sampling construction so pre-OS-3 sampling behaviour is preserved for all other
+parameters. Streaming and non-streaming generation SHALL use the same sampling
+parameter builder. The platform MUST NOT echo the effective seed on the response
+in this change, and documentation MUST NOT claim end-to-end determinism or that
+runs are reproducible.
+
+#### Scenario: Seed is accepted on the wire
+- **WHEN** a client sends `seed` as an integer on a chat completion request
+- **THEN** the request validates successfully
+- **AND** the field is not silently dropped by schema validation
+
+#### Scenario: Seed reaches live SamplingParams unchanged
+- **WHEN** a live vLLM engine builds sampling parameters for a request whose
+  `seed` is set (including the value `-1`)
+- **THEN** the backend sampling API receives that exact integer as `seed`
+- **AND** the runtime has not mapped, rejected, or warned about the value
+
+#### Scenario: Absent seed preserves prior sampling construction
+- **WHEN** a request omits `seed` or sets it to null
+- **THEN** sampling construction does not include a `seed` key
+- **AND** temperature, max_tokens, top_p, and repetition_penalty rules match
+  pre-OS-3 behaviour for the same other fields
+
+#### Scenario: Stream and non-stream share the sampling builder
+- **WHEN** the same request parameters including `seed` are used for streaming
+  and non-streaming generation
+- **THEN** both paths obtain sampling parameters from the same builder
+- **AND** seed honour does not diverge by transport
+
+#### Scenario: No response echo and no overclaim
+- **WHEN** this change is applied
+- **THEN** `ChatCompletionResponse` gains no seed, resolved, warnings, or strict
+  fields
+- **AND** documentation states that seed is honoured (reaches the sampler)
+- **AND** documentation does not claim the server is deterministic or that runs
+  are reproducible end-to-end
+
+#### Scenario: Degraded engine path does not invent seed errors
+- **WHEN** the vLLM engine is unavailable and streaming returns the degraded
+  content-only path
+- **THEN** no new seed-related warning or HTTP error is introduced
+- **AND** the degraded stream remains a single content message without a
+  terminal `finish_reason` of `error`
+
+#### Scenario: Default benchmarks remain unseeded
+- **WHEN** the first-party benchmark runner issues its default chat requests
+- **THEN** those requests remain without a pinned `seed`
+- **AND** the runner stays throughput-oriented (deterministic benchmarking is
+  deferred)
+

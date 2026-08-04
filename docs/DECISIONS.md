@@ -1262,3 +1262,220 @@ Use this document to capture non-obvious design decisions as the project evolves
     Phase B1.
 - Supersession: baseline reduction and lint-selection widening each require
   their own change. Neither is authorized by this decision.
+
+### DEC-049
+- Date: 2026-08-04
+- Status: accepted
+- Title: Widen BaseEngine.generate_stream for truthful streaming usage (OS-2)
+- Context: Phase A OS-2 (`docs/PHASE-A-EXECUTION-PLAN.md` §1.1, §3.4, §4).
+  `BaseEngine.generate_stream` is typed `AsyncGenerator[str, None]`. A bare
+  string cannot carry `usage` or `finish_reason`. Observability middleware and
+  the benchmark runner therefore approximate streamed completion tokens with
+  whitespace word counts (`_count_sse_delta_tokens`, runner stream loop).
+  Non-streaming `generate()` already returns engine-accounted
+  `ChatCompletionUsage`. DEC-023 enabled SSE with the explicit consequence that
+  streamed token counts would remain estimates until a usage event existed.
+  DEC-047 forbids introducing `inference_x/execution/` or a second type system;
+  engines today speak `schemas.chat` wire types. DEC-048's mypy baseline already
+  flags `services/chat_service` for the same `generate_stream` typing defect.
+- Problem: Truthful Phase A metrics require streamed completion tokens and
+  finish reasons to originate from the engine. That is impossible while
+  `generate_stream` yields only `str`. Leaving the contract unchanged forces
+  continued approximation; inventing a backend-neutral chunk package outside
+  `schemas/` violates DEC-047.
+- Decision:
+  1. **Add a streaming chunk model to `schemas/chat.py`** (name to be chosen at
+     implementation, e.g. `ChatStreamChunk`) carrying:
+     - `content: str` (delta text; empty on a terminal-only chunk)
+     - `finish_reason: Literal["stop", "length", "error"] | None`
+     - `usage: ChatCompletionUsage | None`
+     Content deltas set `content` and leave `finish_reason`/`usage` null. The
+     terminal engine event sets `finish_reason` and, when available, `usage`.
+  2. **Widen `BaseEngine.generate_stream`** to
+     `AsyncGenerator[<chunk model>, None]`. Update `VLLMEngine`, all test stubs,
+     and `ChatService.stream_response` accordingly.
+  3. **Surface terminal metadata from `EngineDriver`** on the stream channel
+     (today the queue is `str | BaseException | None` and drops
+     `RequestOutput` fields on finish). Without this, the vLLM path cannot
+     yield real `usage`/`finish_reason`. This is an implementation detail of the
+     current offline-`LLM` stack; Phase B1 deletes the driver and must preserve
+     the `BaseEngine` chunk contract.
+  4. **Wire `stream_options.include_usage`** on `ChatCompletionRequest` (OpenAI-
+     compatible, optional, default off or follow OpenAI defaults as implemented).
+     When usage is requested (or as required to satisfy Phase A metric truth for
+     `/v1/metrics` and benchmarks — see Consequences), `ChatService` emits a
+     terminal SSE chunk before `data: [DONE]` carrying `usage` and places
+     `finish_reason` on the last content chunk per OpenAI streaming conventions.
+  5. **Delete `_count_sse_delta_tokens`** and repoint SSE observability to the
+     usage chunk. Benchmark runner stream measurement reads
+     `usage.completion_tokens` instead of `len(content.split())`.
+  6. **Metric discontinuity.** Figures produced before this change (in-process
+     `/v1/metrics`, stored benchmark `tokens_per_sec` derived from word counts,
+     and published claims in `article-final.md`) are **not comparable** to
+     figures produced after. Record that supersession here; add a correction
+     note to `article-final.md` (gitignored private writing — still required).
+  7. **Docstring honesty.** Update `BaseEngine`'s claim that a second engine
+     needs no changes here: this widening is exactly the change DEC-047
+     problem statement §1 anticipated as overdue honesty about a decorative
+     boundary.
+- Alternatives considered:
+  - **Keep yielding `str`; estimate tokens forever.** Rejected: contradicts
+    Phase A objective and leaves DEC-023's known gap permanent.
+  - **Yield `tuple[str, Usage | None]`.** Conformant with DEC-047 but worse:
+    untyped positional contract; Phase B3 timings would widen it again; mypy
+    cannot usefully check it. Rejected.
+  - **Introduce a neutral chunk type outside `schemas/`.** Forbidden by DEC-047
+    (`inference_x/execution/` prohibition in all but name). Rejected.
+  - **Add chunk model in `schemas/chat.py` and widen `generate_stream` (this
+    decision).** Accepted.
+- Consequences:
+  - **Positive:** streamed and non-streamed `usage.completion_tokens` can agree;
+    `/v1/metrics` and benchmarks stop lying; DEC-048 baseline entry for
+    `chat_service` should shrink or clear; OpenAI clients that understand
+    terminal usage chunks gain real counts.
+  - **Negative:** every `BaseEngine` stub and the driver stream channel change;
+    historical metrics are discontinuous (must be labeled, not silently mixed);
+    `article-final.md` correction is irreversible once published.
+  - **Out of scope (other OpenSpecs):** `seed` (OS-3); `warnings`/`resolved`/
+    `strict`/`count_prompt_tokens` (OS-4); suite hash (OS-5); advisor rename/
+    quant_score (OS-6); `engines/registry` factory (deferred).
+- DEC-047 compliance:
+  - Chunk type remains in `schemas.chat` — current borrowed vocabulary.
+  - No `inference_x/execution/`, no dual wire↔execution layer, no second backend.
+  - Engine Boundary hygiene still must not gate AsyncLLM; this widening is the
+    single Phase A Engine Boundary change authorized for OS-2 (§1.1).
+  - Capability declaration (`count_prompt_tokens`) remains OS-4.
+- Compatibility analysis:
+  - `playground/streaming.py` returns on `data: [DONE]` and skips lines with no
+    token — additive terminal usage chunk is ignored safely.
+  - `benchmarks/runner.py` skips chunks without `delta.content` today; OS-2
+    updates it to *prefer* `usage` when present (owned by OS-2).
+  - Existing clients that ignore unknown chunk fields remain valid; request field
+    `stream_options` is additive/optional.
+- Migration notes:
+  - Land as one PR with the ADR accepted (or accept ADR in the same PR).
+  - Do not grow the DEC-048 mypy baseline; prefer removing `chat_service` from it
+    when the contract type-checks.
+  - Reference the `engines/registry` Phase A/B seam as an open item from this ADR
+    (plan §5.4) without implementing the factory.
+  - If OS-2 is reverted, keep this ADR's supersession statement for prior
+    approximate figures — those numbers were always wrong (plan §8.2).
+- Supersession: remains in force until a future DEC changes the streaming
+  engine contract (e.g. Phase B AsyncLLM adaptation must preserve or explicitly
+  replace this chunk model on `BaseEngine`).
+
+### DEC-050
+- Date: 2026-08-04
+- Status: accepted
+- Title: Streamed token counts before OS-2 are superseded and incomparable
+- Context: Until OS-2
+  (`openspec/changes/2026-08-04-add-truthful-token-accounting/`), two sites in
+  `src/` derived completion-token counts by counting whitespace-delimited words
+  in generated text:
+  - `observability/middleware.py::_count_sse_delta_tokens`, feeding
+    `/v1/metrics` (`completion_tokens`, `total_tokens`, `tokens_per_sec`);
+  - the `benchmarks/runner.py` streaming loop, feeding `PromptResult`
+    (`tokens_generated`, `tokens_per_sec`) and, through it, the benchmark
+    advisor's model recommendations.
+  DEC-023 accepted this knowingly, because streamed responses carried no usage
+  event. DEC-049 removed that constraint. Words are not tokens; the error is
+  model- and tokenizer-dependent and always understates the true count, because
+  a word is one or more tokens and never fewer.
+- Problem: correcting a metric silently is the same category of dishonesty as
+  reporting it wrongly. Anyone comparing a figure recorded before this change
+  with one recorded after would be comparing two different quantities that
+  share a name. Phase A exists to make reported numbers true; it must not
+  create an undocumented discontinuity while doing so.
+- Decision:
+  1. **Every streamed completion-token count produced before OS-2 is
+     superseded.** This includes `/v1/metrics` token fields and rates,
+     every stored benchmark result's `tokens_generated` and `tokens_per_sec`,
+     and any throughput figure published from them.
+  2. **Pre-OS-2 and post-OS-2 figures are not comparable in either
+     direction.** They are not off by a constant factor and cannot be
+     reconciled by rescaling — the ratio depends on the tokenizer and on the
+     text. Do not mix them in a series, a chart, or a claim.
+  3. **Non-streamed `usage` is unaffected.** `generate()` always reported
+     engine-accounted counts. OS-2 makes the streamed path agree with the
+     non-streamed one, not the reverse, and both now derive from the single
+     `derive_terminal_metadata` helper so they cannot drift apart again.
+  4. **Absence replaces estimation.** When a streamed request does not set
+     `stream_options.include_usage`, no usage event reaches the middleware and
+     **no token figure is recorded at all** — not zero, not an estimate. A
+     missing number is honest; a wrong one is not. This is a deliberate loss of
+     metric coverage for default streaming clients, accepted in exchange for
+     correctness.
+  5. **`article-final.md` correction remains an author obligation.** The file
+     is gitignored under an explicit "private writing" policy, so it is outside
+     the repository and outside any acceptance criterion. `README.md` was
+     checked and publishes no throughput figures, so no in-repository published
+     number requires correction.
+- Consequences:
+  - Historical benchmark JSON under `benchmarks/results/` is machine-specific
+    and gitignored; it is not migrated. Results produced before this change
+    should be regenerated rather than compared. Filtering or partitioning a
+    results directory into "pre-OS-2" vs "post-OS-2" is not viable: files carry
+    no durable marker of which counting method produced `tokens_generated` /
+    `tokens_per_sec`, timestamps alone cannot recover that, and mixing the two
+    quantities in one series would reintroduce the discontinuity this decision
+    forbids. Regeneration is therefore the only safe path.
+  - `/v1/metrics` `avg_tokens_per_sec` degrades to `None` when no request in
+    the window carried a usage event. `metrics_service` already filters
+    `tokens_per_sec is not None`, so this is a graceful absence rather than a
+    break.
+  - The benchmark runner sets `stream_options.include_usage` on its own
+    requests, so benchmark figures stay populated and are now true.
+  - If OS-2 is reverted, this supersession still stands. The old numbers were
+    always wrong; reverting the fix does not make them right
+    (`docs/PHASE-A-EXECUTION-PLAN.md` §8.2).
+- Supersession: none. This is a statement of fact about historical data and
+  does not expire.
+
+### DEC-051
+- Date: 2026-08-04
+- Status: accepted
+- Title: Seed support / Deterministic Generation Contract (OS-3)
+- Context: Phase A OS-3 (`docs/PHASE-A-EXECUTION-PLAN.md` §4; review task A3).
+  `ChatCompletionRequest` had no `seed` field, so clients that pinned a seed
+  (notably Varex) experienced silent Pydantic drop — worse than unsupported.
+  `VLLMEngine._sampling_params` built `SamplingParams` without seed. OS-2
+  (DEC-049) already spent Phase A's Engine Boundary change; OS-3 must not
+  widen `BaseEngine`. Ownership: *The client owns requesting determinism; the
+  backend owns honouring it; the runtime must not invent it.*
+- Problem: Without a first-class `seed` that reaches the live sampler,
+  reproducibility harnesses cannot drive the server honestly. Overclaiming
+  end-to-end determinism would be a separate defect (batch composition is
+  Phase C3).
+- Decision — Deterministic Generation Contract:
+  - **G1 Acceptance.** `seed: Optional[int] = None` on `ChatCompletionRequest`
+    (appended after `stream_options`). Not silently dropped.
+  - **G2 Unchanged forward.** When `seed is not None` and the live vLLM engine
+    builds `SamplingParams`, pass that integer exactly as received. No rewrite,
+    clamp, or runtime normalization (including `-1`).
+  - **G3 Omission equivalence.** When `seed is None`, omit the `seed` key —
+    pre-OS-3 sampling construction for all other parameters.
+  - **G4 Path parity.** Streaming and non-streaming use the same
+    `_sampling_params` builder.
+  - **G5 Honesty.** Docs say seed is *honoured* (reaches the sampler); never
+    that the server is deterministic or runs are reproducible end-to-end.
+  - **Intentionally non-guaranteed (N1–N8):** concurrent/batch identity;
+    cross-hardware/version identity; CUDA-graph/JIT/prefix-cache/spec-decode
+    identity; replay/manifests; runtime-invented determinism; default
+    benchmark determinism; response seed echo (OS-4); backend sentinel
+    interpretation (e.g. what vLLM does with `-1`).
+- Alternatives considered:
+  - **Keep silent drop.** Rejected: Varex failure mode.
+  - **Normalize `-1` → omit in Inference-X.** Rejected: runtime must not
+    invent backend semantics (N8).
+  - **Echo effective seed now.** Rejected: OS-4 owns `resolved`.
+  - **`deterministic: true` / `VLLM_BATCH_INVARIANT`.** Rejected: Phase C3.
+- Consequences:
+  - Positive: pinned seeds reach the sampler; silent-drop failure mode
+    superseded.
+  - Negative: clients may over-read identity tests; docs must stay honest (G5).
+  - Out of scope: OS-4 echo/`warnings`/`strict`/`count_prompt_tokens`; OS-5
+    suite hash; OS-6 advisor; Phase B AsyncLLM; Phase C replay/oracle.
+- DEC-047 compliance: wire field + concrete engine wiring only; no
+  `execution/`; no Engine Boundary change; no second backend.
+- Supersession: remains in force until a future DEC changes the sampling-input
+  contract. Phase C may *add* guarantees without rewriting G1–G5.

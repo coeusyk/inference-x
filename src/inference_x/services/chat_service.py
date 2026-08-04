@@ -64,8 +64,23 @@ class ChatService:
     ) -> AsyncGenerator[str, None]:
         """Route a chat request and yield OpenAI-compatible SSE events.
 
+        Event order is fixed (DEC-049, OS-2 R3) and is the protocol:
+
+        1. zero or more content events, each with ``finish_reason: null``;
+        2. exactly one terminal event with an empty delta and a real
+           ``finish_reason``;
+        3. one usage event with ``choices: []`` — only when the client asked via
+           ``stream_options.include_usage`` and the engine accounted usage;
+        4. ``data: [DONE]``, always last.
+
+        The terminal event is separate rather than folded into the last content
+        event, because the service cannot know a content event is the last one
+        until the engine says so.
+
         Applies a per-token timeout (INFERENCE_X_STREAM_TIMEOUT_S) so that a
-        stalled engine does not hold the connection open indefinitely.
+        stalled engine does not hold the connection open indefinitely. On
+        timeout the error event is emitted and neither a terminal nor a usage
+        event follows — only ``[DONE]``.
         """
         routed_model, engine = self._resolve_engine(request)
         admitted = self._admission.admit(routed_model, request, engine)
@@ -74,6 +89,12 @@ class ChatService:
         )
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
         timeout_s = get_settings().stream_timeout_s
+        include_usage = bool(
+            request.stream_options and request.stream_options.include_usage
+        )
+
+        def _event(payload: dict) -> str:
+            return f"data: {json.dumps(payload, separators=(',', ':'))}\n\n"
 
         gen = engine.generate_stream(effective_request)
         try:
@@ -93,17 +114,44 @@ class ChatService:
                     )
                     break
 
-                payload = {
-                    "id": completion_id,
-                    "object": "chat.completion.chunk",
-                    "choices": [
+                if chunk.content:
+                    yield _event(
                         {
-                            "delta": {"content": chunk},
-                            "index": 0,
+                            "id": completion_id,
+                            "object": "chat.completion.chunk",
+                            "choices": [
+                                {
+                                    "delta": {"content": chunk.content},
+                                    "index": 0,
+                                    "finish_reason": None,
+                                }
+                            ],
                         }
-                    ],
-                }
-                yield f"data: {json.dumps(payload, separators=(',', ':'))}\n\n"
+                    )
+
+                if chunk.finish_reason is not None:
+                    yield _event(
+                        {
+                            "id": completion_id,
+                            "object": "chat.completion.chunk",
+                            "choices": [
+                                {
+                                    "delta": {},
+                                    "index": 0,
+                                    "finish_reason": chunk.finish_reason,
+                                }
+                            ],
+                        }
+                    )
+                    if include_usage and chunk.usage is not None:
+                        yield _event(
+                            {
+                                "id": completion_id,
+                                "object": "chat.completion.chunk",
+                                "choices": [],
+                                "usage": chunk.usage.model_dump(),
+                            }
+                        )
         finally:
             await gen.aclose()
             self._admission.release(routed_model, admitted.reserved_tokens)

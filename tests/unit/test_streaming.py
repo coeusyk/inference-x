@@ -244,3 +244,44 @@ async def test_stream_chat_tokens_raises_on_http_error(monkeypatch):
             "http://test", {"model": "m", "messages": [], "stream": True}
         ):
             pass
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_tokens_ignores_terminal_and_usage_events(monkeypatch):
+    """OS-2 compatibility invariant C4: the playground parser is unmodified.
+
+    DEC-049 added two event kinds before ``data: [DONE]`` — a terminal event
+    with an empty delta and a finish reason, and (when requested) a usage event
+    with an empty choices array. Neither carries delta text, so this consumer
+    must ignore both and yield exactly the same tokens it did before they
+    existed. If this test fails, the SSE change broke a live client.
+    """
+    lines = (
+        _sse_lines("a", "b")
+        + [
+            'data: {"id":"x","object":"chat.completion.chunk",'
+            '"choices":[{"delta":{},"index":0,"finish_reason":"stop"}]}',
+            'data: {"id":"x","object":"chat.completion.chunk","choices":[],'
+            '"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}',
+            "data: [DONE]",
+        ]
+    )
+    fake_client = _FakeAsyncClient(_FakeStreamResponse(lines))
+
+    class ClientFactory:
+        async def __aenter__(self):
+            return fake_client
+
+        async def __aexit__(self, *args):
+            return False
+
+    monkeypatch.setattr(pg_streaming.httpx, "AsyncClient", lambda **kwargs: ClientFactory())
+
+    tokens = [
+        token
+        async for token in pg_streaming.stream_chat_tokens(
+            "http://test", {"model": "m", "messages": [], "stream": True}
+        )
+    ]
+
+    assert tokens == ["a", "b"]

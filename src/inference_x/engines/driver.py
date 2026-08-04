@@ -31,9 +31,37 @@ from concurrent.futures import Future
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from inference_x.schemas.chat import ChatCompletionUsage, ChatStreamChunk
+
 logger = logging.getLogger(__name__)
 
 _IDLE_POLL_S = 0.05  # bounds shutdown responsiveness, not correctness
+
+
+def derive_terminal_metadata(
+    output: Any,
+) -> tuple[Literal["stop", "length"], ChatCompletionUsage]:
+    """Map a finished vLLM `RequestOutput` to a finish reason and engine usage.
+
+    Shared by the streaming terminal chunk (`_dispatch`) and non-streaming
+    `VLLMEngine.generate`, so the two paths cannot drift: OS-2 requires that a
+    streamed and a non-streamed request for the same prompt report the same
+    `completion_tokens`, and one function is the only way to guarantee that
+    rather than hope for it.
+
+    Counts come from vLLM's own token ids. Nothing here counts text.
+    """
+    completion = output.outputs[0]
+    finish: Literal["stop", "length"] = (
+        "stop" if completion.finish_reason in ("stop", None) else "length"
+    )
+    prompt_tokens = len(output.prompt_token_ids) if output.prompt_token_ids else 0
+    completion_tokens = len(completion.token_ids) if completion.token_ids else 0
+    return finish, ChatCompletionUsage(
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=prompt_tokens + completion_tokens,
+    )
 
 
 @dataclass
@@ -41,7 +69,7 @@ class _PendingRequest:
     """Per-request state, indexed by request_id, only ever touched on the driver thread."""
 
     mode: Literal["stream", "complete"]
-    out_queue: "queue.Queue[str | BaseException | None] | None" = None
+    out_queue: "queue.Queue[ChatStreamChunk | BaseException | None] | None" = None
     future: Future | None = None
     previous_text: str = ""
 
@@ -87,8 +115,15 @@ class EngineDriver:
     def is_dead(self) -> bool:
         return self._dead
 
-    def submit_stream(self, prompt: str, sampling: Any) -> "queue.Queue[str | BaseException | None]":
-        """Submit a streaming request; returns a queue yielding text deltas, then None.
+    def submit_stream(
+        self, prompt: str, sampling: Any
+    ) -> "queue.Queue[ChatStreamChunk | BaseException | None]":
+        """Submit a streaming request; returns a queue of chunks, then None.
+
+        The queue yields content `ChatStreamChunk`s, then one terminal chunk
+        carrying `finish_reason` and `usage`, then `None` (DEC-049, R6). `None`
+        remains the end-of-stream sentinel and `BaseException` the failure
+        signal — both unchanged, so the dead-driver paths below are untouched.
 
         Raises `EngineDriverDeadError` immediately if the driver has already
         failed — see `_submit`.
@@ -190,8 +225,14 @@ class EngineDriver:
                 chunk = text
             pending.previous_text = text
             if chunk:
-                pending.out_queue.put(chunk)
+                pending.out_queue.put(ChatStreamChunk(content=chunk))
             if output.finished:
+                # Terminal chunk carries what a bare str could not (DEC-049),
+                # then the unchanged None sentinel.
+                finish, usage = derive_terminal_metadata(output)
+                pending.out_queue.put(
+                    ChatStreamChunk(content="", finish_reason=finish, usage=usage)
+                )
                 pending.out_queue.put(None)
                 del self._pending[request_id]
         else:
