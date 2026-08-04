@@ -132,10 +132,42 @@ class TestChatService:
     async def test_strict_does_not_change_an_accepted_execution(self):
         """DEC-052 §3: accepted under both modes -> byte-identical output.
 
-        This is the CI-checkable form of "strict changes response policy, never
-        runtime policy". If strict ever gains a runtime effect, this fails.
+        This is the CI-checkable form of "strict may only convert a substitution
+        into a rejection". The engine echoes the parameters it was handed, so if
+        `strict` ever reaches execution — directly, or by changing what admission
+        hands over — the bytes diverge and this fails. An engine returning a
+        constant would make the assertion unfalsifiable.
         """
-        svc = _make_service()
+
+        class _EchoEngine(BaseEngine):
+            async def generate(self, request: ChatCompletionRequest):
+                echoed = (
+                    f"max_tokens={request.max_tokens} seed={request.seed} "
+                    f"temperature={request.temperature} top_p={request.top_p} "
+                    f"priority={request.priority} strict={request.strict}"
+                )
+                return ChatCompletionResponse(
+                    model=request.model,
+                    choices=[
+                        ChatCompletionChoice(
+                            index=0,
+                            message=ChatCompletionMessage(content=echoed),
+                            finish_reason="stop",
+                        )
+                    ],
+                    usage=ChatCompletionUsage(
+                        prompt_tokens=1, completion_tokens=1, total_tokens=2
+                    ),
+                )
+
+            async def generate_stream(self, request):  # pragma: no cover - unused
+                raise AssertionError("not used")
+                yield
+
+            def is_healthy(self) -> bool:
+                return True
+
+        svc = _make_service(engine=_EchoEngine())
 
         def _req(strict: bool) -> ChatCompletionRequest:
             return ChatCompletionRequest(
@@ -148,11 +180,36 @@ class TestChatService:
         lenient = await svc.complete(_req(strict=False))
         strict = await svc.complete(_req(strict=True))
 
-        assert (
-            lenient.choices[0].message.content.encode()
-            == strict.choices[0].message.content.encode()
-        )
+        # `strict` is the one field expected to differ — it is the request flag
+        # itself, not something the flag changed about execution.
+        assert lenient.choices[0].message.content.encode() == strict.choices[
+            0
+        ].message.content.replace("strict=True", "strict=False").encode()
         assert lenient.resolved == strict.resolved
+
+    @pytest.mark.asyncio
+    async def test_the_echo_guard_can_actually_fail(self):
+        """Guards the test above: prove the echo detects a parameter difference.
+
+        Without this, a later refactor could make the echo constant again and the
+        DEC-052 §3 assertion would keep passing while checking nothing.
+        """
+        svc = _make_service()
+        a = await svc.complete(
+            ChatCompletionRequest(
+                model="test",
+                messages=[ChatMessage(role="user", content="hello")],
+                max_tokens=100,
+            )
+        )
+        b = await svc.complete(
+            ChatCompletionRequest(
+                model="test",
+                messages=[ChatMessage(role="user", content="hello")],
+                max_tokens=200,
+            )
+        )
+        assert a.resolved != b.resolved
 
     @pytest.mark.asyncio
     async def test_stream_response_formats_sse(self):
