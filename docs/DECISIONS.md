@@ -1180,3 +1180,85 @@ Use this document to capture non-obvious design decisions as the project evolves
   Acceptance of this ADR establishes repository policy for the Engine Boundary;
   it does not by itself authorize factory/capability implementation, AsyncLLM
   work, or a second backend — those require their own accepted changes.
+
+### DEC-048
+- Date: 2026-08-04
+- Status: accepted
+- Title: Lint rule set and type-check baseline for the CI gate (OS-1)
+- Context: OS-1
+  (`openspec/changes/2026-08-04-add-ci-and-static-analysis-gate/`) adds the
+  repository's first merge-blocking gate: `pytest tests/unit`, `ruff check .`,
+  and `mypy src/` on every pull request. Measured against the tree at
+  `develop` before any change:
+  - `ruff check .` with the tool's own default rule selection reported **232
+    findings** across 26 rules.
+  - `mypy src/` reported **27 errors in 9 files** (51 source files checked).
+
+  OS-1 forbids editing anything under `src/` or `tests/`. That constraint is
+  not incidental: five Phase A units follow OS-1 and several will be in flight
+  simultaneously over a shared file set
+  (`docs/PHASE-A-EXECUTION-PLAN.md` §7.3), so a tree-wide cleanup landing first
+  would collide with all of them and make every subsequent Phase A diff
+  unreviewable. Three options existed — weaken the gate until it asserts
+  nothing, edit the code, or record the known-failing surfaces explicitly and
+  gate everything else.
+- Decision:
+  1. **Lint rule set.** Select `E4`, `E7`, `E9`, `F` — the set covering broken
+     code (syntax errors, undefined names, redefinitions) rather than style.
+     Three rules are ignored, each for a stated reason:
+     - `E402` (module import not at top of file) — **deliberate design, not
+       debt.** `api/main.py` applies the vLLM platform patch before importing
+       any vLLM-touching module, and `scripts/` set `sys.path` before importing
+       the package. Enabling it would flag correct code.
+     - `F401` (unused import, 17 occurrences) and `F841` (unused variable, 1) —
+       **deferred, not endorsed.** Clearing either requires source edits, which
+       OS-1 forbids.
+     The remaining ~200 default findings (`BLE001`, `SIM117`, `I001`, `S110`,
+     `UP*`, `RUF*` and others) are outside the selection entirely. Widening the
+     selection is a separate change and must not ride along with a Phase A unit.
+  2. **Third-party stubs are not a code suppression.** `yaml` (4 errors) and
+     `pynvml` (1) ship no type information. These are handled with
+     `ignore_missing_imports` scoped to those two packages. This says nothing
+     about `inference_x`'s own types and is not part of the baseline. It
+     resolved 5 of the 27 errors without suppressing a single project module.
+  3. **Type-check baseline — four modules, 22 errors.** The remaining errors
+     are confined to modules that sit against untyped surfaces or are already
+     scheduled for replacement:
+
+     | Module | Errors | Why |
+     |---|---|---|
+     | `engines/vllm_engine` | 10 | vLLM's `LLM` is untyped; mypy resolves it as `LLM?` and rejects attribute access. |
+     | `engines/driver` | 7 | `Optional` narrowing on `Queue`/`Future`. Deleted by Phase B1 (AsyncLLM). |
+     | `services/chat_service` | 3 | `generate_stream` is declared `async def -> AsyncGenerator[str, None]`, which mypy reads as a coroutine. |
+     | `api/deps` | 2 | Composition-root argument types. |
+
+     The baseline is an **enumerated, closed list**. No repository-wide
+     suppression and no wildcard, so a module added later is type-checked by
+     default — verified during OS-1 validation by adding a scratch module with
+     a deliberate type error and confirming the gate went red.
+  4. **`api/main.py` is deliberately excluded from the baseline.** Its only
+     error was the `yaml` stub, resolved by decision 2. Baselining it would
+     have suppressed a module that needs no suppression, silently exempting
+     future errors there. Over-suppression is a defect, not a safe default.
+  5. **The baseline does not grow during Phase A.** Adding a module to it in
+     OS-2 through OS-6 is a review finding — a signal the unit is touching more
+     than its scope allows (`docs/PHASE-A-EXECUTION-PLAN.md` §7.4) — not a
+     routine edit.
+- Consequences:
+  - CI landed with **zero changes under `src/` or `tests/`**. 430/430 unit
+    tests pass; `ruff check .` and `mypy src/` both report clean.
+  - The gate is real but bounded. It catches broken code, undefined names, and
+    type errors in the 47 non-baselined modules. It does **not** assert style
+    consistency, import ordering, or type correctness inside the four
+    baselined modules.
+  - A clean `mypy src/` run is not a Phase A goal and should not be pursued
+    inside a Phase A unit.
+  - `services/chat_service`'s three errors are the same `generate_stream`
+    typing defect the Phase A plan identified independently
+    (`docs/PHASE-A-EXECUTION-PLAN.md` §1.1). The type checker found it without
+    being told to look. OS-2 widens that contract and should shrink or remove
+    this baseline entry as a side effect.
+  - `engines/driver`'s entry is expected to disappear with the module itself in
+    Phase B1.
+- Supersession: baseline reduction and lint-selection widening each require
+  their own change. Neither is authorized by this decision.

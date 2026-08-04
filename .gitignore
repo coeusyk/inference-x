@@ -1,6 +1,5 @@
 .venv/
 .idea/
-.github/
 
 .env
 *.egg-info

@@ -58,10 +58,16 @@ cd inference-x
 uv sync
 cp .env.example .env
 uv run pytest tests/unit -q   # must pass without a GPU
+uv run ruff check .           # lint
+uv run mypy src/              # type check
 ```
 
 > `uv` is required. Do not use bare `pip` or `python` — vLLM and its CUDA wheels are
 > managed through the `.venv` created by `uv sync`.
+
+Those three commands are exactly what CI runs, so a green local run means a green
+CI run. Lint and type rules are configured in `pyproject.toml`; the reasoning behind
+the rule selection and the type baseline is DEC-048. Neither command formats code.
 
 For changes that require a GPU, test on WSL2 Ubuntu. That is the supported runtime.
 Non-WSL2 Linux may work but is not the primary target.
@@ -137,6 +143,8 @@ questions.
 
 ```
 [ ] uv run pytest tests/unit -q — all passing
+[ ] uv run ruff check . — clean
+[ ] uv run mypy src/ — clean (do not add modules to the DEC-048 baseline)
 [ ] No new warnings in pytest output
 [ ] File boundaries respected (see AGENTS.md)
 [ ] Non-obvious decisions recorded in docs/DECISIONS.md
