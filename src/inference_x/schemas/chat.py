@@ -58,6 +58,12 @@ class ChatCompletionRequest(BaseModel):
         description="OpenAI-compatible streaming options. Absent means "
         "include_usage=False — no usage chunk is emitted.",
     )
+    seed: Optional[int] = Field(
+        default=None,
+        description="Optional sampling seed forwarded unchanged to the live "
+        "backend sampler when set (DEC-051). Absent/null omits seed from "
+        "SamplingParams. Does not claim end-to-end determinism.",
+    )
 
 
 class ChatCompletionMessage(BaseModel):

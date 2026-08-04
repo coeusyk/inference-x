@@ -1170,9 +1170,11 @@ do not exist in this repository. Each was checked against the source.
 
 ### Correctness and reproducibility
 
-- **Determinism / seeded generation.** `SamplingParams` is built with `temperature`,
-  `max_tokens`, `top_p`, and optionally `repetition_penalty`. **No `seed` is ever passed**,
-  and `ChatCompletionRequest` has no seed field. Runs are not reproducible.
+- **Determinism / seeded generation.** Optional request `seed` is accepted and
+  **honoured** — forwarded unchanged into live vLLM `SamplingParams` when set
+  (DEC-051 / OS-3). That means the seed reaches the sampler; it does **not** mean
+  the server is end-to-end deterministic (batch composition and related concerns
+  are Phase C3).
 - **Accuracy or quality evaluation.** The benchmark suite measures speed and VRAM only.
   There is no correctness scoring, no reference outputs, no regression detection on
   output quality.
@@ -1565,7 +1567,8 @@ capabilities I had missed. Result:
 **Corroborated independently from source** — the review and this document agree, having
 reached the same findings separately: the inert `concurrency` parameter; the constant
 `quant_score` placeholder; word-counts-as-tokens; the `max_model_len` 2048 clamp under
-multi-model pools; `enforce_eager` and the global step lock; no `seed` anywhere; no
+multi-model pools; `enforce_eager` and the global step lock; seed now honoured at
+the sampler (DEC-051) but e2e determinism still deferred; no
 lifecycle/load-unload API; unbounded driver queue; `BaseEngine`'s duck-typed extras;
 `ModelEntry.engine` being `Literal["vllm"]`; no CI; the two unarchived-but-shipped OpenSpec
 changes.

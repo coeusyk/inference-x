@@ -1430,3 +1430,52 @@ Use this document to capture non-obvious design decisions as the project evolves
     (`docs/PHASE-A-EXECUTION-PLAN.md` §8.2).
 - Supersession: none. This is a statement of fact about historical data and
   does not expire.
+
+### DEC-051
+- Date: 2026-08-04
+- Status: accepted
+- Title: Seed support / Deterministic Generation Contract (OS-3)
+- Context: Phase A OS-3 (`docs/PHASE-A-EXECUTION-PLAN.md` §4; review task A3).
+  `ChatCompletionRequest` had no `seed` field, so clients that pinned a seed
+  (notably Varex) experienced silent Pydantic drop — worse than unsupported.
+  `VLLMEngine._sampling_params` built `SamplingParams` without seed. OS-2
+  (DEC-049) already spent Phase A's Engine Boundary change; OS-3 must not
+  widen `BaseEngine`. Ownership: *The client owns requesting determinism; the
+  backend owns honouring it; the runtime must not invent it.*
+- Problem: Without a first-class `seed` that reaches the live sampler,
+  reproducibility harnesses cannot drive the server honestly. Overclaiming
+  end-to-end determinism would be a separate defect (batch composition is
+  Phase C3).
+- Decision — Deterministic Generation Contract:
+  - **G1 Acceptance.** `seed: Optional[int] = None` on `ChatCompletionRequest`
+    (appended after `stream_options`). Not silently dropped.
+  - **G2 Unchanged forward.** When `seed is not None` and the live vLLM engine
+    builds `SamplingParams`, pass that integer exactly as received. No rewrite,
+    clamp, or runtime normalization (including `-1`).
+  - **G3 Omission equivalence.** When `seed is None`, omit the `seed` key —
+    pre-OS-3 sampling construction for all other parameters.
+  - **G4 Path parity.** Streaming and non-streaming use the same
+    `_sampling_params` builder.
+  - **G5 Honesty.** Docs say seed is *honoured* (reaches the sampler); never
+    that the server is deterministic or runs are reproducible end-to-end.
+  - **Intentionally non-guaranteed (N1–N8):** concurrent/batch identity;
+    cross-hardware/version identity; CUDA-graph/JIT/prefix-cache/spec-decode
+    identity; replay/manifests; runtime-invented determinism; default
+    benchmark determinism; response seed echo (OS-4); backend sentinel
+    interpretation (e.g. what vLLM does with `-1`).
+- Alternatives considered:
+  - **Keep silent drop.** Rejected: Varex failure mode.
+  - **Normalize `-1` → omit in Inference-X.** Rejected: runtime must not
+    invent backend semantics (N8).
+  - **Echo effective seed now.** Rejected: OS-4 owns `resolved`.
+  - **`deterministic: true` / `VLLM_BATCH_INVARIANT`.** Rejected: Phase C3.
+- Consequences:
+  - Positive: pinned seeds reach the sampler; silent-drop failure mode
+    superseded.
+  - Negative: clients may over-read identity tests; docs must stay honest (G5).
+  - Out of scope: OS-4 echo/`warnings`/`strict`/`count_prompt_tokens`; OS-5
+    suite hash; OS-6 advisor; Phase B AsyncLLM; Phase C replay/oracle.
+- DEC-047 compliance: wire field + concrete engine wiring only; no
+  `execution/`; no Engine Boundary change; no second backend.
+- Supersession: remains in force until a future DEC changes the sampling-input
+  contract. Phase C may *add* guarantees without rewriting G1–G5.

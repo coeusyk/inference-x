@@ -502,6 +502,10 @@ class VLLMEngine(BaseEngine):
             kwargs["repetition_penalty"] = (
                 self._repetition_penalty if self._repetition_penalty is not None else 1.15
             )
+        # DEC-051 / OS-3: forward seed unchanged when set; omit when None.
+        # Do not normalize backend sentinels (e.g. -1).
+        if request.seed is not None:
+            kwargs["seed"] = request.seed
         return SamplingParams(**kwargs)
 
     def _stream_prompt(self, request: ChatCompletionRequest) -> str:

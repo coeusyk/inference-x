@@ -139,6 +139,37 @@ class TestChatCompletionRequest:
         )
         assert req.max_tokens == 4096
 
+    def test_seed_integer_is_accepted(self):
+        req = ChatCompletionRequest(
+            model="m",
+            messages=[ChatMessage(role="user", content="x")],
+            seed=42,
+        )
+        assert req.seed == 42
+
+    def test_seed_minus_one_is_accepted(self):
+        req = ChatCompletionRequest(
+            model="m",
+            messages=[ChatMessage(role="user", content="x")],
+            seed=-1,
+        )
+        assert req.seed == -1
+
+    def test_seed_defaults_to_none(self):
+        req = ChatCompletionRequest(
+            model="m",
+            messages=[ChatMessage(role="user", content="x")],
+        )
+        assert req.seed is None
+
+    def test_seed_non_integer_raises(self):
+        with pytest.raises(ValidationError):
+            ChatCompletionRequest(
+                model="m",
+                messages=[ChatMessage(role="user", content="x")],
+                seed="not-an-int",  # type: ignore[arg-type]
+            )
+
 
 class TestSchemaConstraintsViaAPI:
     """Verify that out-of-range values produce HTTP 422 when sent through the API."""
@@ -196,6 +227,20 @@ class TestSchemaConstraintsViaAPI:
         client = self._client()
         resp = client.post("/v1/chat/completions", json=self._base_payload())
         assert resp.status_code == 200
+
+    def test_seed_integer_returns_200(self):
+        client = self._client()
+        payload = self._base_payload()
+        payload["seed"] = 42
+        resp = client.post("/v1/chat/completions", json=payload)
+        assert resp.status_code == 200
+
+    def test_seed_non_integer_returns_422(self):
+        client = self._client()
+        payload = self._base_payload()
+        payload["seed"] = "nope"
+        resp = client.post("/v1/chat/completions", json=payload)
+        assert resp.status_code == 422
 
 
 class TestChatCompletionResponse:
