@@ -22,6 +22,137 @@ This repository uses OpenSpec for spec-driven development.
   6. validation
   7. archive
 
+## Agent tooling (mandatory — token efficiency)
+
+Token efficiency is a standing requirement for every session in this repo, not a
+per-task preference. Prefer the smallest useful context: filter command output,
+sandbox analysis so only answers enter the conversation, and look up symbols
+through indexes instead of dumping files.
+
+### Two command paths only — no third
+
+Every shell command must run through **one** of:
+
+| Path | When | Why |
+|---|---|---|
+| **context-mode** (`ctx_execute`, `ctx_batch_execute`, `ctx_execute_file`, …) | Default for read-only work: gates (`pytest`/`ruff`/`mypy`), `openspec validate`, greps, inspections, scripts that only need stdout | Sandboxes execution so **only stdout/stderr you print** enter the model context (context-mode targets ~98% reduction on tool output). Large results stay indexed; follow up with `ctx_search`. |
+| **`rtk proxy <cmd>`** | Host-state mutations that must persist: git commits/branches/merges/pushes, `openspec archive`, moves/renames outside Write/Edit, long-running processes whose exit code on the real host matters | `ctx_execute` runs in a subprocess and **discards filesystem writes**. Mutations that must land in the real worktree leave context-mode via `rtk proxy`. |
+
+A bare `Bash`/`Shell` call, or bare `rtk <cmd>` without `proxy` when you meant a
+persisting mutation, is wrong for this repo.
+
+### RTK proxy ([rtk-ai/rtk](https://github.com/rtk-ai/rtk))
+
+RTK is a CLI proxy that filters and compresses command output before the agent
+reads it (typically **60–90% fewer bash-output bytes** on supported commands;
+git often 85–99%). Docs: Context7 library `/rtk-ai/rtk`, site `https://www.rtk-ai.app`.
+
+**In this repo, prefer:**
+
+```bash
+rtk proxy git status
+rtk proxy git commit -m "..."
+rtk proxy git push -u origin HEAD
+rtk proxy openspec archive <change-id>
+```
+
+For read-only gates inside context-mode, wrap the same tools so output stays
+compact when it does reach stdout, e.g. `rtk pytest …`, `rtk ruff …`, `rtk mypy …`,
+`rtk uv run …` — still invoked **via** `ctx_execute` / `ctx_batch_execute`, not as
+a bare shell tool call.
+
+Useful analytics: `rtk gain`, `rtk discover`, `rtk session`. Cursor install:
+`rtk init -g --agent cursor` (rewrites Bash tool calls when the hook is active).
+
+### context-mode plugin ([mksglu/context-mode](https://github.com/mksglu/context-mode))
+
+Mandatory routing for gather → analyze → recall:
+
+1. **Gather** — `ctx_batch_execute` (multi-command, auto-index) or `ctx_execute`
+2. **Web / large docs** — `ctx_fetch_and_index` then `ctx_search` (do not paste full pages)
+3. **Project knowledge** — `ctx_index` then `ctx_search` (FTS5 / BM25)
+4. **File-heavy analysis** — `ctx_execute_file` (file stays in sandbox; log only the answer)
+5. **Health** — `ctx_doctor`, `ctx_stats` (savings ratio this session)
+
+Think-in-code: write a short script that computes the answer; do not Read dozens of
+files into the conversation to count or compare by eye. Native `Read` is reserved
+for when the next step is an exact `Edit`/`StrReplace` that needs byte-accurate
+context.
+
+### token-savior MCP (if present)
+
+When the **token-savior** MCP server is connected in the session, use it **before**
+grep-then-read or spawning an explore agent for symbol / impact questions:
+
+- Navigation: `find_symbol`, `get_full_context`, `get_function_source`, `get_class_source`, `search_codebase`, `search_in_symbols`
+- Impact: `get_call_chain`, `get_change_impact`, `get_dependents`, `get_dependencies`, `get_edit_context`, `find_impacted_test_files`
+- Repo status (structured): `get_git_status`, `get_changed_symbols`, `get_project_summary`
+
+If token-savior is **not** listed in the available MCP servers for this session,
+say so once and fall back to context-mode (`ctx_execute` + `rg`) — do not invent
+tool calls. Local install may exist (`token-savior` CLI / `.token-savior-cache.json`)
+even when the MCP is not attached to Cursor; MCP presence is what matters for
+agents.
+
+### Why this stack reduces tokens
+
+| Layer | What it cuts | Mechanism |
+|---|---|---|
+| RTK | Bash/tool stdout noise | Filters progress bars, passing tests, padding; agent sees failures and summaries |
+| context-mode | Bulk tool payloads in the chat | Sandbox keeps raw output; only logged answers + small search hits enter context |
+| token-savior | Blind file dumps for navigation | Indexed symbol graph returns location/source/deps without loading whole files |
+
+Together they attack the usual agents tax: huge `pytest`/`git` dumps, repeated
+full-file reads, and re-fetching docs already seen this session.
+
+## Branches, commits, and GitHub rulesets
+
+### Long-lived branches
+
+| Branch | Role |
+|---|---|
+| `develop` | Default integration branch for Phase work and feature PRs |
+| `main` | Release / protected trunk |
+
+Do **not** push commits directly to `main` or `develop` for feature work. Cut a
+feature branch, open a PR, wait for CI.
+
+### How to start work
+
+1. Sync: `rtk proxy git fetch origin && rtk proxy git checkout develop && rtk proxy git pull --ff-only`
+2. Branch from `develop`: `rtk proxy git checkout -b feat/<short-topic>` (or `fix/…`, `chore/…`, `docs/…`)
+3. One concern per branch / PR (see `CONTRIBUTING.md`)
+4. Commit only when asked (or when the user explicitly requests a commit); use
+   conventional, why-focused messages
+5. Push: `rtk proxy git push -u origin HEAD`
+6. Open PR **into `develop`** (or `main` only for release/promotion PRs)
+
+### Enforced protections (verified on GitHub)
+
+**Ruleset — [Protect Main](https://github.com/coeusyk/inference-x/rules/18108093)**  
+Target: default branch (`main` / `~DEFAULT_BRANCH`), enforcement **active**.
+
+- Block branch deletion
+- Block force-push / non-fast-forward
+- Block creating matching refs outside the allowed flow
+- Pull request required before merge; **code owner review** required
+- Allowed merge methods: merge, squash, rebase
+
+**Classic branch protection — `develop` and `main`** (OS-1 enforcement):
+
+- Required status check: **`checks`** (job name from `.github/workflows/ci.yml`)
+- Both branches report `protected: true` with that required context
+
+A red `checks` run **blocks merge**. Local preflight (same as CI):
+
+```bash
+uv run pytest tests/unit -q
+uv run ruff check .
+uv run mypy src/
+```
+
+Prefer running those via context-mode + `rtk` wrappers so output stays compact.
+
 ## Repo-specific rules
 
 - InferenceX is a backend-first, layered LLM inference platform.
