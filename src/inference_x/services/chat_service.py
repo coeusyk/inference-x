@@ -13,6 +13,7 @@ from inference_x.routing.task_router import TaskRouter
 from inference_x.schemas.chat import (
     ChatCompletionRequest,
     ChatCompletionResponse,
+    ChatStreamChunk,
     ResolvedRequest,
 )
 from inference_x.services.model_service import ModelRegistry
@@ -121,33 +122,43 @@ class ChatService:
         stalled engine does not hold the connection open indefinitely. On
         timeout the error event is emitted and neither a terminal nor a usage
         event follows — only ``[DONE]``.
+
+        Reservation lifetime: from the instant ``admit()`` returns until this
+        generator terminates for any reason (normal completion, timeout, engine
+        exception, cancellation, or the caller closing the generator — which is
+        how a client disconnect surfaces here, including during the prologue
+        event above), exactly one matching ``release()`` occurs. The ``try``
+        below starts immediately after ``admit()`` and has a single ``finally``,
+        so every suspension point in between — the prologue ``yield`` included —
+        is covered by the same, single release call site.
         """
         routed_model, engine = self._resolve_engine(request)
         admitted = self._admission.admit(routed_model, request, engine)
-        effective_request = request.model_copy(
-            update={"max_tokens": admitted.effective_max_tokens}
-        )
-        completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
-        timeout_s = get_settings().stream_timeout_s
-        include_usage = bool(
-            request.stream_options and request.stream_options.include_usage
-        )
-
-        def _event(payload: dict) -> str:
-            return f"data: {json.dumps(payload, separators=(',', ':'))}\n\n"
-
-        yield _event(
-            {
-                "id": completion_id,
-                "object": "chat.completion.chunk",
-                "choices": [],
-                "resolved": _resolved(effective_request).model_dump(),
-                "warnings": [w.model_dump() for w in admitted.warnings],
-            }
-        )
-
-        gen = engine.generate_stream(effective_request)
+        gen: AsyncGenerator[ChatStreamChunk, None] | None = None
         try:
+            effective_request = request.model_copy(
+                update={"max_tokens": admitted.effective_max_tokens}
+            )
+            completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
+            timeout_s = get_settings().stream_timeout_s
+            include_usage = bool(
+                request.stream_options and request.stream_options.include_usage
+            )
+
+            def _event(payload: dict) -> str:
+                return f"data: {json.dumps(payload, separators=(',', ':'))}\n\n"
+
+            yield _event(
+                {
+                    "id": completion_id,
+                    "object": "chat.completion.chunk",
+                    "choices": [],
+                    "resolved": _resolved(effective_request).model_dump(),
+                    "warnings": [w.model_dump() for w in admitted.warnings],
+                }
+            )
+
+            gen = engine.generate_stream(effective_request)
             while True:
                 try:
                     if timeout_s > 0:
@@ -203,7 +214,8 @@ class ChatService:
                             }
                         )
         finally:
-            await gen.aclose()
+            if gen is not None:
+                await gen.aclose()
             self._admission.release(routed_model, admitted.reserved_tokens)
 
         yield "data: [DONE]\n\n"

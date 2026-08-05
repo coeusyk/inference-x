@@ -1,10 +1,12 @@
 """Unit tests for ChatService (Phase 4: multi-model engine pool)."""
+import asyncio
 import json
 
 import pytest
 
 from inference_x.engines.base import BaseEngine
 from inference_x.engines.pool import EnginePool
+from inference_x.routing.admission import AdmissionController, AdmissionResult
 from inference_x.routing.task_router import TaskRouter
 from inference_x.schemas.chat import (
     ChatCompletionChoice,
@@ -45,6 +47,32 @@ def _make_service(
     else:
         pool = _make_pool(model_name, healthy=healthy, raise_on_generate=raise_on_generate)
     return ChatService(engine_pool=pool, registry=registry, router=router)
+
+
+class _CountingAdmission:
+    """Wraps a real AdmissionController, recording admit()/release() calls.
+
+    Delegates admit()/release() to the wrapped controller unchanged, so the
+    real KV/sequence trackers update exactly as they would in production —
+    this only adds observable records of what admit() returned and what
+    release() received, to make the "exactly one release()", "never released
+    twice", and "release() receives the same reservation admit() produced"
+    invariants directly assertable (SEV-A1 fix, fix-admission-reservation-leak).
+    """
+
+    def __init__(self, inner: AdmissionController) -> None:
+        self.inner = inner
+        self.admit_results: list[AdmissionResult] = []
+        self.release_calls: list[tuple[str, int]] = []
+
+    def admit(self, *args, **kwargs):
+        result = self.inner.admit(*args, **kwargs)
+        self.admit_results.append(result)
+        return result
+
+    def release(self, routed_model: str, reserved_tokens: int) -> None:
+        self.release_calls.append((routed_model, reserved_tokens))
+        self.inner.release(routed_model, reserved_tokens)
 
 
 class _StubEngine(BaseEngine):
@@ -502,3 +530,195 @@ class TestStreamingContract:
         assert done == "[DONE]"
         # include_usage was requested, but a timed-out stream accounted nothing.
         assert not any(isinstance(e, dict) and "usage" in e for e in events)
+
+
+class TestReservationLifecycle:
+    """fix-admission-reservation-leak: the reservation lifetime invariant.
+
+    From the instant admit() successfully returns until the stream generator
+    terminates for any reason, exactly one matching release() MUST occur, and
+    a reservation MUST NEVER be released more than once. Each test below is
+    one row of the termination matrix in
+    openspec/changes/fix-admission-reservation-leak/design.md.
+    """
+
+    def _req(self, **kw) -> ChatCompletionRequest:
+        return ChatCompletionRequest(
+            model="test",
+            messages=[ChatMessage(role="user", content="hello")],
+            stream=True,
+            **kw,
+        )
+
+    def _service(self, engine: BaseEngine) -> tuple[ChatService, _CountingAdmission]:
+        registry = _make_registry("test")
+        router = TaskRouter(registry, "test")
+        admission = _CountingAdmission(AdmissionController(registry))
+        pool = EnginePool({"test": engine})
+        svc = ChatService(
+            engine_pool=pool, registry=registry, router=router, admission=admission
+        )
+        return svc, admission
+
+    def _assert_released_exactly_once_and_clear(self, admission: _CountingAdmission) -> None:
+        assert len(admission.release_calls) == 1
+        assert admission.inner._tracker.current("test") == 0
+        assert admission.inner._seq_tracker.current("test") == 0
+
+    @pytest.mark.asyncio
+    async def test_normal_completion_releases_exactly_once(self):
+        svc, admission = self._service(_StubEngine())
+        events = [e async for e in svc.stream_response(self._req())]
+        assert events[-1] == "data: [DONE]\n\n"
+        self._assert_released_exactly_once_and_clear(admission)
+
+    @pytest.mark.asyncio
+    async def test_timeout_releases_exactly_once(self, monkeypatch):
+        class _HangingEngine(BaseEngine):
+            async def generate(self, request):  # pragma: no cover - unused
+                raise AssertionError("not used")
+
+            async def generate_stream(self, request):
+                await asyncio.sleep(10)
+                yield ChatStreamChunk(content="never")
+
+            def is_healthy(self) -> bool:
+                return True
+
+        svc, admission = self._service(_HangingEngine())
+
+        class _Settings:
+            stream_timeout_s = 0.01
+
+        monkeypatch.setattr(
+            "inference_x.services.chat_service.get_settings", lambda: _Settings()
+        )
+        events = [e async for e in svc.stream_response(self._req())]
+        assert events[-1] == "data: [DONE]\n\n"
+        self._assert_released_exactly_once_and_clear(admission)
+
+    @pytest.mark.asyncio
+    async def test_engine_exception_releases_exactly_once(self):
+        svc, admission = self._service(_StubEngine(raise_on_generate=True))
+        with pytest.raises(RuntimeError, match="stub streaming error"):
+            async for _ in svc.stream_response(self._req()):
+                pass
+        self._assert_released_exactly_once_and_clear(admission)
+
+    @pytest.mark.asyncio
+    async def test_cancelled_error_releases_exactly_once(self):
+        class _HangingEngine(BaseEngine):
+            async def generate(self, request):  # pragma: no cover - unused
+                raise AssertionError("not used")
+
+            async def generate_stream(self, request):
+                yield ChatStreamChunk(content="ok")
+                await asyncio.sleep(10)
+                yield ChatStreamChunk(content="never")
+
+            def is_healthy(self) -> bool:
+                return True
+
+        svc, admission = self._service(_HangingEngine())
+        agen = svc.stream_response(self._req())
+        await agen.__anext__()  # prologue
+        await agen.__anext__()  # first content event
+        task = asyncio.ensure_future(agen.__anext__())
+        await asyncio.sleep(0.01)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        self._assert_released_exactly_once_and_clear(admission)
+
+    @pytest.mark.asyncio
+    async def test_generator_exit_before_first_token_releases_exactly_once(self):
+        """The SEV-A1 regression: disconnect right after the DEC-053 prologue.
+
+        Before the fix, this leaked the KV reservation and the sequence slot
+        forever (reproduced during the Phase A audit as 522 KV tokens / 1
+        sequence slot held after aclose()).
+        """
+        svc, admission = self._service(_StubEngine())
+        agen = svc.stream_response(self._req())
+        await agen.__anext__()  # prologue only — no content event yet
+        await agen.aclose()
+        self._assert_released_exactly_once_and_clear(admission)
+
+    @pytest.mark.asyncio
+    async def test_generator_exit_after_first_token_releases_exactly_once(self):
+        svc, admission = self._service(_StubEngine())
+        agen = svc.stream_response(self._req())
+        await agen.__anext__()  # prologue
+        await agen.__anext__()  # first content event
+        await agen.aclose()
+        self._assert_released_exactly_once_and_clear(admission)
+
+    @pytest.mark.asyncio
+    async def test_client_disconnect_after_terminal_event_releases_exactly_once(self):
+        """Disconnect at the last suspension point before normal completion.
+
+        Distinct from the "after first token" row: here the consumer has
+        already received the terminal event and disconnects without ever
+        requesting the event that would have triggered [DONE] — the point at
+        which a real client's connection drop and this generator's cleanup are
+        closest together.
+        """
+        svc, admission = self._service(_StubEngine())
+        agen = svc.stream_response(self._req())
+        await agen.__anext__()  # prologue
+        await agen.__anext__()  # content
+        await agen.__anext__()  # terminal
+        await agen.aclose()
+        self._assert_released_exactly_once_and_clear(admission)
+
+    @pytest.mark.asyncio
+    async def test_release_is_never_called_twice(self):
+        """Closing an already-closed generator must not re-trigger release()."""
+        svc, admission = self._service(_StubEngine())
+        agen = svc.stream_response(self._req())
+        await agen.__anext__()
+        await agen.aclose()
+        assert len(admission.release_calls) == 1
+        await agen.aclose()  # no-op on an already-closed async generator
+        assert len(admission.release_calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_release_receives_the_reservation_admit_produced(self):
+        """Identity, not just count: release() must receive the specific
+        reservation admit() produced for THIS stream — not a coincidentally
+        matching value, and not another concurrent stream's reservation.
+
+        Exactly-once-release plus zero-tracker assertions (the other tests in
+        this class) only prove value-correctness for a single reservation in
+        isolation — under one outstanding reservation, the tracker returning
+        to zero is only possible if release() used the same amount admit()
+        added, so it can't be substituted for identity in general. It cannot
+        catch a swap between two reservations that are simultaneously
+        outstanding. This test makes that case impossible to pass by
+        coincidence: two streams to the same model are admitted with
+        deliberately different `max_tokens` (so their `reserved_tokens`
+        differ), left concurrently outstanding, then closed independently —
+        each release() call must carry its own stream's reservation.
+        """
+        svc, admission = self._service(_StubEngine())
+
+        agen_small = svc.stream_response(self._req(max_tokens=16))
+        await agen_small.__anext__()  # prologue — admit() has run for this stream
+        agen_large = svc.stream_response(self._req(max_tokens=400))
+        await agen_large.__anext__()  # prologue — admit() has run for this stream
+
+        assert len(admission.admit_results) == 2
+        reserved_small = admission.admit_results[0].reserved_tokens
+        reserved_large = admission.admit_results[1].reserved_tokens
+        # Not otherwise meaningful: if these coincided, a swap would be
+        # unobservable and this test would pass regardless of correctness.
+        assert reserved_small != reserved_large
+
+        await agen_small.aclose()
+        assert admission.release_calls == [("test", reserved_small)]
+
+        await agen_large.aclose()
+        assert admission.release_calls == [
+            ("test", reserved_small),
+            ("test", reserved_large),
+        ]
