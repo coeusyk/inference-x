@@ -17,6 +17,7 @@ import httpx
 
 from inference_x.benchmarks.hardware import profile_hardware
 from inference_x.benchmarks.schemas import BenchmarkResult, HardwareProfile, PromptResult
+from inference_x.benchmarks.suite_identity import verify_suite
 from inference_x.services.model_service import ModelRegistry
 from inference_x.utils.vllm_pool_config import estimate_engine_footprint_gib
 
@@ -24,9 +25,13 @@ _VRAM_BUDGET_SLACK_GB = 0.5
 
 
 def _load_suite(suite_path: str) -> tuple[str, list[dict]]:
-    """Return (suite_version, prompts_list) from a suite JSON file."""
+    """Return (suite_version, prompts_list) from a verified suite JSON file.
+
+    Suite identity is verified against the pinned canonicalizer (DEC-054); a
+    missing or mismatched `suite_version` raises `SuiteIdentityError`.
+    """
     data = json.loads(Path(suite_path).read_text(encoding="utf-8"))
-    return data["suite_version"], data["prompts"]
+    return verify_suite(data)
 
 
 def _run_prompt_stream(
@@ -195,7 +200,7 @@ class BenchmarkRunner:
             p95_latency_ms=round(_percentile(latencies, 95), 2),
             p99_latency_ms=round(_percentile(latencies, 99), 2),
             mean_throughput_tps=round(statistics.mean(throughputs) if throughputs else 0.0, 2),
-            peak_vram_delta_gb=round(peak_vram_delta, 2),
+            vram_device_occupied_gib=round(peak_vram_delta, 2),
             hardware=hardware_before,
             max_model_len=max_model_len,
             vram_budget_exceeded=vram_budget_exceeded,

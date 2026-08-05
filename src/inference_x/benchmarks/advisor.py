@@ -1,14 +1,26 @@
 """Model advisor: scores and ranks benchmark results against hardware profile.
 
-Scoring weights:
-  40% throughput  — most visible performance signal
-  30% TTFT        — inverted (lower is better) — latency matters for interactivity
-  20% VRAM headroom — model must fit in total VRAM with safety buffer
-  10% quantization  — placeholder (currently 1.0 for all models, reserved for INT8/FP8)
+Scoring weights (uncalibrated editorial preference, not a reasoned inference from
+data — they are not tuned against any outcome and may change; DEC-056):
+  4/9 throughput      — relative to the fastest viable model in the report
+  1/3 TTFT            — inverted (lower is better), relative to the report
+  2/9 VRAM headroom   — remaining capacity after load, clamped 0–1
 
-A model whose VRAM footprint plus safety buffer exceeds hardware.vram_total_gb is
-hard-gated: score = 0, viable = False regardless of other metrics.
-CPU-only hardware (has_gpu=False) skips the VRAM gate and sets vram_headroom = 1.0.
+The three weights sum to 1 and preserve the prior 0.40 : 0.30 : 0.20 ratio; the
+deleted `quant_score` placeholder contributed a constant additive floor and is gone.
+
+`viable` is the sole viability signal. A model whose VRAM footprint plus safety
+buffer exceeds hardware.vram_total_gb is hard-gated to score = 0.0, viable = False;
+a viable-but-worst model may also be 0.0 — the two are distinguished only by
+`viable`, never by the score value.
+
+`score` is a within-report ordinal used only to rank viable models produced from
+the same benchmark suite. It is NOT portable across benchmark suites, NOT portable
+across hardware, NOT portable across future weighting changes, and NOT an absolute
+quality metric: normalisation is relative to the report, so a single result yields a
+zero TTFT component and adding a model can change the others' scores.
+
+CPU-only hardware (has_gpu=False) skips the VRAM gate and sets vram_score = 1.0.
 """
 from __future__ import annotations
 
@@ -116,7 +128,7 @@ class ModelAdvisor:
         for result in eligible:
             throughput = result.mean_throughput_tps
             ttft = _warm_ttft_ms(result)
-            vram_used = result.peak_vram_delta_gb
+            vram_used = result.vram_device_occupied_gib
 
             if hardware.has_gpu:
                 vram_required = vram_used + VRAM_SAFETY_BUFFER_GB
@@ -155,14 +167,12 @@ class ModelAdvisor:
                         ),
                     )
 
-                # Quantization placeholder (always 1.0 — no quantization data yet)
-                quant_score = 1.0
-
+                # Measured-only composition (DEC-056). Exact fractions preserve the
+                # prior 0.40 : 0.30 : 0.20 ratio; no constant quantization floor.
                 score = (
-                    0.40 * throughput_score
-                    + 0.30 * ttft_score
-                    + 0.20 * vram_score
-                    + 0.10 * quant_score
+                    (4 / 9) * throughput_score
+                    + (1 / 3) * ttft_score
+                    + (2 / 9) * vram_score
                 ) * 100.0
 
                 rec = (
@@ -177,7 +187,7 @@ class ModelAdvisor:
                     viable=viable,
                     throughput_tps=throughput,
                     ttft_ms=ttft,
-                    vram_gb=vram_used,
+                    vram_device_occupied_gib=vram_used,
                     recommendation_str=rec,
                 )
             )

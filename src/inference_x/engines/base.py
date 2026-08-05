@@ -36,7 +36,7 @@ class BaseEngine(ABC):
         """Run inference for a chat completion request and return a typed response."""
 
     @abstractmethod
-    async def generate_stream(
+    def generate_stream(
         self, request: ChatCompletionRequest
     ) -> AsyncGenerator[ChatStreamChunk, None]:
         """Run inference and yield chunks as they are generated (DEC-049).

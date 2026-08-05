@@ -1360,6 +1360,17 @@ Use this document to capture non-obvious design decisions as the project evolves
     (plan §5.4) without implementing the factory.
   - If OS-2 is reverted, keep this ADR's supersession statement for prior
     approximate figures — those numbers were always wrong (plan §8.2).
+  - **`derive_terminal_metadata` relocation constraint (OWN-B5).**
+    `derive_terminal_metadata` currently lives in `engines/driver.py`, called
+    from both the non-streaming path (`driver.py`) and the streaming path
+    (`vllm_engine.py`) — this is the single helper DEC-050 §3 names as the
+    reason streamed and non-streamed usage cannot drift apart. Roadmap B1
+    removes `EngineDriver`. The helper MUST be relocated, not reimplemented,
+    before or during B1: it MUST remain the single source of truth for
+    deriving terminal metadata on both the streamed and non-streamed paths,
+    and B1 MUST NOT duplicate or fork this translation logic into a
+    second implementation. This note does not prescribe the destination
+    module — that is a B1 decision.
 - Supersession: remains in force until a future DEC changes the streaming
   engine contract (e.g. Phase B AsyncLLM adaptation must preserve or explicitly
   replace this chunk model on `BaseEngine`).
@@ -1603,3 +1614,197 @@ Use this document to capture non-obvious design decisions as the project evolves
 - Supersession: does not supersede DEC-049 — it constrains what may be added to
   the order DEC-049 fixed. Remains in force until a future DEC changes the phase
   boundary or the cardinality.
+
+### DEC-054
+- Date: 2026-08-04
+- Status: accepted
+- Title: Benchmark suite identity is a pinned content hash (OS-5)
+- Context: Phase A OS-5 (`docs/PHASE-A-EXECUTION-PLAN.md` §5;
+  `docs/REVIEW-2026-08-04-os5-os6-finalization.md` §0, §2). `suite_version` was
+  documented as a content hash of the prompt suite but nothing computed or
+  verified it; `benchmarks/runner.py:_load_suite` read the stored literal
+  verbatim. Direct computation confirmed the shipped literal already equals the
+  SHA-256 of the prompt list under a compact-JSON canonicalization.
+- Problem: Without a pinned canonical form and a verifier, the reproducibility
+  primitive is decorative — an edited prompt silently keeps the same
+  `suite_version`. The inverse risk is equally real: an implementer picks a
+  *different* canonicalization and manufactures a break that need not happen.
+- Decision:
+  1. **Canonical form (pinned):**
+     `sha256(json.dumps(prompts, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()`,
+     hashing `data["prompts"]` only. The `suite_version` key is excluded because
+     it lives inside the file it identifies.
+  2. **Hashed object is the parsed in-memory prompt collection.** File encoding,
+     whitespace, indentation, line endings, JSON object key order, and
+     serialization formatting are excluded from identity. Only prompt ordering
+     and prompt values participate.
+  3. **Stored bare hex** (no `sha256:` algorithm tag). The 25 existing results and
+     the shipped suite use bare hex.
+  4. **One shared canonicalizer** (`benchmarks/suite_identity.py`) owns identity.
+     Load-time verification and the `make suite-version` regeneration command both
+     call it. No duplicate hashing logic.
+  5. **Fail loud at load.** A missing `suite_version` key or a computed/stored
+     mismatch raises an actionable error naming `make suite-version` — not a bare
+     `KeyError`, not a silent accept.
+  6. **Characterization proof:** the computed digest of the shipped suite equals
+     `b47066414716cf4a0970adc790384f5173bd488cf80da47d28936b3d2ce5cfa4`.
+- Alternatives considered:
+  - **Hand-bumped semver (`v1`, `v2`).** Rejected: reproduces the current defect —
+    a self-declared string nothing verifies.
+  - **Git blob / commit hash.** Rejected: VCS-coupled, breaks outside a checkout,
+    over-invalidates on whitespace-only edits.
+  - **Signed manifest.** Rejected: wrong threat model; Phase A has no adversary,
+    the problem is accidental drift.
+  - **Algorithm-tagged storage now.** Deferred: bare hex retained; tagging is a
+    future forward-provision, not required to verify today.
+- Consequences:
+  - **This is verification, not migration.** The plan's migration premise (§457,
+    §808 item 2, §256, §889 — regenerated hash invalidating stored results) is
+    **void**. All 25 stored results remain comparable; nothing is regenerated;
+    there is no rollback hazard.
+  - The earlier reviews were correct that no `sha256` call existed; only the
+    inference "therefore the literal is arbitrary" is disproved.
+  - **Fail-loud posture does not contradict DEC-047 §4.** DEC-047's fail-open
+    applies to the serving admission path with a live client; the benchmark
+    harness is first-party tooling where a silent wrong number is worse than a
+    stopped run.
+  - Limitation (recorded, not fixed): byte-identity of canonical JSON; an NFC vs
+    NFD spelling of the same prompt hashes differently. The suite is ASCII; no
+    Unicode normalization is added.
+- Compatibility: additive. `benchmarks/prompts/standard.json` and
+  `benchmarks/results/*.json` are read-only under this change.
+- Supersession: supersedes the plan's OS-5 migration framing. Remains in force
+  until a future DEC changes the canonical form or the stored digest format.
+
+### DEC-055
+- Date: 2026-08-04
+- Status: accepted
+- Title: `suite_version` is a necessary but not sufficient comparability key (OS-5)
+- Context: Phase A OS-5 (`docs/REVIEW-2026-08-04-os5-os6-finalization.md` §1.1,
+  §4). Before this change `storage.py:latest_per_model()` selected the newest
+  result per model regardless of suite version, and `advisor.py:rank()` ranked
+  whatever it was handed — so a verified `suite_version` had no consumer.
+- Problem: Verification without a consumer is decorative. Two results are only
+  comparable if their benchmark *input* matches; ranking across suite versions
+  produces a silent wrong answer.
+- Decision:
+  1. **Option A — filter in storage.** `storage.py` filters results by the expected
+     `suite_version` **before** latest-per-model selection. Mixed-suite sets never
+     reach the advisor. `advisor.py` is not touched by OS-5 (it is OS-6's file;
+     touching it would break the plan's OS-5 ∥ OS-2/OS-3 parallelism).
+  2. **Empty ≠ mismatch.** "No benchmark results exist" and "results exist but none
+     match the requested `suite_version`" are distinct, distinguishable outcomes.
+  3. **Immutable and append-only.** Incomparable results are excluded by the
+     consumer, never deleted or rewritten. Rollback never requires rewriting
+     historical benchmark files.
+  4. **Necessary, not sufficient.** `suite_version` pins the benchmark *input*, not
+     the runtime that consumed it. It is one necessary comparability gate alongside
+     hardware (DEC-036) and does not by itself prove full provenance.
+- Alternatives considered:
+  - **Close it in `advisor.py`.** Rejected: creates OS-5/OS-6 shared-file
+    contention the plan claims does not exist; `latest_per_model()` is already the
+    function that decides which results reach the advisor.
+  - **Defer with reason (closure b).** Rejected in favour of closing it now — the
+    filter is small and the 25 stored results share one suite version, so it is a
+    no-op on existing data.
+- Consequences:
+  - Positive: a verified `suite_version` becomes a *used* key; the advisor cannot
+    rank across suites.
+  - Negative: comparability remains broader than this key (concurrency, runtime
+    version). Those stay out of scope; the ADR records `suite_version` as
+    necessary-not-sufficient so the field is not later mistaken for a full
+    provenance token.
+- Compatibility: additive. Existing `latest_per_model()` is preserved; suite-aware
+  selection is a new method. No historical result file is modified.
+- Supersession: remains in force until a future DEC adds further comparability
+  keys or a run manifest.
+
+### DEC-056
+- Date: 2026-08-05
+- Status: accepted
+- Title: Advisor score reflects measured quantities only (OS-6)
+- Context: Phase A OS-6 (`docs/REVIEW-2026-08-04-os5-os6-finalization.md`). The
+  advisor blended a constant `quant_score = 1.0` (weight `0.10`) into every score.
+  A constant term contributes an identical additive floor to all models, so the
+  score neither ranked nor discriminated on that axis — it silently inflated every
+  number and implied a quantization signal that did not exist.
+- Problem: A score that mixes measured components with a constant placeholder is
+  dishonest: it looks like a four-factor judgement but is a three-factor one plus a
+  fixed offset. It also risks being read as an absolute quality metric.
+- Decision:
+  1. **Delete `quant_score`.** The advisor scores only measured quantities:
+     throughput, warm TTFT, and VRAM headroom.
+  2. **Exact weights.** Re-normalise the surviving three weights to exact fractions
+     `4/9` (throughput), `1/3` (TTFT), `2/9` (VRAM). These preserve the prior
+     `0.40 : 0.30 : 0.20` ratio. The `* 100.0` display scale is retained.
+  3. **Weights are uncalibrated editorial preference**, not a reasoned inference
+     from data. They are not tuned against any outcome and may change.
+  4. **`viable` is the sole viability signal.** A VRAM-gated model collapses to
+     `score = 0.0`; a viable-but-worst model may also be `0.0`. The two are
+     distinguished only by `viable`, never by the score value. No consumer may
+     derive viability from the score.
+  5. **Score is a within-report ordinal** used only to rank viable models produced
+     from the same benchmark suite. Score is NOT portable across benchmark suites,
+     NOT portable across hardware, NOT portable across future weighting changes, and
+     NOT an absolute quality metric. Normalisation is relative to the models in the
+     same report: a single result yields a zero TTFT component, and adding a model
+     can change the scores of the others.
+  6. **Ranking preservation.** Because all three components are non-negative linear
+     terms, the relative ordering of viable models is preserved under the
+     re-normalisation (affine-invariant); only the absolute numbers shift.
+- Alternatives considered:
+  - **Keep `quant_score` as a real signal.** Rejected: no quantization data exists
+    to populate it; a placeholder that always returns `1.0` is not a signal.
+  - **Expose per-component sub-scores.** Rejected: out of scope; no component-score
+    API in Phase A.
+- Consequences:
+  - Positive: the score reflects only measured quantities; the floor is gone; the
+    weights are exact and honestly labelled.
+  - Negative: absolute score values change (they no longer carry the `+10` floor);
+    this is a display change only and does not reorder viable models.
+- Compatibility: advisor-owned. Runner, storage, schemas, and `suite_identity` must
+  never embed these weights. Historical benchmark JSON is unaffected.
+- Supersession: remains in force until a future DEC recalibrates or replaces the
+  scoring weights.
+
+### DEC-057
+- Date: 2026-08-05
+- Status: accepted
+- Title: The benchmark VRAM number is device occupancy, named `vram_device_occupied_gib` (OS-6)
+- Context: Phase A OS-6. `BenchmarkResult.peak_vram_delta_gb` and
+  `AdvisorResult.vram_gb` named the number a "delta", but the runner measures
+  `total − min(free)` across before/after snapshots — device-wide occupied VRAM,
+  not a per-process delta. The unit was already GiB despite the `_gb` suffix.
+- Problem: A field name that misdescribes its referent invites wrong reasoning
+  (e.g. treating device occupancy as this process's marginal footprint).
+- Decision:
+  1. **Canonical field `vram_device_occupied_gib`** on `BenchmarkResult`, replacing
+     `peak_vram_delta_gb` as the stored/serialised name.
+  2. **Measurement unchanged:** `total − min(free)` across before/after GPU
+     snapshots. The number does not change; only its name does.
+  3. **Deprecated aliases through Phase A:** `peak_vram_delta_gb` (BenchmarkResult)
+     and `vram_gb` (AdvisorResult) remain readable and, for `vram_gb`, remain in the
+     serialised advisor payload. Removing either alias REQUIRES a future ADR.
+  4. **Canonical precedence (permanent).** Canonical fields always take precedence
+     over deprecated aliases during deserialization. If both are present with
+     conflicting values, the canonical field wins. This precedence rule is permanent
+     unless superseded by a future ADR.
+  5. **`HardwareProfile.vram_total_gb` / `vram_free_gb` are unchanged.** They name a
+     device capacity/availability, not an occupancy measurement; renaming them is
+     out of scope for this change (frozen unchanged, not deferred).
+  6. **Known coupling recorded, not fixed.** `runner._check_vram_budget` compares the
+     occupancy number against an estimated engine footprint. That comparison logic is
+     left unchanged in this change; the coupling is documented here so a future change
+     can revisit it deliberately.
+- Alternatives considered:
+  - **Hard rename with a migration pass over stored JSON.** Rejected: historical
+    benchmark JSON must remain readable without migration and is never rewritten.
+  - **Rename HardwareProfile fields for symmetry.** Rejected: different referent;
+    out of scope.
+- Consequences:
+  - Positive: the field name matches what is measured; historical files still load.
+  - Negative: two names for one number exist through Phase A (canonical + alias).
+- Compatibility: additive alias. New JSON uses the canonical field; historical JSON
+  loads via the alias and is never rewritten.
+- Supersession: alias removal requires a future ADR; the canonical-precedence rule is
+  permanent unless a future ADR supersedes it.

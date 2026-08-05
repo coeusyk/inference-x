@@ -412,3 +412,247 @@ callers SHALL treat an unavailable count as a degraded input rather than an erro
 - **THEN** KV capacity is not declared on it
 - **AND** it is still discovered as an optional attribute by its existing callers
 
+### Requirement: Engine driver rejects requests immediately after failure
+The system SHALL guarantee that once an `EngineDriver`'s underlying `step()` call
+has failed and the driver has been marked dead, no request submitted afterward is
+silently enqueued and left unserved — it SHALL be rejected immediately with the
+driver's failure, not left to time out.
+
+#### Scenario: Submission during the failure transition is rejected, not orphaned
+- WHEN a request is submitted concurrently with a driver's `step()` call failing
+- AND the driver's dead-flag transition and the request's enqueue decision race
+- THEN the request either lands in the pre-failure queue and is included in the
+  broadcast of the failure to all pending requests, or is rejected immediately by
+  the submission call — never silently enqueued with no thread left to serve it
+
+#### Scenario: Submission after death raises immediately
+- WHEN a request is submitted to a driver that is already marked dead
+- THEN the submission call raises immediately, carrying the original failure
+- AND the caller does not wait for any completion or streaming timeout to learn
+  the driver has failed
+
+### Requirement: Default model resolves family names via variant selection
+The system SHALL resolve `INFERENCE_X_DEFAULT_MODEL` through
+`variant_selector.select_variant()` when its value matches a registered model
+family, so the highest-precision variant that fits the current VRAM tier is
+selected at startup. A value that is already a concrete registered model name
+SHALL continue to pass through unchanged.
+
+#### Scenario: Family name resolves to the best-fit variant at startup
+- WHEN `INFERENCE_X_DEFAULT_MODEL` matches a `ModelEntry.family` in the loaded
+  registry and a VRAM tier is resolved
+- THEN the value is resolved via `select_variant()` to the highest-precision
+  variant that fits the current tier's available VRAM
+- AND that resolved variant name is used to construct the default-model policy
+
+#### Scenario: Concrete model names pass through unchanged
+- WHEN `INFERENCE_X_DEFAULT_MODEL` is already an exact registered model name
+- THEN the value is used unchanged
+- AND no call to `select_variant()` is made
+
+### Requirement: Default model resolution surfaces its outcome, not silence
+The system SHALL make the outcome of default-model resolution observable and
+SHALL NOT silently fall back to an arbitrary variant when a recognized family
+has no fitting variant for the current VRAM tier.
+
+#### Scenario: Resolution is logged at startup
+- WHEN a family name is resolved to a concrete variant
+- THEN the system logs, at INFO level, the family name, the resolved variant
+  name, and the current tier name
+
+#### Scenario: Missing-family-fit is a hard startup error
+- WHEN `INFERENCE_X_DEFAULT_MODEL` matches a registered family but no variant
+  in that family fits the current VRAM tier's available budget
+- THEN startup raises an error naming the family, the available variants, and
+  the current tier's VRAM budget
+- AND the system does not silently start with a different, unrequested variant
+
+### Requirement: Changes are verified automatically before merge
+The project SHALL verify every proposed change against the unit suite, the
+configured lint rules, and the configured type baseline automatically, without
+relying on a contributor or reviewer to run those checks by hand.
+
+#### Scenario: A proposed change breaks an existing test
+- WHEN a change is proposed that causes any test in the unit suite to fail
+- THEN the automated verification reports failure
+- AND the change cannot be merged into a long-lived branch until it passes
+
+#### Scenario: A proposed change violates lint or type rules
+- WHEN a change is proposed that violates a configured lint rule, or introduces a
+  type error in a module outside the recorded type baseline
+- THEN the automated verification reports failure
+- AND the change cannot be merged into a long-lived branch until it passes
+
+#### Scenario: Verification requires no accelerator
+- WHEN automated verification runs
+- THEN it completes on a standard hosted runner with no GPU present
+- AND no test is skipped solely because verification ran without a GPU
+
+#### Scenario: The type baseline is explicit and bounded
+- WHEN a module is exempted from type checking
+- THEN that module is named individually in the recorded baseline
+- AND no repository-wide or wildcard exemption is configured, so that a module
+  added later is checked by default rather than silently exempted
+
+#### Scenario: Change is applied
+- WHEN this change is archived
+- THEN automated verification runs on pull requests and on pushes to long-lived
+  branches
+- AND the required checks are enforced at merge time, not merely reported
+- AND the type baseline and the policy governing it are recorded in
+  `docs/DECISIONS.md`
+
+### Requirement: Reproducible benchmark results
+The benchmark runner SHALL use a fixed, versioned prompt suite so results are
+comparable across runs only when they share verified suite identity. The suite's
+`suite_version` SHALL be the pinned content hash of the parsed prompt collection
+(DEC-054), verified at load, and used as a necessary selection key before
+latest-per-model consumption (DEC-055).
+
+#### Scenario: Benchmark is run twice on the same hardware
+- **WHEN** the same model is benchmarked twice with the standard prompt suite
+- **THEN** results are stored separately with timestamps
+- **AND** the advisor uses the most recent result per model among results that match
+  the expected `suite_version`
+
+#### Scenario: Unverified suite cannot produce results
+- **WHEN** the prompt suite fails identity verification at load
+- **THEN** the benchmark run does not proceed
+- **AND** no new result file is written from that failed load
+
+### Requirement: Hardware-aware model recommendation
+The system SHALL measure model performance on the operator's hardware and produce a
+ranked recommendation with plain-language reasoning. Ranking SHALL use only measured
+score components under the exact frozen weights, and SHALL expose viability solely
+through `viable`. score is a within-report ordinal used only to rank viable models
+produced from the same benchmark suite.
+
+#### Scenario: Advisor is run after benchmarking
+- **WHEN** `make advise` is run after at least one benchmark result exists for the
+  current suite
+- **THEN** the advisor produces a ranked list of models
+- **AND** each entry includes: throughput (tok/s), TTFT (ms), device VRAM occupancy
+  (GiB), a score that is a within-report ordinal used only to rank viable models
+  produced from the same benchmark suite, and a one-line recommendation string
+- **AND** models that exceed available VRAM are flagged as not viable via `viable`
+  rather than by score threshold alone
+
+### Requirement: Admission reservation lifetime invariant
+The system SHALL uphold the following reservation lifetime invariant: from the
+instant `admit()` successfully returns until the stream generator terminates for
+any reason (normal completion, timeout, engine failure, cancellation,
+`GeneratorExit`, or client disconnect), exactly one matching `release()` MUST
+occur. The concrete mechanism that upholds the invariant MAY change across
+phases; the invariant MUST survive those refactors.
+
+#### Scenario: Full stream consumption releases the reservation exactly once
+- WHEN a streamed chat completion runs to normal completion
+- THEN the admission reservation is released exactly once
+- AND the released token count equals the token count reserved at admission
+
+#### Scenario: Timeout releases the reservation exactly once
+- WHEN a streamed chat completion ends by timeout
+- THEN the admission reservation is released exactly once
+
+#### Scenario: Engine exception releases the reservation exactly once
+- WHEN the engine raises during streamed generation
+- THEN the admission reservation is released exactly once
+
+#### Scenario: Cancellation releases the reservation exactly once
+- WHEN the stream is cancelled via `CancelledError`
+- THEN the admission reservation is released exactly once
+
+#### Scenario: GeneratorExit before first token releases the reservation exactly once
+- WHEN the stream consumer closes the generator (`GeneratorExit`) before any content
+  token is produced — including during the pre-generation prologue
+- THEN the admission reservation is released exactly once
+- AND the per-model sequence-concurrency slot held for that request is released
+
+#### Scenario: GeneratorExit after first token releases the reservation exactly once
+- WHEN the stream consumer closes the generator (`GeneratorExit`) after one or more
+  content events have been produced but before normal completion
+- THEN the admission reservation is released exactly once
+
+#### Scenario: Client disconnect releases the reservation exactly once
+- WHEN the stream consumer disconnects at any suspension point of the stream generator
+- THEN the admission reservation is released exactly once
+
+### Requirement: Admission reservation MUST NEVER be released more than once
+A reservation MUST NEVER be released more than once. The system SHALL treat
+double-release as a correctness failure independent of leak prevention.
+
+#### Scenario: Single reservation yields a single release
+- WHEN an admission reservation is successfully established for a stream
+- THEN `release()` for that reservation executes exactly once across all termination
+  paths
+- AND validation MUST fail if `release()` executes twice for that reservation
+
+### Requirement: Reservation lifetime ownership is ChatService-exclusive
+The system SHALL keep reservation lifetime ownership exclusively in ChatService.
+Admission owns reservation accounting. ChatService owns reservation lifetime.
+Middleware MUST NOT compensate for ChatService lifetime gaps. Engine code MUST NOT
+compensate for ChatService lifetime gaps. Admission MUST NOT compensate for caller
+failures. The fix for this requirement SHALL reside exclusively in ChatService.
+
+#### Scenario: Fix is confined to ChatService
+- WHEN this change is implemented
+- THEN reservation lifetime enforcement is present in ChatService
+- AND Admission, middleware, and engine code do not gain compensating release logic
+
+### Requirement: Engine streaming interface is declared as an async generator, not a coroutine returning one
+`BaseEngine.generate_stream` SHALL be declared such that calling it directly produces an
+async generator, matching how every implementation defines it and how every caller uses
+it. It SHALL NOT be declared such that a type checker infers calling it returns a
+coroutine that must be awaited before iteration.
+
+#### Scenario: Declared type matches implementation type
+- WHEN a concrete engine implements `generate_stream` as an async generator function
+  (its body contains `yield`)
+- THEN the abstract declaration's return type is satisfied without a type checker
+  reporting an invalid-override error
+
+#### Scenario: Callers iterate without awaiting
+- WHEN a caller invokes `generate_stream(request)`
+- THEN the returned object is immediately usable as an async generator (`__anext__`,
+  `aclose`) without first being awaited
+
+#### Scenario: Change is applied
+- WHEN this change is applied
+- THEN `mypy` reports no errors for `services/chat_service.py`
+- AND `inference_x.services.chat_service` is removed from the DEC-048 mypy baseline
+- AND no other module's baseline entry grows
+- AND no runtime behavior, streaming event order, or `ChatStreamChunk` shape changes
+
+### Requirement: Compatibility — abstract and implementation denote the same callable type
+The abstract declaration and every implementation MUST denote the same callable type.
+The platform SHALL enforce this as a Compatibility Invariant stronger than
+"no invalid override": type agreement MUST hold for the current engine and for every
+future `BaseEngine.generate_stream` implementation.
+
+#### Scenario: Declaration and implementation share one callable type
+- WHEN a concrete engine implements `generate_stream`
+- THEN its callable type is the same type denoted by the abstract declaration
+- AND a type checker does not report an invalid-override error for that method
+
+### Requirement: Compatibility — no caller changes are permitted
+No caller changes are permitted. The platform SHALL keep ChatService, EngineDriver,
+middleware, routing, benchmarks, and tests valid without adaptation after the
+declaration correction.
+
+#### Scenario: Callers remain valid without adaptation
+- WHEN the abstract declaration is corrected
+- THEN ChatService, EngineDriver, middleware, routing, benchmarks, and tests remain
+  valid without edits
+- AND no caller is adapted to await or otherwise reinterpret `generate_stream`
+
+### Requirement: Future generate_stream implementations type-check without suppression
+Future implementations of `BaseEngine.generate_stream` MUST type-check without
+requiring suppression. The platform SHALL treat a new implementation that needs a
+mypy baseline entry or other suppression for this contract as a regression.
+
+#### Scenario: New implementation needs no generate_stream suppression
+- WHEN a future concrete engine implements `generate_stream` against the corrected
+  declaration
+- THEN that implementation type-checks without a mypy baseline entry, `# type: ignore`,
+  or other suppression for the `generate_stream` contract
+
