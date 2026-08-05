@@ -14,10 +14,11 @@ def _make_result(
     model_name: str = "test-model",
     timestamp: str = "2026-06-08T12:00:00+00:00",
     throughput: float = 30.0,
+    suite_version: str = "abc123",
 ) -> BenchmarkResult:
     return BenchmarkResult(
         model_name=model_name,
-        suite_version="abc123",
+        suite_version=suite_version,
         timestamp=timestamp,
         concurrency=1,
         prompt_results=[
@@ -144,3 +145,110 @@ class TestLatestPerModel:
         store = ResultStore()
         latest = store.latest_per_model(output_dir=str(tmp_path / "empty"))
         assert latest == {}
+
+
+class TestSuiteAwareSelection:
+    def test_filters_before_latest_per_model(self, tmp_path: Path):
+        store = ResultStore()
+        # Newer result is a different suite; older matches the expected suite.
+        matching = _make_result(
+            timestamp="2026-06-07T10:00:00+00:00", throughput=20.0, suite_version="v1"
+        )
+        newer_other = _make_result(
+            timestamp="2026-06-08T10:00:00+00:00", throughput=99.0, suite_version="v2"
+        )
+        store.save(matching, output_dir=str(tmp_path))
+        store.save(newer_other, output_dir=str(tmp_path))
+
+        selection = store.latest_per_model_for_suite("v1", output_dir=str(tmp_path))
+        assert selection.status == "ok"
+        assert set(selection.latest) == {"test-model"}
+        # The newer, non-matching suite result did not win — filtering happened
+        # before latest-per-model.
+        assert selection.latest["test-model"].mean_throughput_tps == 20.0
+
+    def test_latest_among_matching_suite(self, tmp_path: Path):
+        store = ResultStore()
+        older = _make_result(
+            timestamp="2026-06-07T10:00:00+00:00", throughput=20.0, suite_version="v1"
+        )
+        newer = _make_result(
+            timestamp="2026-06-08T10:00:00+00:00", throughput=35.0, suite_version="v1"
+        )
+        store.save(older, output_dir=str(tmp_path))
+        store.save(newer, output_dir=str(tmp_path))
+        selection = store.latest_per_model_for_suite("v1", output_dir=str(tmp_path))
+        assert selection.status == "ok"
+        assert selection.latest["test-model"].mean_throughput_tps == 35.0
+
+    def test_same_suite_multiple_models_multiple_timestamps(self, tmp_path: Path):
+        """Within one suite, newest result per model is still selected."""
+        store = ResultStore()
+        store.save(
+            _make_result(
+                model_name="model-a",
+                timestamp="2026-06-07T10:00:00+00:00",
+                throughput=10.0,
+                suite_version="v1",
+            ),
+            output_dir=str(tmp_path),
+        )
+        store.save(
+            _make_result(
+                model_name="model-a",
+                timestamp="2026-06-08T10:00:00+00:00",
+                throughput=22.0,
+                suite_version="v1",
+            ),
+            output_dir=str(tmp_path),
+        )
+        store.save(
+            _make_result(
+                model_name="model-b",
+                timestamp="2026-06-07T11:00:00+00:00",
+                throughput=40.0,
+                suite_version="v1",
+            ),
+            output_dir=str(tmp_path),
+        )
+        store.save(
+            _make_result(
+                model_name="model-b",
+                timestamp="2026-06-08T11:00:00+00:00",
+                throughput=55.0,
+                suite_version="v1",
+            ),
+            output_dir=str(tmp_path),
+        )
+        selection = store.latest_per_model_for_suite("v1", output_dir=str(tmp_path))
+        assert selection.status == "ok"
+        assert set(selection.latest) == {"model-a", "model-b"}
+        assert selection.latest["model-a"].mean_throughput_tps == 22.0
+        assert selection.latest["model-b"].mean_throughput_tps == 55.0
+
+    def test_empty_store_status(self, tmp_path: Path):
+        store = ResultStore()
+        selection = store.latest_per_model_for_suite(
+            "v1", output_dir=str(tmp_path / "empty")
+        )
+        assert selection.status == "empty"
+        assert selection.latest == {}
+
+    def test_suite_mismatch_status_distinct_from_empty(self, tmp_path: Path):
+        store = ResultStore()
+        store.save(
+            _make_result(suite_version="v2"), output_dir=str(tmp_path)
+        )
+        selection = store.latest_per_model_for_suite("v1", output_dir=str(tmp_path))
+        assert selection.status == "suite_mismatch"
+        assert selection.latest == {}
+
+    def test_mismatch_does_not_delete_files(self, tmp_path: Path):
+        store = ResultStore()
+        store.save(_make_result(suite_version="v2"), output_dir=str(tmp_path))
+        before = list(tmp_path.glob("results-*.json"))
+        store.latest_per_model_for_suite("v1", output_dir=str(tmp_path))
+        after = list(tmp_path.glob("results-*.json"))
+        assert before == after and len(after) == 1
+
+
