@@ -10,19 +10,19 @@ from inference_x.engines.vllm_engine import VLLMEngine
 
 
 def test_vllm_engine_shutdown_stops_engine_core():
+    """AsyncLLM.shutdown() is called directly (migrate-async-llm-engine) —
+    no repo-side llm_engine.engine_core indirection, unlike the offline LLM
+    class this replaced."""
     engine = object.__new__(VLLMEngine)
     engine._model_name = "test-model"
     engine._healthy = True
-    engine._engine_lock = __import__("threading").Lock()
 
-    mock_core = MagicMock()
     mock_llm = MagicMock()
-    mock_llm.llm_engine.engine_core = mock_core
     engine._llm = mock_llm
 
     engine.shutdown()
 
-    mock_core.shutdown.assert_called_once_with()
+    mock_llm.shutdown.assert_called_once_with()
     assert engine._llm is None
     assert engine.is_healthy() is False
 

@@ -4,17 +4,11 @@ import asyncio
 import logging
 import os
 import re
-import threading
+import uuid
 from collections.abc import AsyncGenerator
-from concurrent.futures import TimeoutError as FuturesTimeoutError
-from typing import Any
+from typing import Any, Literal
 
 from inference_x.engines.base import BaseEngine
-from inference_x.engines.driver import (
-    EngineDriver,
-    EngineDriverDeadError,
-    derive_terminal_metadata,
-)
 from inference_x.utils.cuda_env import ensure_vllm_runtime_env
 from inference_x.utils.vllm_pool_config import scale_model_config_for_pool
 from inference_x.schemas.chat import (
@@ -22,18 +16,50 @@ from inference_x.schemas.chat import (
     ChatCompletionMessage,
     ChatCompletionRequest,
     ChatCompletionResponse,
+    ChatCompletionUsage,
     ChatStreamChunk,
 )
 
 logger = logging.getLogger(__name__)
 
 _VLLM_AVAILABLE: bool | None = None
-# Serialize llm_engine.step() across engines in one process (vLLM V1 forward context).
-# Each engine's EngineDriver acquires this same lock around its step() calls when
-# pool_size > 1 — giving a driver its own private lock instead would silently
-# reintroduce the cross-engine race this was added to prevent.
-_POOL_STEP_LOCK = threading.Lock()
-_COMPLETION_TIMEOUT_S = 300.0  # safety net against a wedged driver thread/queue stall
+# Safety net against a request that never reaches a finished RequestOutput.
+# Unlike the EngineDriver this replaced, a timeout here triggers a real
+# engine-side abort (AsyncLLM.generate() reacts to CancelledError by calling
+# EngineCore.abort_requests_async) rather than merely giving up on waiting —
+# see migrate-async-llm-engine design.md Decision 7. Scope unchanged from
+# before the migration: this bounds only the non-streaming generate() path
+# (via its own asyncio.timeout wrapper below), not generate_stream().
+_COMPLETION_TIMEOUT_S = 300.0
+
+
+def derive_terminal_metadata(
+    output: Any,
+) -> tuple[Literal["stop", "length"], ChatCompletionUsage]:
+    """Map a finished vLLM `RequestOutput` to a finish reason and engine usage.
+
+    Shared by the streaming terminal chunk and non-streaming `generate`, so the
+    two paths cannot drift: OS-2 requires that a streamed and a non-streamed
+    request for the same prompt report the same `completion_tokens`, and one
+    function is the only way to guarantee that rather than hope for it.
+
+    Counts come from vLLM's own token ids. Nothing here counts text.
+
+    Relocated verbatim from the deleted `engines/driver.py` during the
+    migrate-async-llm-engine change (DEC-050 §3 / OWN-B5): moved, not
+    reimplemented — the body is unchanged from its EngineDriver-era form.
+    """
+    completion = output.outputs[0]
+    finish: Literal["stop", "length"] = (
+        "stop" if completion.finish_reason in ("stop", None) else "length"
+    )
+    prompt_tokens = len(output.prompt_token_ids) if output.prompt_token_ids else 0
+    completion_tokens = len(completion.token_ids) if completion.token_ids else 0
+    return finish, ChatCompletionUsage(
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=prompt_tokens + completion_tokens,
+    )
 
 
 def _probe_cuda_vram() -> dict[str, float | bool]:
@@ -264,9 +290,12 @@ def _load_vllm() -> None:
     if _VLLM_AVAILABLE is not None:
         return
     try:
-        from vllm import LLM, SamplingParams  # type: ignore[import-untyped]
+        from vllm import SamplingParams  # type: ignore[import-untyped]
+        from vllm.engine.arg_utils import AsyncEngineArgs  # type: ignore[import-untyped]
+        from vllm.v1.engine.async_llm import AsyncLLM  # type: ignore[import-untyped]
 
-        globals()["LLM"] = LLM
+        globals()["AsyncLLM"] = AsyncLLM
+        globals()["AsyncEngineArgs"] = AsyncEngineArgs
         globals()["SamplingParams"] = SamplingParams
         _VLLM_AVAILABLE = True
     except ImportError:
@@ -276,9 +305,9 @@ def _load_vllm() -> None:
 class VLLMEngine(BaseEngine):
     """vLLM-backed inference engine implementing the BaseEngine interface.
 
-    Adapts the vLLM synchronous LLM API to the typed engine contract.
-    The health check uses a stored flag rather than a live generation to avoid
-    occupying the GPU unnecessarily on every /health poll.
+    Adapts vLLM's async engine (`AsyncLLM`) to the typed engine contract.
+    The health check reads `AsyncLLM.errored` rather than running a live
+    generation, avoiding GPU work on every /health poll.
     """
 
     def __init__(
@@ -323,7 +352,6 @@ class VLLMEngine(BaseEngine):
         self._repetition_penalty: float | None = model_config.get("repetition_penalty")
         self._healthy = False
         self._kv_capacity_tokens: int | None = None
-        self._engine_lock = threading.Lock()
 
         hf_token = resolve_hf_token()
         preflight_hf_access(self._model_name, self._model_path, hf_token)
@@ -377,17 +405,17 @@ class VLLMEngine(BaseEngine):
             logger.warning(
                 "CUDA_HOME not set and nvcc not found; FlashInfer JIT may fail on WSL2"
             )
-        LLM = globals()["LLM"]
+        AsyncEngineArgs = globals()["AsyncEngineArgs"]
+        AsyncLLM = globals()["AsyncLLM"]
         gpu_util = kwargs.get("gpu_memory_utilization")
         if isinstance(gpu_util, (int, float)):
             _check_vram_budget(self._model_name, float(gpu_util), _probe_cuda_vram())
         try:
-            self._llm: LLM = LLM(**kwargs)
+            engine_args = AsyncEngineArgs(**kwargs)
+            self._llm: AsyncLLM = AsyncLLM.from_engine_args(engine_args)
             self._supports_chat = self._detect_chat_support()
             self._healthy = True
             self._log_kv_cache_stats()
-            step_lock = _POOL_STEP_LOCK if pool_size > 1 else self._engine_lock
-            self._driver = EngineDriver(self._llm.llm_engine, step_lock)
             logger.info(
                 "vLLM engine ready: model=%s chat_template=%s",
                 self._model_name,
@@ -403,12 +431,12 @@ class VLLMEngine(BaseEngine):
         real KV-pool capacity instead of the pre-load estimate in vllm_pool_config.
         """
         try:
-            llm_engine = self._llm.llm_engine
-            # vLLM 0.22.1's V1 LLMEngine keeps CacheConfig under vllm_config, not as a
-            # direct attribute (llm_engine.cache_config is None on this version) —
-            # verified by introspecting a loaded engine, see plan Task #4 smoke test.
+            # AsyncLLM exposes vllm_config directly as an instance attribute (no
+            # llm_engine indirection, unlike the offline LLM class this replaced) —
+            # verified against vLLM 0.22.1's AsyncLLM/EngineCoreClient
+            # (migrate-async-llm-engine Decision 6).
             cache_config = getattr(
-                getattr(llm_engine, "vllm_config", None), "cache_config", None
+                getattr(self._llm, "vllm_config", None), "cache_config", None
             )
             num_blocks = getattr(cache_config, "num_gpu_blocks", None)
             block_size = getattr(cache_config, "block_size", None)
@@ -532,36 +560,52 @@ class VLLMEngine(BaseEngine):
         except Exception:
             return self._messages_to_prompt(request.messages)
 
-    def _run_completion(self, request: ChatCompletionRequest):
-        """Blocking completion via the shared EngineDriver (see engines/driver.py).
+    async def _stream_chunks(
+        self, request: ChatCompletionRequest
+    ) -> AsyncGenerator[ChatStreamChunk, None]:
+        """Single call site into `AsyncLLM.generate()` (migrate-async-llm-engine
+        Decision 2). Both `generate_stream` and `generate` are expressed in
+        terms of this — there is only one place that talks to the engine, and
+        only one place `derive_terminal_metadata` is called, so the two public
+        methods cannot report different counts (DEC-050).
 
-        Both this method and generate_stream submit through the same per-engine
-        driver thread — the only caller of add_request/step() for this engine —
-        instead of each running its own step() loop. See DEC-038 for the race
-        that made a per-request step() loop unsafe for non-streaming completions,
-        and DEC-039 for the driver-thread fix.
+        Deliberately carries no timeout: `generate_stream` and `generate` apply
+        timeout policy differently (Decision 7 / Task 2.7 — `generate` wraps
+        its own consumption of this generator; `generate_stream` does not,
+        preserving the pre-migration policy where only the non-streaming path
+        was time-bounded).
+
+        A disconnected/cancelled consumer propagates `GeneratorExit`/
+        `CancelledError` straight into `AsyncLLM.generate()`'s own consumption
+        loop, which reacts by aborting the request on the engine core
+        (Decision 4) — this must not be caught and swallowed here.
         """
         sampling = self._sampling_params(request)
         prompt = self._stream_prompt(request)
-        future = self._driver.submit_complete(prompt, sampling)
+        request_id = f"cmpl-{uuid.uuid4().hex}"
+        previous_text = ""
         try:
-            output = future.result(timeout=_COMPLETION_TIMEOUT_S)
-        except FuturesTimeoutError as exc:
-            raise RuntimeError(
-                f"vLLM completion timed out after {_COMPLETION_TIMEOUT_S}s "
-                f"for model={self._model_name}"
-            ) from exc
-        return [output]
+            async for output in self._llm.generate(prompt, sampling, request_id):
+                if not output.outputs:
+                    continue
+                text = output.outputs[0].text or ""
+                chunk = text[len(previous_text) :] if text.startswith(previous_text) else text
+                previous_text = text
+                if chunk:
+                    yield ChatStreamChunk(content=chunk)
+                if output.finished:
+                    finish, usage = derive_terminal_metadata(output)
+                    yield ChatStreamChunk(content="", finish_reason=finish, usage=usage)
+        except (asyncio.CancelledError, GeneratorExit):
+            raise
+        except Exception as exc:
+            raise RuntimeError(f"vLLM streaming generation failed: {exc}") from exc
 
     async def generate_stream(
         self, request: ChatCompletionRequest
     ) -> AsyncGenerator[ChatStreamChunk, None]:
-        """Yield engine chunks (DEC-049).
-
-        A pass-through over the driver's channel: the driver already builds
-        terminal metadata via `derive_terminal_metadata`, the same function
-        `generate` uses, so streamed and non-streamed counts agree by
-        construction. Nothing is translated or recomputed here.
+        """Yield engine chunks (DEC-049). See `_stream_chunks` for the shared
+        engine-consumption primitive both this and `generate` use.
         """
         if not _VLLM_AVAILABLE:
             # Pre-OS-2 wire behavior: a single content message, no terminal
@@ -571,38 +615,42 @@ class VLLMEngine(BaseEngine):
             )
             return
 
-        sampling = self._sampling_params(request)
-        prompt = self._stream_prompt(request)
-        try:
-            out_queue = self._driver.submit_stream(prompt, sampling)
-        except EngineDriverDeadError as exc:
-            raise RuntimeError(f"vLLM streaming generation failed: {exc}") from exc
-
-        while True:
-            chunk = await asyncio.to_thread(out_queue.get)
-            if chunk is None:
-                return
-            if isinstance(chunk, BaseException):
-                raise RuntimeError(f"vLLM streaming generation failed: {chunk}") from chunk
+        async for chunk in self._stream_chunks(request):
             yield chunk
 
     async def generate(self, request: ChatCompletionRequest) -> ChatCompletionResponse:
+        if not _VLLM_AVAILABLE:
+            raise RuntimeError("vLLM generation failed: vLLM not loaded")
+
+        generated_parts: list[str] = []
+        finish: Literal["stop", "length"] = "stop"
+        usage: ChatCompletionUsage | None = None
         try:
-            outputs = await asyncio.to_thread(self._run_completion, request)
-        except Exception as exc:
-            raise RuntimeError(f"vLLM generation failed: {exc}") from exc
+            async with asyncio.timeout(_COMPLETION_TIMEOUT_S):
+                async for chunk in self._stream_chunks(request):
+                    if chunk.content:
+                        generated_parts.append(chunk.content)
+                    if chunk.finish_reason is not None:
+                        # _stream_chunks only ever sets finish_reason via
+                        # derive_terminal_metadata, which returns "stop"/"length"
+                        # — never "error" (that value is only used elsewhere, on
+                        # the SSE error path). Narrow explicitly rather than
+                        # widen `finish`'s type to match ChatStreamChunk's.
+                        finish = "length" if chunk.finish_reason == "length" else "stop"
+                        usage = chunk.usage
+        except TimeoutError as exc:
+            raise RuntimeError(
+                f"vLLM completion timed out after {_COMPLETION_TIMEOUT_S}s "
+                f"for model={self._model_name}"
+            ) from exc
 
-        generated = outputs[0].outputs[0].text
-        # Same derivation the streaming terminal chunk uses (DEC-049) — one
-        # function, so the two paths cannot report different counts.
-        finish, usage = derive_terminal_metadata(outputs[0])
-
+        assert usage is not None, "engine finished without terminal usage metadata"
         return ChatCompletionResponse(
             model=self._model_name,
             choices=[
                 ChatCompletionChoice(
                     index=0,
-                    message=ChatCompletionMessage(content=generated),
+                    message=ChatCompletionMessage(content="".join(generated_parts)),
                     finish_reason=finish,
                 )
             ],
@@ -610,8 +658,8 @@ class VLLMEngine(BaseEngine):
         )
 
     def is_healthy(self) -> bool:
-        driver = getattr(self, "_driver", None)
-        if driver is not None and driver.is_dead:
+        llm = getattr(self, "_llm", None)
+        if llm is not None and llm.errored:
             return False
         return self._healthy
 
@@ -621,12 +669,8 @@ class VLLMEngine(BaseEngine):
         if llm is None:
             return
         self._healthy = False
-        driver = getattr(self, "_driver", None)
-        if driver is not None:
-            driver.shutdown()
         try:
-            with self._engine_lock:
-                llm.llm_engine.engine_core.shutdown()
+            llm.shutdown()
         except Exception as exc:
             logger.warning(
                 "Error shutting down vLLM engine for %s: %s", self._model_name, exc

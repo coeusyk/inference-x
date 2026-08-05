@@ -9,15 +9,20 @@ from inference_x.engines.vllm_engine import VLLMEngine
 def _init_engine(scaled_config: dict) -> dict:
     captured: dict = {}
 
-    class FakeLLM:
+    class FakeAsyncEngineArgs:
         def __init__(self, **kwargs):
             captured.update(kwargs)
-            self.llm_engine = MagicMock()
 
+    class FakeLLM:
         def get_tokenizer(self):
             tok = MagicMock()
             tok.chat_template = None
             return tok
+
+    class FakeAsyncLLM:
+        @classmethod
+        def from_engine_args(cls, engine_args):
+            return FakeLLM()
 
     with patch("inference_x.engines.vllm_engine._VLLM_AVAILABLE", True):
         with patch("inference_x.engines.vllm_engine._load_vllm"):
@@ -30,7 +35,10 @@ def _init_engine(scaled_config: dict) -> dict:
                         with patch("inference_x.engines.vllm_engine._check_vram_budget"):
                             with patch.dict(
                                 "inference_x.engines.vllm_engine.__dict__",
-                                {"LLM": FakeLLM},
+                                {
+                                    "AsyncEngineArgs": FakeAsyncEngineArgs,
+                                    "AsyncLLM": FakeAsyncLLM,
+                                },
                             ):
                                 VLLMEngine(
                                     {

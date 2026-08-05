@@ -298,12 +298,12 @@ Broader Phase B/C roadmap (`docs/REVIEW-2026-08-03-architecture.md` §9),
 sequenced after Phase A and explicitly not gated by Engine Boundary hygiene:
 
 - **Phase B** (highest leverage): migrate `LLM` + `EngineDriver` to
-  `AsyncLLM` (B1, deletes the driver and its DEC-038/039 race-class
-  history); expose vLLM's native Prometheus stats (B2); per-request
-  queue/prefill/decode timing in the response body (B3); re-scope
-  admission to what the scheduler cannot already do (B4); batch queueing
-  instead of `429` for `priority: batch` (B5); split multi-model serving
-  into separate processes (B6).
+  `AsyncLLM` (**B1 — complete**, deletes the driver and its DEC-038/039
+  race-class history); expose vLLM's native Prometheus stats (B2);
+  per-request queue/prefill/decode timing in the response body (B3);
+  re-scope admission to what the scheduler cannot already do (B4); batch
+  queueing instead of `429` for `priority: batch` (B5); split multi-model
+  serving into separate processes (B6).
 - **Phase C** (the differentiator): a signed run manifest and `X-Run-Id`
   (C1); `batch.co_batched_request_ids` (C2); `deterministic: true` wiring
   `VLLM_BATCH_INVARIANT=1`, refusing on unsupported hardware (C3); an
@@ -313,6 +313,38 @@ sequenced after Phase A and explicitly not gated by Engine Boundary hygiene:
   optional-`vllm`, a `llama-server` proxy backend): requires its own
   accepted ADR authorizing a concrete second backend before it can begin;
   DEC-047 does not authorize it.
+
+### B1 status: complete
+
+`VLLMEngine` now constructs and drives vLLM's `AsyncLLM` (v1 async engine
+client) directly; `LLM` + `EngineDriver` and the DEC-038/039/043 race-class
+history are deleted. Full rationale, verification evidence, and the 8
+implementation decisions: DEC-058, `openspec/changes/archive/` (change id
+`migrate-async-llm-engine`). Summary:
+
+- `_POOL_STEP_LOCK` deleted outright — each `AsyncLLM` instance owns an
+  independent engine-core process, so the in-process race it guarded against
+  has no equivalent under `AsyncLLM`.
+- `generate()` is derived from `generate_stream()` — exactly one code path
+  calls into `AsyncLLM.generate()`, preserving the DEC-050 single-source
+  guarantee for terminal usage metadata.
+- `pool_size > 1` remains an open question — B1 neither guarantees nor
+  forbids it; B6 remains the only phase authorized to redesign multi-engine
+  serving.
+- Cancellation and per-request timeout are now real, engine-side signals
+  (previously a disconnected or timed-out request's computation ran to
+  completion regardless) — see `CHANGELOG.md`.
+- Health (`AsyncLLM.errored`) and KV-cache introspection
+  (`self._llm.vllm_config.cache_config`) are sourced directly from
+  `AsyncLLM`; no repo-local dead-flag or driver wrapper remains.
+- Zero edits landed in `api/`, `services/`, or `routing/` — the migration is
+  contained entirely within `engines/` as scoped.
+
+This directly affects the first deferred-assumption bullet above
+(`_warm_ttft_ms`): `AsyncLLM` is now the live runtime, so that assumption is
+active, not merely anticipated. It is not re-verified here — a benchmarking
+change is needed to confirm or refute it, tracked as future Phase B/C work
+(Phase A audit, "Advisor assumption review").
 
 ## 11. ADR index
 
