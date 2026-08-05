@@ -86,12 +86,36 @@ Describe:
 For bugs: include the exact error, the command that produced it, your GPU model, and
 the output of `nvidia-smi`.
 
-### 2. One concern per pull request
+### 2. Branch from `develop`, PR into `develop`
+
+Long-lived branches: `develop` (integration) and `main` (release).
+
+```bash
+git fetch origin
+git checkout develop
+git pull --ff-only
+git checkout -b feat/<short-topic>   # or fix/…, chore/…, docs/…
+```
+
+Push the feature branch and open a pull request **into `develop`**. Do not push
+feature commits directly to `develop` or `main`.
+
+**GitHub enforcement (do not bypass):**
+
+| Protection | Applies to | Effect |
+|---|---|---|
+| Ruleset [Protect Main](https://github.com/coeusyk/inference-x/rules/18108093) | `main` (default branch) | No direct create/delete/force-push; PR required; **code owner** review required |
+| Classic protection + required check **`checks`** | `develop` and `main` | Red CI blocks merge |
+
+Agents: follow the tooling and branch sections in `AGENTS.md` / `CLAUDE.md`
+(`rtk proxy` for git mutations; context-mode for read-only gates).
+
+### 3. One concern per pull request
 
 Keep PRs focused. A bug fix and an unrelated cleanup in the same PR will be asked to
 split. The diff should be readable in one sitting.
 
-### 3. Follow the file boundaries
+### 4. Follow the file boundaries
 
 From `AGENTS.md`:
 
@@ -112,7 +136,7 @@ From `AGENTS.md`:
 Route handlers must stay thin. Business logic goes in services. If you find yourself
 adding a database call or complex branching to a route handler, it belongs in a service.
 
-### 4. Tests
+### 5. Tests
 
 - Unit tests for any new logic in `src/inference_x/`
 - Unit tests do not require a GPU — mock the engine if needed
@@ -122,14 +146,14 @@ adding a database call or complex branching to a route handler, it belongs in a 
 The current count is 286 passing. A PR that reduces this number will not be merged
 unless the removed tests were covering deleted code.
 
-### 5. Record non-obvious decisions
+### 6. Record non-obvious decisions
 
 If your PR makes a choice that isn't obvious from the code — a tradeoff, a deliberate
 limitation, a rejected alternative — add a `DEC-XXX` entry to `docs/DECISIONS.md`
 using the existing template. This is how the project avoids relitigating settled
 questions.
 
-### 6. Code style
+### 7. Code style
 
 - Python 3.13+ — use modern type hints (`str | None`, not `Optional[str]`)
 - `from __future__ import annotations` at the top of every file
