@@ -34,7 +34,7 @@ def _make_result(
         p95_latency_ms=850.0,
         p99_latency_ms=900.0,
         mean_throughput_tps=throughput,
-        peak_vram_delta_gb=0.5,
+        vram_device_occupied_gib=0.5,
     )
 
 
@@ -252,3 +252,71 @@ class TestSuiteAwareSelection:
         assert before == after and len(after) == 1
 
 
+class TestHistoricalCorpusLoads:
+    """DEC-057: the 25 historical result files are the real compatibility corpus."""
+
+    _CORPUS = Path("benchmarks/results")
+
+    def test_all_historical_results_load(self):
+        store = ResultStore()
+        files = sorted(self._CORPUS.glob("*.json"))
+        if not files:
+            pytest.skip("no historical benchmark corpus present")
+        loaded = store.all_results(output_dir=str(self._CORPUS))
+        assert len(loaded) == len(files)
+        # Every file exposes the canonical VRAM view (alias-populated when the
+        # file predates the rename).
+        for r in loaded:
+            assert isinstance(r.vram_device_occupied_gib, float)
+
+
+class TestVramAliasRoundTrip:
+    """DEC-057 canonical/alias precedence (V13a–c) exercised through the schema."""
+
+    def test_canonical_only_round_trip(self, tmp_path: Path):
+        store = ResultStore()
+        original = _make_result()  # writes canonical via helper
+        store.save(original, output_dir=str(tmp_path))
+        raw = json.loads(next(tmp_path.glob("results-*.json")).read_text())
+        assert "vram_device_occupied_gib" in raw
+        assert "peak_vram_delta_gb" not in raw
+        loaded = store.all_results(output_dir=str(tmp_path))[0]
+        assert loaded.vram_device_occupied_gib == 0.5
+
+    def test_alias_only_loads(self):
+        loaded = BenchmarkResult.model_validate(
+            {
+                "model_name": "legacy",
+                "suite_version": "v1",
+                "timestamp": "2026-06-08T12:00:00+00:00",
+                "mean_throughput_tps": 10.0,
+                "peak_vram_delta_gb": 1.25,
+            }
+        )
+        assert loaded.vram_device_occupied_gib == 1.25
+
+    def test_equal_dual_values_load(self):
+        loaded = BenchmarkResult.model_validate(
+            {
+                "model_name": "dual",
+                "suite_version": "v1",
+                "timestamp": "2026-06-08T12:00:00+00:00",
+                "mean_throughput_tps": 10.0,
+                "vram_device_occupied_gib": 3.0,
+                "peak_vram_delta_gb": 3.0,
+            }
+        )
+        assert loaded.vram_device_occupied_gib == 3.0
+
+    def test_conflicting_dual_values_canonical_wins(self):
+        loaded = BenchmarkResult.model_validate(
+            {
+                "model_name": "conflict",
+                "suite_version": "v1",
+                "timestamp": "2026-06-08T12:00:00+00:00",
+                "mean_throughput_tps": 10.0,
+                "vram_device_occupied_gib": 4.0,
+                "peak_vram_delta_gb": 9.9,
+            }
+        )
+        assert loaded.vram_device_occupied_gib == 4.0

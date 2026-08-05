@@ -200,7 +200,7 @@ class BenchmarkRunner:
             p95_latency_ms=round(_percentile(latencies, 95), 2),
             p99_latency_ms=round(_percentile(latencies, 99), 2),
             mean_throughput_tps=round(statistics.mean(throughputs) if throughputs else 0.0, 2),
-            peak_vram_delta_gb=round(peak_vram_delta, 2),
+            vram_device_occupied_gib=round(peak_vram_delta, 2),
             hardware=hardware_before,
             max_model_len=max_model_len,
             vram_budget_exceeded=vram_budget_exceeded,

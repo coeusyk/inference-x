@@ -6,7 +6,7 @@ from inference_x.benchmarks.runner import (
     _peak_vram_footprint_gb,
     _run_prompt_stream,
 )
-from inference_x.benchmarks.schemas import HardwareProfile
+from inference_x.benchmarks.schemas import BenchmarkResult, HardwareProfile
 
 
 def _hw(
@@ -41,6 +41,35 @@ class TestPeakVramFootprint:
         before = _hw(total=0.0, free=0.0, has_gpu=False)
         after = _hw(total=0.0, free=0.0, has_gpu=False)
         assert _peak_vram_footprint_gb(before, after) == 0.0
+
+
+class TestResultVramFieldName:
+    """DEC-057: the runner writes the canonical `vram_device_occupied_gib` field.
+
+    ``runner.run`` constructs ``BenchmarkResult(vram_device_occupied_gib=...)``;
+    this pins that write-site field name (the numeric formula is covered by
+    ``TestPeakVramFootprint``). The deprecated alias remains readable on input.
+    """
+
+    def test_canonical_write_site_field(self):
+        result = BenchmarkResult(
+            model_name="m",
+            suite_version="v1",
+            timestamp="2026-06-08T12:00:00+00:00",
+            vram_device_occupied_gib=3.22,
+        )
+        assert result.vram_device_occupied_gib == 3.22
+
+    def test_alias_input_still_accepted(self):
+        result = BenchmarkResult.model_validate(
+            {
+                "model_name": "m",
+                "suite_version": "v1",
+                "timestamp": "2026-06-08T12:00:00+00:00",
+                "peak_vram_delta_gb": 3.22,
+            }
+        )
+        assert result.vram_device_occupied_gib == 3.22
 
 
 class TestCheckVramBudget:

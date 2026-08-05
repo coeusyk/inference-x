@@ -1360,6 +1360,17 @@ Use this document to capture non-obvious design decisions as the project evolves
     (plan §5.4) without implementing the factory.
   - If OS-2 is reverted, keep this ADR's supersession statement for prior
     approximate figures — those numbers were always wrong (plan §8.2).
+  - **`derive_terminal_metadata` relocation constraint (OWN-B5).**
+    `derive_terminal_metadata` currently lives in `engines/driver.py`, called
+    from both the non-streaming path (`driver.py`) and the streaming path
+    (`vllm_engine.py`) — this is the single helper DEC-050 §3 names as the
+    reason streamed and non-streamed usage cannot drift apart. Roadmap B1
+    removes `EngineDriver`. The helper MUST be relocated, not reimplemented,
+    before or during B1: it MUST remain the single source of truth for
+    deriving terminal metadata on both the streamed and non-streamed paths,
+    and B1 MUST NOT duplicate or fork this translation logic into a
+    second implementation. This note does not prescribe the destination
+    module — that is a B1 decision.
 - Supersession: remains in force until a future DEC changes the streaming
   engine contract (e.g. Phase B AsyncLLM adaptation must preserve or explicitly
   replace this chunk model on `BaseEngine`).
@@ -1708,3 +1719,92 @@ Use this document to capture non-obvious design decisions as the project evolves
 - Supersession: remains in force until a future DEC adds further comparability
   keys or a run manifest.
 
+### DEC-056
+- Date: 2026-08-05
+- Status: accepted
+- Title: Advisor score reflects measured quantities only (OS-6)
+- Context: Phase A OS-6 (`docs/REVIEW-2026-08-04-os5-os6-finalization.md`). The
+  advisor blended a constant `quant_score = 1.0` (weight `0.10`) into every score.
+  A constant term contributes an identical additive floor to all models, so the
+  score neither ranked nor discriminated on that axis — it silently inflated every
+  number and implied a quantization signal that did not exist.
+- Problem: A score that mixes measured components with a constant placeholder is
+  dishonest: it looks like a four-factor judgement but is a three-factor one plus a
+  fixed offset. It also risks being read as an absolute quality metric.
+- Decision:
+  1. **Delete `quant_score`.** The advisor scores only measured quantities:
+     throughput, warm TTFT, and VRAM headroom.
+  2. **Exact weights.** Re-normalise the surviving three weights to exact fractions
+     `4/9` (throughput), `1/3` (TTFT), `2/9` (VRAM). These preserve the prior
+     `0.40 : 0.30 : 0.20` ratio. The `* 100.0` display scale is retained.
+  3. **Weights are uncalibrated editorial preference**, not a reasoned inference
+     from data. They are not tuned against any outcome and may change.
+  4. **`viable` is the sole viability signal.** A VRAM-gated model collapses to
+     `score = 0.0`; a viable-but-worst model may also be `0.0`. The two are
+     distinguished only by `viable`, never by the score value. No consumer may
+     derive viability from the score.
+  5. **Score is a within-report ordinal** used only to rank viable models produced
+     from the same benchmark suite. Score is NOT portable across benchmark suites,
+     NOT portable across hardware, NOT portable across future weighting changes, and
+     NOT an absolute quality metric. Normalisation is relative to the models in the
+     same report: a single result yields a zero TTFT component, and adding a model
+     can change the scores of the others.
+  6. **Ranking preservation.** Because all three components are non-negative linear
+     terms, the relative ordering of viable models is preserved under the
+     re-normalisation (affine-invariant); only the absolute numbers shift.
+- Alternatives considered:
+  - **Keep `quant_score` as a real signal.** Rejected: no quantization data exists
+    to populate it; a placeholder that always returns `1.0` is not a signal.
+  - **Expose per-component sub-scores.** Rejected: out of scope; no component-score
+    API in Phase A.
+- Consequences:
+  - Positive: the score reflects only measured quantities; the floor is gone; the
+    weights are exact and honestly labelled.
+  - Negative: absolute score values change (they no longer carry the `+10` floor);
+    this is a display change only and does not reorder viable models.
+- Compatibility: advisor-owned. Runner, storage, schemas, and `suite_identity` must
+  never embed these weights. Historical benchmark JSON is unaffected.
+- Supersession: remains in force until a future DEC recalibrates or replaces the
+  scoring weights.
+
+### DEC-057
+- Date: 2026-08-05
+- Status: accepted
+- Title: The benchmark VRAM number is device occupancy, named `vram_device_occupied_gib` (OS-6)
+- Context: Phase A OS-6. `BenchmarkResult.peak_vram_delta_gb` and
+  `AdvisorResult.vram_gb` named the number a "delta", but the runner measures
+  `total − min(free)` across before/after snapshots — device-wide occupied VRAM,
+  not a per-process delta. The unit was already GiB despite the `_gb` suffix.
+- Problem: A field name that misdescribes its referent invites wrong reasoning
+  (e.g. treating device occupancy as this process's marginal footprint).
+- Decision:
+  1. **Canonical field `vram_device_occupied_gib`** on `BenchmarkResult`, replacing
+     `peak_vram_delta_gb` as the stored/serialised name.
+  2. **Measurement unchanged:** `total − min(free)` across before/after GPU
+     snapshots. The number does not change; only its name does.
+  3. **Deprecated aliases through Phase A:** `peak_vram_delta_gb` (BenchmarkResult)
+     and `vram_gb` (AdvisorResult) remain readable and, for `vram_gb`, remain in the
+     serialised advisor payload. Removing either alias REQUIRES a future ADR.
+  4. **Canonical precedence (permanent).** Canonical fields always take precedence
+     over deprecated aliases during deserialization. If both are present with
+     conflicting values, the canonical field wins. This precedence rule is permanent
+     unless superseded by a future ADR.
+  5. **`HardwareProfile.vram_total_gb` / `vram_free_gb` are unchanged.** They name a
+     device capacity/availability, not an occupancy measurement; renaming them is
+     out of scope for this change (frozen unchanged, not deferred).
+  6. **Known coupling recorded, not fixed.** `runner._check_vram_budget` compares the
+     occupancy number against an estimated engine footprint. That comparison logic is
+     left unchanged in this change; the coupling is documented here so a future change
+     can revisit it deliberately.
+- Alternatives considered:
+  - **Hard rename with a migration pass over stored JSON.** Rejected: historical
+    benchmark JSON must remain readable without migration and is never rewritten.
+  - **Rename HardwareProfile fields for symmetry.** Rejected: different referent;
+    out of scope.
+- Consequences:
+  - Positive: the field name matches what is measured; historical files still load.
+  - Negative: two names for one number exist through Phase A (canonical + alias).
+- Compatibility: additive alias. New JSON uses the canonical field; historical JSON
+  loads via the alias and is never rewritten.
+- Supersession: alias removal requires a future ADR; the canonical-precedence rule is
+  permanent unless a future ADR supersedes it.

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, computed_field
 
 
 class HardwareProfile(BaseModel):
@@ -24,6 +24,10 @@ class PromptResult(BaseModel):
 
 
 class BenchmarkResult(BaseModel):
+    # Accept the deprecated ``peak_vram_delta_gb`` alias so historical result JSON
+    # loads without migration; the canonical field wins on conflict (DEC-057).
+    model_config = ConfigDict(populate_by_name=True)
+
     model_name: str
     suite_version: str
     timestamp: str  # ISO 8601
@@ -33,7 +37,15 @@ class BenchmarkResult(BaseModel):
     p95_latency_ms: float = 0.0
     p99_latency_ms: float = 0.0
     mean_throughput_tps: float = 0.0
-    peak_vram_delta_gb: float = 0.0
+    # Device-wide occupied VRAM (total − min(free)); GiB. `peak_vram_delta_gb`
+    # is a deprecated read alias retained through Phase A (DEC-057). Removal of
+    # the alias requires a future ADR.
+    vram_device_occupied_gib: float = Field(
+        default=0.0,
+        validation_alias=AliasChoices(
+            "vram_device_occupied_gib", "peak_vram_delta_gb"
+        ),
+    )
     hardware: Optional[HardwareProfile] = None
     max_model_len: Optional[int] = None
     vram_budget_exceeded: bool = False
@@ -41,13 +53,29 @@ class BenchmarkResult(BaseModel):
 
 
 class AdvisorResult(BaseModel):
+    # Accept the deprecated ``vram_gb`` alias on input and keep emitting it on
+    # output through Phase A; the canonical field wins on conflict (DEC-057).
+    model_config = ConfigDict(populate_by_name=True)
+
     model_name: str
     score: float
     viable: bool
     throughput_tps: float
     ttft_ms: float
-    vram_gb: float
+    vram_device_occupied_gib: float = Field(
+        validation_alias=AliasChoices("vram_device_occupied_gib", "vram_gb"),
+    )
     recommendation_str: str
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def vram_gb(self) -> float:
+        """Deprecated alias for ``vram_device_occupied_gib`` (DEC-057).
+
+        Retained in the serialised payload through Phase A for wire
+        compatibility; removal requires a future ADR.
+        """
+        return self.vram_device_occupied_gib
 
 
 class AdvisorReport(BaseModel):
