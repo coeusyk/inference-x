@@ -73,7 +73,6 @@ ignore_missing_imports = true
 module = [
     "inference_x.engines.vllm_engine",  # 10 — vLLM's LLM is untyped
     "inference_x.engines.driver",       # 7  — Optional narrowing; deleted in Phase B1
-    "inference_x.services.chat_service",# 3  — generate_stream contract; widened by OS-2
     "inference_x.api.deps",             # 2  — composition-root arg types
 ]
 ignore_errors = true
