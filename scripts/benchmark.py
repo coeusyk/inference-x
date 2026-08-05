@@ -132,7 +132,7 @@ def main() -> None:
     print(f"  p50 latency     : {result.p50_latency_ms:.0f} ms")
     print(f"  p95 latency     : {result.p95_latency_ms:.0f} ms")
     print(f"  p99 latency     : {result.p99_latency_ms:.0f} ms")
-    print(f"  Peak VRAM delta : {result.peak_vram_delta_gb:.2f} GB")
+    print(f"  VRAM occupied   : {result.vram_device_occupied_gib:.2f} GiB")
     print(f"  Prompts run     : {len(result.prompt_results)}")
 
 

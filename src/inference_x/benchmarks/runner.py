@@ -17,6 +17,7 @@ import httpx
 
 from inference_x.benchmarks.hardware import profile_hardware
 from inference_x.benchmarks.schemas import BenchmarkResult, HardwareProfile, PromptResult
+from inference_x.benchmarks.suite_identity import verify_suite
 from inference_x.services.model_service import ModelRegistry
 from inference_x.utils.vllm_pool_config import estimate_engine_footprint_gib
 
@@ -24,9 +25,13 @@ _VRAM_BUDGET_SLACK_GB = 0.5
 
 
 def _load_suite(suite_path: str) -> tuple[str, list[dict]]:
-    """Return (suite_version, prompts_list) from a suite JSON file."""
+    """Return (suite_version, prompts_list) from a verified suite JSON file.
+
+    Suite identity is verified against the pinned canonicalizer (DEC-054); a
+    missing or mismatched `suite_version` raises `SuiteIdentityError`.
+    """
     data = json.loads(Path(suite_path).read_text(encoding="utf-8"))
-    return data["suite_version"], data["prompts"]
+    return verify_suite(data)
 
 
 def _run_prompt_stream(
@@ -42,6 +47,10 @@ def _run_prompt_stream(
         "messages": [{"role": "user", "content": prompt_text}],
         "max_tokens": 256,
         "stream": True,
+        # Ask for the terminal usage event (DEC-049). Without it the server
+        # reports no token count, and this runner would have nothing truthful
+        # to measure throughput from.
+        "stream_options": {"include_usage": True},
     }
 
     tokens_generated = 0
@@ -63,12 +72,16 @@ def _run_prompt_stream(
                     continue
                 try:
                     chunk = json.loads(data)
+                    usage = chunk.get("usage")
+                    if isinstance(usage, dict):
+                        # Engine-accounted count from the terminal usage event.
+                        tokens_generated = int(usage.get("completion_tokens", 0))
+                        continue
                     delta = (chunk.get("choices") or [{}])[0].get("delta", {})
                     content = delta.get("content", "")
-                    if content:
-                        if ttft_ms is None:
-                            ttft_ms = (time.perf_counter() - t_start) * 1000
-                        tokens_generated += len(content.split())
+                    if content and ttft_ms is None:
+                        # TTFT still comes from the first content event.
+                        ttft_ms = (time.perf_counter() - t_start) * 1000
                 except (json.JSONDecodeError, IndexError):
                     continue
 
@@ -187,7 +200,7 @@ class BenchmarkRunner:
             p95_latency_ms=round(_percentile(latencies, 95), 2),
             p99_latency_ms=round(_percentile(latencies, 99), 2),
             mean_throughput_tps=round(statistics.mean(throughputs) if throughputs else 0.0, 2),
-            peak_vram_delta_gb=round(peak_vram_delta, 2),
+            vram_device_occupied_gib=round(peak_vram_delta, 2),
             hardware=hardware_before,
             max_model_len=max_model_len,
             vram_budget_exceeded=vram_budget_exceeded,

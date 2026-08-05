@@ -963,3 +963,848 @@ Use this document to capture non-obvious design decisions as the project evolves
   overhead figure, like DEC-045's `minicpm: 2.8` GiB, is empirically fitted from one
   verified hardware scenario, not derived from a documented mechanism — revisit if a
   3+-engine compare pool is added.
+
+### DEC-047
+- Date: 2026-08-04
+- Status: accepted
+- Title: Engine Boundary and backend plurality
+- Context: Engine Boundary and backend plurality. Reviews of a proposed thick
+  Execution Contract (`inference_x/execution/`) and two subsequent architecture
+  reviews established a thin Engine Boundary direction, but that consensus was
+  not yet recorded in-repo. Current state of the repository:
+  - `engines/base.py`: `BaseEngine` is an ABC whose docstring asserts that adding
+    a second engine must not require changes here; methods accept and return
+    `schemas.chat` wire types; no capability methods are declared on the contract.
+  - `api/deps.py`: the composition root constructs `VLLMEngine` directly
+    (~line 108). There is no factory dispatch on `ModelEntry.engine`.
+  - `engines/registry.py`: empty (0 bytes), despite being the natural home for
+    construction.
+  - `schemas/model.py`: `engine: Literal["vllm"]` structurally forbids naming a
+    second backend in config.
+  - `routing/admission.py`: discovers `count_prompt_tokens` and
+    `kv_capacity_tokens` via `getattr`, with documented fail-open when absent —
+    so a future second backend that omits those attributes would silently skip
+    admission gates.
+  - Governance conflict: `CONTRIBUTING.md` lists "Non-vLLM inference backends at
+    this time" under what does not fit; `AGENTS.md` anti-scope forbids "multiple
+    engine implementations" before the relevant phase; DEC-007 keeps `vllm` as a
+    required dependency after optional-`vllm` broke `uv sync` / smoke; meanwhile
+    `docs/REVIEW-2026-08-03-architecture.md` Phase D5 names an engine factory,
+    optional-`vllm`, and a `llama-server` proxy as the consumer-hardware unlock.
+  This decision is needed now so implementation and governance stop oscillating
+  between "vLLM application forever" and "build a multi-backend framework early,"
+  and so Engine Boundary hygiene cannot accidentally gate Phase B (AsyncLLM).
+- Problem:
+  1. Decorative engine boundary — docs claim a stable interface while the
+     composition root hardcodes the concrete backend.
+  2. Duck-typed capability discovery — admission and metrics reach past
+     `BaseEngine` via `getattr` and fail open silently.
+  3. Governance vs vision conflict — the product thesis implies backends become
+     implementation details over the project's lifetime, but policy docs forbid
+     non-vLLM work without stating plurality as a long-term architectural
+     objective (distinct from a delivery commitment).
+  4. Premature thick abstraction risk — a dual wire/execution type system under
+     `inference_x/execution/` was proposed before a second concrete
+     implementation exists, which would freeze internal DTOs ahead of AsyncLLM
+     and ahead of any second backend.
+- Decision:
+  1. **Backend plurality (architectural principle).** Inference-X is
+     architecturally designed to support multiple inference backends over its
+     lifetime. At the time of this decision, vLLM remains the sole supported
+     backend. No second backend is scheduled or committed for a specific
+     release. Architectural changes should avoid unnecessarily coupling new
+     runtime components to vLLM internals, but backend-neutral abstractions must
+     not be introduced until justified by a second concrete implementation.
+  2. **Thin Engine Boundary (accepted hygiene).**
+     - Populate `engines/registry.py` with `create_engine(...)` as the sole
+       construction path used by the app composition root (`api/deps.py`).
+     - Declare durable capability methods on `BaseEngine` with default
+       `None` / unsupported semantics; at minimum `count_prompt_tokens(...)`.
+     - Admission (and metrics) call declared methods; no new silent `getattr`
+       discovery for those capabilities.
+     - Keep wire schemas (`schemas.chat`) as the engine I/O types until a
+       second concrete backend forces extraction.
+  3. **Capability durability split.**
+     - **Durable:** tokenizer / prompt-token counting (backend-agnostic gate
+       input).
+     - **Provisional:** `kv_capacity_tokens` and in-process KV reservation
+       semantics — may be rescoped or deleted under REVIEW Phase B4
+       (admission rescope); must not be frozen as a cross-backend contract by
+       this decision.
+  4. **Admission fail policy (until B4).** Preserve current
+     fail-open-when-unavailable behavior, but make degradation typed and
+     observable (structured log when a gate is skipped because a capability is
+     `None`). Do not silently tighten to fail-closed in this decision.
+  5. **Sequencing (nonblocking).**
+     - Phase A (truthful metrics / seed / CI) remains first for product truth.
+     - Phase B (AsyncLLM) remains the next high-leverage runtime milestone and
+       **must not** be gated on Engine Boundary hygiene.
+     - Factory + durable capabilities are additive, parallelizable hygiene (or
+       foldable into later D5) — never a blocking program milestone before
+       AsyncLLM.
+     - Phase C (manifest) and Phase D5 (second-backend vertical slice) remain
+       as described in `docs/REVIEW-2026-08-03-architecture.md`; D5 requires a
+       future ADR / change that authorizes a concrete second implementation.
+  6. **DEC-007 relationship.** `vllm` remains a required dependency.
+     Optional-`vllm` is **not** authorized by this decision. Revisit DEC-007
+     only when a second backend vertical slice is accepted.
+  7. **Backend Abstraction Principle.** Backend-neutral abstractions must not
+     be introduced until they are justified by at least two concrete backend
+     implementations. Until that point: build only what the repository requires
+     today; avoid speculative backend-neutral packages or contracts; avoid
+     knowingly hard-coding new vLLM-specific assumptions into architectural
+     boundaries such as the composition root, the `BaseEngine` contract, or
+     admission capability discovery. This principle applies to architectural
+     boundaries, not to backend implementation details.
+- Architectural principle: Inference-X is an inference runtime, not a vLLM
+  application. The runtime owns architectural policy. Backends own inference
+  execution. Architectural decisions should preserve the ability for additional
+  backends to exist in the future without requiring current subsystems to be
+  rewritten. However, backend-neutral abstractions must only be introduced when
+  justified by multiple concrete implementations. This decision establishes
+  backend plurality as a long-term architectural direction, not as an
+  implementation commitment or delivery roadmap.
+- Explicit non-decisions (deferred by this ADR):
+  - `inference_x/execution/` package and dual wire↔execution DTOs
+  - Backend-neutral Execution Contract freeze
+  - Optional-extra `vllm`
+  - `engines/backends/vllm/` relocation
+  - AST import-boundary enforcement as a gate
+  - Second backend implementation (llama.cpp / llama-server or otherwise)
+  - AsyncLLM / `EngineDriver` deletion (Phase B)
+  - Memory Manager, Planner, Scheduler, or Inference OS packaging
+  - `vram_tiers.yaml` neutral / backend-native split
+  - Widening `ModelEntry.engine` beyond validated registry keys without a
+    second registered backend
+  - Changing the public OpenAI HTTP surface
+- Ownership:
+  - **BaseEngine** — Owns: generation façade and declared capabilities. Knows:
+    request/response types currently in use; capability `None` semantics. Must
+    never know: HTTP/FastAPI; other backends; admission policy; model selection.
+  - **engines/registry** — Owns: instantiation dispatch by engine type. Knows:
+    registered backend constructors; model config dicts needed to construct.
+    Must never know: admission; routing policy; OpenAI wire minting.
+  - **Admission (`routing/`)** — Owns: whether a request may run; gate policy.
+    Knows: declared engine capabilities; registry model limits; priority
+    semantics. Must never know: vLLM internals; CUDA; Driver/`step()` loop.
+  - **API / services** — Owns: wire validation; composition-root wiring; OpenAI
+    response minting. Knows: settings, pool, router, admission. Must never
+    know: backend-native serving loops.
+  - **Concrete backend (`VLLMEngine` + driver)** — Owns: inference execution for
+    vLLM. Knows: vLLM APIs, local runtime state, translating current request
+    types to native calls. Must never know: HTTP schemas as *owned* long-term
+    vocabulary (today borrowed); other backends; global scheduling policy.
+- Alternatives considered:
+  - **Keep as-is.** Rejected: leaves the decorative boundary and the governance
+    contradiction in place; a second backend later becomes an architectural
+    migration rather than an implementation project.
+  - **Thick Execution Contract** (`inference_x/execution/`, dual wire/execution
+    types, optional-`vllm`, `backends/vllm/` move in one milestone). Rejected:
+    premature abstraction before a second implementation; high churn against
+    Phase B (AsyncLLM); contradicts DEC-007 and current anti-scope if bundled.
+  - **Thin Engine Boundary + plurality without timeline (this decision).**
+    Accepted.
+  - **vLLM-only for ≥12 months (with or without a research note).** Rejected:
+    reframes the project identity as a vLLM application and biases future
+    subsystems (planner, scheduler, memory) toward vLLM-shaped boundaries;
+    forces reopening this ADR when plurality becomes unavoidable.
+- Consequences:
+  - **Positive:** composition root becomes architecturally honest; engine
+    capabilities become explicit; backend plurality is established as a
+    long-term architectural direction without requiring premature abstractions;
+    AsyncLLM remains unblocked; DEC-007 remains unchanged.
+  - **Negative:** engines still import wire schemas (accepted smell until a
+    second backend forces extraction); provisional KV capability remains until
+    B4; contributors must distinguish "plurality as direction" from "build
+    abstractions now."
+  - **Deferred work:** sync `CONTRIBUTING.md`, `AGENTS.md`, and a short note in
+    `docs/ARCHITECTURE.md` once this decision is accepted; OpenSpec change when
+    implementing factory / capabilities; concrete second backend only via a
+    future accepted change.
+  - **Technical debt accepted:** wire-as-engine-API; import-time CUDA/vLLM
+    patches in `api/main.py` (known coupling; not cured here).
+  - **Future opportunities:** when a second backend lands, extract execution
+    types under the Backend Abstraction Principle; revisit optional-`vllm`
+    (DEC-007) only with that vertical slice.
+- Risks:
+  - **Architectural:** plurality language misread as permission to introduce
+    `execution/` or other backend-neutral packages early — mitigated by Explicit
+    non-decisions and the Backend Abstraction Principle.
+  - **Migration:** factory and durable capabilities touch `deps`, admission, and
+    tests — low risk if scoped as hygiene.
+  - **Governance:** accepting this ADR without updating `CONTRIBUTING.md` /
+    `AGENTS.md` leaves the prior conflict in force — listed under Exit criteria.
+  - **Future backend support:** promoting provisional KV admission onto a stable
+    cross-backend contract before Phase B4 — mitigated by the durability split.
+- Sequencing relative to REVIEW phases:
+  - Phase A → Phase B (AsyncLLM) → B4 admission rescope → Phase C (manifest)
+    remain the product/runtime spine.
+  - DEC-047 factory + durable capabilities are nonblocking relative to that
+    spine (dashed dependency only).
+  - A future ADR authorizing a concrete second backend precedes D5; execution-
+    type extraction, if needed, follows a second implementation (rule of two).
+  - Provisional KV capability policy is decided with or after B4, not frozen
+    here.
+- Governance (required once this decision is accepted):
+  - `docs/DECISIONS.md` — this entry; status moves from `proposed` to
+    `accepted`.
+  - `CONTRIBUTING.md` — replace "Non-vLLM inference backends at this time" with
+    language that: vLLM is the sole supported backend today; plurality is a
+    long-term architectural objective; no second backend is scheduled; do not
+    add backends without a dedicated accepted change.
+  - `AGENTS.md` — align anti-scope: forbid *implementing* multiple engines or
+    `inference_x/execution/` until justified by a second concrete
+    implementation; allow thin factory / durable capabilities; state the
+    plurality objective.
+  - `docs/ARCHITECTURE.md` — short engine-boundary note: factory ownership; no
+    `execution/` package yet; hygiene must not gate AsyncLLM.
+  - OpenSpec — required only when implementing factory / capabilities code; not
+    required to accept this ADR text.
+- Exit criteria (architectural; DEC-047 is fully implemented when all hold):
+  1. This entry is `accepted` in `docs/DECISIONS.md`.
+  2. `CONTRIBUTING.md` and `AGENTS.md` no longer contradict backend plurality
+     versus anti-scope without explanation.
+  3. App engine construction goes through `engines/registry` factory (no direct
+     `VLLMEngine(` in `api/deps.py`).
+  4. Admission uses declared durable capability methods; degradation when
+     unsupported is observable; no new `getattr` discovery for those methods.
+  5. No `inference_x/execution/` package exists as a deliverable of this
+     decision.
+  6. `vllm` remains a required dependency (DEC-007 intact).
+  7. Phase B / AsyncLLM is not blocked on items 3–4.
+- Supersession: This decision remains in force until explicitly superseded by a
+  future DEC. In particular, any decision introducing a second concrete
+  inference backend, backend-neutral execution packages, optional backend
+  dependency layouts, or changes to the Engine Boundary ownership model must
+  explicitly reference and supersede DEC-047 where appropriate.
+  Acceptance of this ADR establishes repository policy for the Engine Boundary;
+  it does not by itself authorize factory/capability implementation, AsyncLLM
+  work, or a second backend — those require their own accepted changes.
+
+### DEC-048
+- Date: 2026-08-04
+- Status: accepted
+- Title: Lint rule set and type-check baseline for the CI gate (OS-1)
+- Context: OS-1
+  (`openspec/changes/2026-08-04-add-ci-and-static-analysis-gate/`) adds the
+  repository's first merge-blocking gate: `pytest tests/unit`, `ruff check .`,
+  and `mypy src/` on every pull request. Measured against the tree at
+  `develop` before any change:
+  - `ruff check .` with the tool's own default rule selection reported **232
+    findings** across 26 rules.
+  - `mypy src/` reported **27 errors in 9 files** (51 source files checked).
+
+  OS-1 forbids editing anything under `src/` or `tests/`. That constraint is
+  not incidental: five Phase A units follow OS-1 and several will be in flight
+  simultaneously over a shared file set
+  (`docs/PHASE-A-EXECUTION-PLAN.md` §7.3), so a tree-wide cleanup landing first
+  would collide with all of them and make every subsequent Phase A diff
+  unreviewable. Three options existed — weaken the gate until it asserts
+  nothing, edit the code, or record the known-failing surfaces explicitly and
+  gate everything else.
+- Decision:
+  1. **Lint rule set.** Select `E4`, `E7`, `E9`, `F` — the set covering broken
+     code (syntax errors, undefined names, redefinitions) rather than style.
+     Three rules are ignored, each for a stated reason:
+     - `E402` (module import not at top of file) — **deliberate design, not
+       debt.** `api/main.py` applies the vLLM platform patch before importing
+       any vLLM-touching module, and `scripts/` set `sys.path` before importing
+       the package. Enabling it would flag correct code.
+     - `F401` (unused import, 17 occurrences) and `F841` (unused variable, 1) —
+       **deferred, not endorsed.** Clearing either requires source edits, which
+       OS-1 forbids.
+     The remaining ~200 default findings (`BLE001`, `SIM117`, `I001`, `S110`,
+     `UP*`, `RUF*` and others) are outside the selection entirely. Widening the
+     selection is a separate change and must not ride along with a Phase A unit.
+  2. **Third-party stubs are not a code suppression.** `yaml` (4 errors) and
+     `pynvml` (1) ship no type information. These are handled with
+     `ignore_missing_imports` scoped to those two packages. This says nothing
+     about `inference_x`'s own types and is not part of the baseline. It
+     resolved 5 of the 27 errors without suppressing a single project module.
+  3. **Type-check baseline — four modules, 22 errors.** The remaining errors
+     are confined to modules that sit against untyped surfaces or are already
+     scheduled for replacement:
+
+     | Module | Errors | Why |
+     |---|---|---|
+     | `engines/vllm_engine` | 10 | vLLM's `LLM` is untyped; mypy resolves it as `LLM?` and rejects attribute access. |
+     | `engines/driver` | 7 | `Optional` narrowing on `Queue`/`Future`. Deleted by Phase B1 (AsyncLLM). |
+     | `services/chat_service` | 3 | `generate_stream` is declared `async def -> AsyncGenerator[str, None]`, which mypy reads as a coroutine. |
+     | `api/deps` | 2 | Composition-root argument types. |
+
+     The baseline is an **enumerated, closed list**. No repository-wide
+     suppression and no wildcard, so a module added later is type-checked by
+     default — verified during OS-1 validation by adding a scratch module with
+     a deliberate type error and confirming the gate went red.
+  4. **`api/main.py` is deliberately excluded from the baseline.** Its only
+     error was the `yaml` stub, resolved by decision 2. Baselining it would
+     have suppressed a module that needs no suppression, silently exempting
+     future errors there. Over-suppression is a defect, not a safe default.
+  5. **The baseline does not grow during Phase A.** Adding a module to it in
+     OS-2 through OS-6 is a review finding — a signal the unit is touching more
+     than its scope allows (`docs/PHASE-A-EXECUTION-PLAN.md` §7.4) — not a
+     routine edit.
+- Consequences:
+  - CI landed with **zero changes under `src/` or `tests/`**. 430/430 unit
+    tests pass; `ruff check .` and `mypy src/` both report clean.
+  - The gate is real but bounded. It catches broken code, undefined names, and
+    type errors in the 47 non-baselined modules. It does **not** assert style
+    consistency, import ordering, or type correctness inside the four
+    baselined modules.
+  - A clean `mypy src/` run is not a Phase A goal and should not be pursued
+    inside a Phase A unit.
+  - `services/chat_service`'s three errors are the same `generate_stream`
+    typing defect the Phase A plan identified independently
+    (`docs/PHASE-A-EXECUTION-PLAN.md` §1.1). The type checker found it without
+    being told to look. OS-2 widens that contract and should shrink or remove
+    this baseline entry as a side effect.
+  - `engines/driver`'s entry is expected to disappear with the module itself in
+    Phase B1.
+- Supersession: baseline reduction and lint-selection widening each require
+  their own change. Neither is authorized by this decision.
+
+### DEC-049
+- Date: 2026-08-04
+- Status: accepted
+- Title: Widen BaseEngine.generate_stream for truthful streaming usage (OS-2)
+- Context: Phase A OS-2 (`docs/PHASE-A-EXECUTION-PLAN.md` §1.1, §3.4, §4).
+  `BaseEngine.generate_stream` is typed `AsyncGenerator[str, None]`. A bare
+  string cannot carry `usage` or `finish_reason`. Observability middleware and
+  the benchmark runner therefore approximate streamed completion tokens with
+  whitespace word counts (`_count_sse_delta_tokens`, runner stream loop).
+  Non-streaming `generate()` already returns engine-accounted
+  `ChatCompletionUsage`. DEC-023 enabled SSE with the explicit consequence that
+  streamed token counts would remain estimates until a usage event existed.
+  DEC-047 forbids introducing `inference_x/execution/` or a second type system;
+  engines today speak `schemas.chat` wire types. DEC-048's mypy baseline already
+  flags `services/chat_service` for the same `generate_stream` typing defect.
+- Problem: Truthful Phase A metrics require streamed completion tokens and
+  finish reasons to originate from the engine. That is impossible while
+  `generate_stream` yields only `str`. Leaving the contract unchanged forces
+  continued approximation; inventing a backend-neutral chunk package outside
+  `schemas/` violates DEC-047.
+- Decision:
+  1. **Add a streaming chunk model to `schemas/chat.py`** (name to be chosen at
+     implementation, e.g. `ChatStreamChunk`) carrying:
+     - `content: str` (delta text; empty on a terminal-only chunk)
+     - `finish_reason: Literal["stop", "length", "error"] | None`
+     - `usage: ChatCompletionUsage | None`
+     Content deltas set `content` and leave `finish_reason`/`usage` null. The
+     terminal engine event sets `finish_reason` and, when available, `usage`.
+  2. **Widen `BaseEngine.generate_stream`** to
+     `AsyncGenerator[<chunk model>, None]`. Update `VLLMEngine`, all test stubs,
+     and `ChatService.stream_response` accordingly.
+  3. **Surface terminal metadata from `EngineDriver`** on the stream channel
+     (today the queue is `str | BaseException | None` and drops
+     `RequestOutput` fields on finish). Without this, the vLLM path cannot
+     yield real `usage`/`finish_reason`. This is an implementation detail of the
+     current offline-`LLM` stack; Phase B1 deletes the driver and must preserve
+     the `BaseEngine` chunk contract.
+  4. **Wire `stream_options.include_usage`** on `ChatCompletionRequest` (OpenAI-
+     compatible, optional, default off or follow OpenAI defaults as implemented).
+     When usage is requested (or as required to satisfy Phase A metric truth for
+     `/v1/metrics` and benchmarks — see Consequences), `ChatService` emits a
+     terminal SSE chunk before `data: [DONE]` carrying `usage` and places
+     `finish_reason` on the last content chunk per OpenAI streaming conventions.
+  5. **Delete `_count_sse_delta_tokens`** and repoint SSE observability to the
+     usage chunk. Benchmark runner stream measurement reads
+     `usage.completion_tokens` instead of `len(content.split())`.
+  6. **Metric discontinuity.** Figures produced before this change (in-process
+     `/v1/metrics`, stored benchmark `tokens_per_sec` derived from word counts,
+     and published claims in `article-final.md`) are **not comparable** to
+     figures produced after. Record that supersession here; add a correction
+     note to `article-final.md` (gitignored private writing — still required).
+  7. **Docstring honesty.** Update `BaseEngine`'s claim that a second engine
+     needs no changes here: this widening is exactly the change DEC-047
+     problem statement §1 anticipated as overdue honesty about a decorative
+     boundary.
+- Alternatives considered:
+  - **Keep yielding `str`; estimate tokens forever.** Rejected: contradicts
+    Phase A objective and leaves DEC-023's known gap permanent.
+  - **Yield `tuple[str, Usage | None]`.** Conformant with DEC-047 but worse:
+    untyped positional contract; Phase B3 timings would widen it again; mypy
+    cannot usefully check it. Rejected.
+  - **Introduce a neutral chunk type outside `schemas/`.** Forbidden by DEC-047
+    (`inference_x/execution/` prohibition in all but name). Rejected.
+  - **Add chunk model in `schemas/chat.py` and widen `generate_stream` (this
+    decision).** Accepted.
+- Consequences:
+  - **Positive:** streamed and non-streamed `usage.completion_tokens` can agree;
+    `/v1/metrics` and benchmarks stop lying; DEC-048 baseline entry for
+    `chat_service` should shrink or clear; OpenAI clients that understand
+    terminal usage chunks gain real counts.
+  - **Negative:** every `BaseEngine` stub and the driver stream channel change;
+    historical metrics are discontinuous (must be labeled, not silently mixed);
+    `article-final.md` correction is irreversible once published.
+  - **Out of scope (other OpenSpecs):** `seed` (OS-3); `warnings`/`resolved`/
+    `strict`/`count_prompt_tokens` (OS-4); suite hash (OS-5); advisor rename/
+    quant_score (OS-6); `engines/registry` factory (deferred).
+- DEC-047 compliance:
+  - Chunk type remains in `schemas.chat` — current borrowed vocabulary.
+  - No `inference_x/execution/`, no dual wire↔execution layer, no second backend.
+  - Engine Boundary hygiene still must not gate AsyncLLM; this widening is the
+    single Phase A Engine Boundary change authorized for OS-2 (§1.1).
+  - Capability declaration (`count_prompt_tokens`) remains OS-4.
+- Compatibility analysis:
+  - `playground/streaming.py` returns on `data: [DONE]` and skips lines with no
+    token — additive terminal usage chunk is ignored safely.
+  - `benchmarks/runner.py` skips chunks without `delta.content` today; OS-2
+    updates it to *prefer* `usage` when present (owned by OS-2).
+  - Existing clients that ignore unknown chunk fields remain valid; request field
+    `stream_options` is additive/optional.
+- Migration notes:
+  - Land as one PR with the ADR accepted (or accept ADR in the same PR).
+  - Do not grow the DEC-048 mypy baseline; prefer removing `chat_service` from it
+    when the contract type-checks.
+  - Reference the `engines/registry` Phase A/B seam as an open item from this ADR
+    (plan §5.4) without implementing the factory.
+  - If OS-2 is reverted, keep this ADR's supersession statement for prior
+    approximate figures — those numbers were always wrong (plan §8.2).
+  - **`derive_terminal_metadata` relocation constraint (OWN-B5).**
+    `derive_terminal_metadata` currently lives in `engines/driver.py`, called
+    from both the non-streaming path (`driver.py`) and the streaming path
+    (`vllm_engine.py`) — this is the single helper DEC-050 §3 names as the
+    reason streamed and non-streamed usage cannot drift apart. Roadmap B1
+    removes `EngineDriver`. The helper MUST be relocated, not reimplemented,
+    before or during B1: it MUST remain the single source of truth for
+    deriving terminal metadata on both the streamed and non-streamed paths,
+    and B1 MUST NOT duplicate or fork this translation logic into a
+    second implementation. This note does not prescribe the destination
+    module — that is a B1 decision.
+- Supersession: remains in force until a future DEC changes the streaming
+  engine contract (e.g. Phase B AsyncLLM adaptation must preserve or explicitly
+  replace this chunk model on `BaseEngine`).
+
+### DEC-050
+- Date: 2026-08-04
+- Status: accepted
+- Title: Streamed token counts before OS-2 are superseded and incomparable
+- Context: Until OS-2
+  (`openspec/changes/2026-08-04-add-truthful-token-accounting/`), two sites in
+  `src/` derived completion-token counts by counting whitespace-delimited words
+  in generated text:
+  - `observability/middleware.py::_count_sse_delta_tokens`, feeding
+    `/v1/metrics` (`completion_tokens`, `total_tokens`, `tokens_per_sec`);
+  - the `benchmarks/runner.py` streaming loop, feeding `PromptResult`
+    (`tokens_generated`, `tokens_per_sec`) and, through it, the benchmark
+    advisor's model recommendations.
+  DEC-023 accepted this knowingly, because streamed responses carried no usage
+  event. DEC-049 removed that constraint. Words are not tokens; the error is
+  model- and tokenizer-dependent and always understates the true count, because
+  a word is one or more tokens and never fewer.
+- Problem: correcting a metric silently is the same category of dishonesty as
+  reporting it wrongly. Anyone comparing a figure recorded before this change
+  with one recorded after would be comparing two different quantities that
+  share a name. Phase A exists to make reported numbers true; it must not
+  create an undocumented discontinuity while doing so.
+- Decision:
+  1. **Every streamed completion-token count produced before OS-2 is
+     superseded.** This includes `/v1/metrics` token fields and rates,
+     every stored benchmark result's `tokens_generated` and `tokens_per_sec`,
+     and any throughput figure published from them.
+  2. **Pre-OS-2 and post-OS-2 figures are not comparable in either
+     direction.** They are not off by a constant factor and cannot be
+     reconciled by rescaling — the ratio depends on the tokenizer and on the
+     text. Do not mix them in a series, a chart, or a claim.
+  3. **Non-streamed `usage` is unaffected.** `generate()` always reported
+     engine-accounted counts. OS-2 makes the streamed path agree with the
+     non-streamed one, not the reverse, and both now derive from the single
+     `derive_terminal_metadata` helper so they cannot drift apart again.
+  4. **Absence replaces estimation.** When a streamed request does not set
+     `stream_options.include_usage`, no usage event reaches the middleware and
+     **no token figure is recorded at all** — not zero, not an estimate. A
+     missing number is honest; a wrong one is not. This is a deliberate loss of
+     metric coverage for default streaming clients, accepted in exchange for
+     correctness.
+  5. **`article-final.md` correction remains an author obligation.** The file
+     is gitignored under an explicit "private writing" policy, so it is outside
+     the repository and outside any acceptance criterion. `README.md` was
+     checked and publishes no throughput figures, so no in-repository published
+     number requires correction.
+- Consequences:
+  - Historical benchmark JSON under `benchmarks/results/` is machine-specific
+    and gitignored; it is not migrated. Results produced before this change
+    should be regenerated rather than compared. Filtering or partitioning a
+    results directory into "pre-OS-2" vs "post-OS-2" is not viable: files carry
+    no durable marker of which counting method produced `tokens_generated` /
+    `tokens_per_sec`, timestamps alone cannot recover that, and mixing the two
+    quantities in one series would reintroduce the discontinuity this decision
+    forbids. Regeneration is therefore the only safe path.
+  - `/v1/metrics` `avg_tokens_per_sec` degrades to `None` when no request in
+    the window carried a usage event. `metrics_service` already filters
+    `tokens_per_sec is not None`, so this is a graceful absence rather than a
+    break.
+  - The benchmark runner sets `stream_options.include_usage` on its own
+    requests, so benchmark figures stay populated and are now true.
+  - If OS-2 is reverted, this supersession still stands. The old numbers were
+    always wrong; reverting the fix does not make them right
+    (`docs/PHASE-A-EXECUTION-PLAN.md` §8.2).
+- Supersession: none. This is a statement of fact about historical data and
+  does not expire.
+
+### DEC-051
+- Date: 2026-08-04
+- Status: accepted
+- Title: Seed support / Deterministic Generation Contract (OS-3)
+- Context: Phase A OS-3 (`docs/PHASE-A-EXECUTION-PLAN.md` §4; review task A3).
+  `ChatCompletionRequest` had no `seed` field, so clients that pinned a seed
+  (notably Varex) experienced silent Pydantic drop — worse than unsupported.
+  `VLLMEngine._sampling_params` built `SamplingParams` without seed. OS-2
+  (DEC-049) already spent Phase A's Engine Boundary change; OS-3 must not
+  widen `BaseEngine`. Ownership: *The client owns requesting determinism; the
+  backend owns honouring it; the runtime must not invent it.*
+- Problem: Without a first-class `seed` that reaches the live sampler,
+  reproducibility harnesses cannot drive the server honestly. Overclaiming
+  end-to-end determinism would be a separate defect (batch composition is
+  Phase C3).
+- Decision — Deterministic Generation Contract:
+  - **G1 Acceptance.** `seed: Optional[int] = None` on `ChatCompletionRequest`
+    (appended after `stream_options`). Not silently dropped.
+  - **G2 Unchanged forward.** When `seed is not None` and the live vLLM engine
+    builds `SamplingParams`, pass that integer exactly as received. No rewrite,
+    clamp, or runtime normalization (including `-1`).
+  - **G3 Omission equivalence.** When `seed is None`, omit the `seed` key —
+    pre-OS-3 sampling construction for all other parameters.
+  - **G4 Path parity.** Streaming and non-streaming use the same
+    `_sampling_params` builder.
+  - **G5 Honesty.** Docs say seed is *honoured* (reaches the sampler); never
+    that the server is deterministic or runs are reproducible end-to-end.
+  - **Intentionally non-guaranteed (N1–N8):** concurrent/batch identity;
+    cross-hardware/version identity; CUDA-graph/JIT/prefix-cache/spec-decode
+    identity; replay/manifests; runtime-invented determinism; default
+    benchmark determinism; response seed echo (OS-4); backend sentinel
+    interpretation (e.g. what vLLM does with `-1`).
+- Alternatives considered:
+  - **Keep silent drop.** Rejected: Varex failure mode.
+  - **Normalize `-1` → omit in Inference-X.** Rejected: runtime must not
+    invent backend semantics (N8).
+  - **Echo effective seed now.** Rejected: OS-4 owns `resolved`.
+  - **`deterministic: true` / `VLLM_BATCH_INVARIANT`.** Rejected: Phase C3.
+- Consequences:
+  - Positive: pinned seeds reach the sampler; silent-drop failure mode
+    superseded.
+  - Negative: clients may over-read identity tests; docs must stay honest (G5).
+  - Out of scope: OS-4 echo/`warnings`/`strict`/`count_prompt_tokens`; OS-5
+    suite hash; OS-6 advisor; Phase B AsyncLLM; Phase C replay/oracle.
+- DEC-047 compliance: wire field + concrete engine wiring only; no
+  `execution/`; no Engine Boundary change; no second backend.
+- Supersession: remains in force until a future DEC changes the sampling-input
+  contract. Phase C may *add* guarantees without rewriting G1–G5.
+
+### DEC-052
+- Date: 2026-08-04
+- Status: accepted
+- Title: `strict` may only convert substitution into rejection
+- Context: Phase A OS-4 (`docs/PHASE-A-EXECUTION-PLAN.md` §4, §9 C.7). Request
+  flag `strict: bool = false` must reject where the default clamps, without
+  becoming a general “do not batch / fail if cache cold / reject on revision
+  drift” runtime-policy switch for Phase B/C.
+- Problem: Loose wording (“strict changes response policy, never runtime
+  policy”) is too weak to enforce — rejection changes whether the request runs
+  at all. Without a sharp invariant, later phases will overload `strict` with
+  unrelated runtime policy.
+- Decision:
+  1. **`strict` may only convert a substitution into a rejection. It may never
+     change the substitution itself.** Under `strict`, outcomes partition into
+     `{rejected, executed exactly as asked}`. It never produces
+     `{executed differently}`.
+  2. **One predicate, two outcomes.** The condition that emits a default-mode
+     `ResponseWarning` with `type: "substituted"` is exactly the condition that
+     raises under `strict`. Verified by tests that enumerate both sets.
+  3. **Acceptance check:** for any request accepted under both modes, given an
+     identical seed, the completion content is byte-identical.
+  4. Phase B/C needs (batch isolation, cold-cache fail, revision pin, etc.) get
+     **their own fields**; they must not be folded into `strict`.
+- Alternatives considered:
+  - **Loose “response policy only” wording.** Rejected: not CI-checkable;
+    admits overload.
+  - **Let `strict` grow into a policy bundle.** Rejected: destroys the single
+    meaning that makes C.7 falsifiable.
+- Consequences:
+  - Positive: `strict` stays one thing; Phase B/C cannot smuggle runtime policy
+    through it without a new DEC.
+  - Negative: callers wanting broader “strict serving” need additional flags
+    later.
+- Compatibility: default / absent `strict` preserves today’s clamp-and-continue
+  behaviour aside from additive Effective Request surfaces (`resolved` /
+  `warnings`).
+- Supersession: remains in force until a future DEC explicitly widens `strict`.
+
+### DEC-053
+- Date: 2026-08-04
+- Status: accepted
+- Title: Pre-generation and post-generation metadata lifecycle (OS-4)
+- Context: Phase A OS-4 (`docs/PHASE-A-EXECUTION-PLAN.md` §4, §9 C.6;
+  `docs/REVIEW-2026-08-04-os4-architecture-freeze.md`). OS-4 surfaces the
+  Effective Request (`resolved`) and typed degradation (`warnings`) on the
+  streamed path as well as the non-streamed one, which adds an event to the SSE
+  order DEC-049 fixed. Phase B3 will add per-request timings and Phase C will
+  add replay metadata to the same stream.
+- Problem: Without a rule saying *which* metadata may be emitted *when*, each
+  later phase re-argues placement, and a fact emitted in the wrong phase is
+  either lost on the error path or physically un-emittable in its assigned slot.
+  Two loose framings were considered and rejected below.
+- Decision:
+  1. **Pre-generation phase.** A streamed response has a pre-generation metadata
+     phase that ends when the first token is sampled. An event MAY be emitted in
+     that phase **if and only if** every field it carries is fully determined and
+     immutable at the moment the effective request is finalized. A fact that can
+     change during or after generation MUST NOT be emitted in this phase.
+  2. **Cardinality.** The pre-generation phase contains **exactly one** event.
+     Adding a second is a modification of the platform requirement, not an
+     extension of it.
+  3. **Post-generation phase.** Events after the terminal event carry only facts
+     about what generation produced. The usage event is the last event before
+     `data: [DONE]`. **No event is emitted after the usage event** — OpenAI
+     documents the usage chunk as the one streamed before `[DONE]` and clients
+     use it as an end sentinel.
+  4. The rule is streaming-only. `ChatCompletionResponse` has no phases and
+     carries `resolved` and `warnings` in one body regardless.
+- Alternatives considered:
+  - **Anchor on "determined before the first token is sampled."** Rejected: it
+    is near-tautological (an emitted event is trivially determined before
+    emission), and it leaks. Queue/wait time is determined when the engine
+    begins processing — before the first token but *after* the prologue is
+    already on the wire — so that anchor classifies as pre-generation a fact
+    that cannot occupy the slot, splitting the Phase B3 timing class in two.
+  - **"One prologue event" as the invariant.** Rejected as the *invariant*:
+    cardinality constrains how many events there are and says nothing about what
+    may go in them. Kept as the current instantiation (decision 2) instead.
+  - **"One or more" cardinality in the normative wire text.** Rejected: it
+    weakens the exact-sequence assertion DEC-049/OS-2 explicitly protected, for
+    a second event that does not exist.
+  - **Carry `resolved` as a trailer before `[DONE]`.** Rejected: the facts are
+    determined at admission, a trailer is lost on the timeout path, the client
+    cannot act on a clamp until the generation it no longer wants has finished,
+    and it collides with the slot Phase B3 needs.
+- Consequences:
+  - **TTFT is measured from the first content event**, not the first SSE chunk.
+    `observability/middleware.py` is changed accordingly by OS-4;
+    `benchmarks/runner.py` already did this. Phase B3 inherits the definition.
+  - **`resolved ⊂ prologue`.** Two independent rules: *derivability* governs
+    what is in `resolved` (a field appears iff it exists on
+    `ChatCompletionRequest`, minus `messages` and the transport/policy controls);
+    *determinacy* governs what is in the prologue. The prologue is the superset.
+    A later phase must not conclude "prologue means `resolved`" and widen
+    `resolved` to fit something that is merely prologue-eligible — model
+    revision and any replay handle are the concrete cases.
+  - **Trace/request ids, if introduced, are minted at admission**, making them
+    pre-generation and therefore available on the error path — where DEC-049
+    emits an error event and `[DONE]` with no terminal and no usage event, and
+    where correlation matters most.
+  - **Warning-code registry.** The closed set OS-4 introduces:
+
+    | `type` | `code` | `field` |
+    |---|---|---|
+    | `substituted` | `max_tokens_clamped_to_context` | `max_tokens` |
+    | `substituted` | `max_tokens_clamped_to_kv_budget` | `max_tokens` |
+    | `degraded` | `prompt_tokens_estimated` | `messages` |
+    | `degraded` | `kv_gate_skipped` | — |
+    | `degraded` | `sequence_gate_skipped` | — |
+
+    Adding a code is a spec change. All OS-4 warnings are pre-generation; a
+    post-generation warning, if one ever exists, attaches to the usage event
+    rather than being retrofitted into the prologue.
+  - Negative: a first-party consumer that timestamped first-chunk-received must
+    be updated. Exactly one existed (`observability/middleware.py`).
+- Compatibility: additive. The pre-generation event carries `choices: []` and no
+  top-level `usage`, so `middleware._extract_sse_usage`, `benchmarks/runner.py`
+  and `playground/streaming.py` all skip it unmodified. DEC-049's event order is
+  extended at the head, never after the usage event.
+- Supersession: does not supersede DEC-049 — it constrains what may be added to
+  the order DEC-049 fixed. Remains in force until a future DEC changes the phase
+  boundary or the cardinality.
+
+### DEC-054
+- Date: 2026-08-04
+- Status: accepted
+- Title: Benchmark suite identity is a pinned content hash (OS-5)
+- Context: Phase A OS-5 (`docs/PHASE-A-EXECUTION-PLAN.md` §5;
+  `docs/REVIEW-2026-08-04-os5-os6-finalization.md` §0, §2). `suite_version` was
+  documented as a content hash of the prompt suite but nothing computed or
+  verified it; `benchmarks/runner.py:_load_suite` read the stored literal
+  verbatim. Direct computation confirmed the shipped literal already equals the
+  SHA-256 of the prompt list under a compact-JSON canonicalization.
+- Problem: Without a pinned canonical form and a verifier, the reproducibility
+  primitive is decorative — an edited prompt silently keeps the same
+  `suite_version`. The inverse risk is equally real: an implementer picks a
+  *different* canonicalization and manufactures a break that need not happen.
+- Decision:
+  1. **Canonical form (pinned):**
+     `sha256(json.dumps(prompts, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()`,
+     hashing `data["prompts"]` only. The `suite_version` key is excluded because
+     it lives inside the file it identifies.
+  2. **Hashed object is the parsed in-memory prompt collection.** File encoding,
+     whitespace, indentation, line endings, JSON object key order, and
+     serialization formatting are excluded from identity. Only prompt ordering
+     and prompt values participate.
+  3. **Stored bare hex** (no `sha256:` algorithm tag). The 25 existing results and
+     the shipped suite use bare hex.
+  4. **One shared canonicalizer** (`benchmarks/suite_identity.py`) owns identity.
+     Load-time verification and the `make suite-version` regeneration command both
+     call it. No duplicate hashing logic.
+  5. **Fail loud at load.** A missing `suite_version` key or a computed/stored
+     mismatch raises an actionable error naming `make suite-version` — not a bare
+     `KeyError`, not a silent accept.
+  6. **Characterization proof:** the computed digest of the shipped suite equals
+     `b47066414716cf4a0970adc790384f5173bd488cf80da47d28936b3d2ce5cfa4`.
+- Alternatives considered:
+  - **Hand-bumped semver (`v1`, `v2`).** Rejected: reproduces the current defect —
+    a self-declared string nothing verifies.
+  - **Git blob / commit hash.** Rejected: VCS-coupled, breaks outside a checkout,
+    over-invalidates on whitespace-only edits.
+  - **Signed manifest.** Rejected: wrong threat model; Phase A has no adversary,
+    the problem is accidental drift.
+  - **Algorithm-tagged storage now.** Deferred: bare hex retained; tagging is a
+    future forward-provision, not required to verify today.
+- Consequences:
+  - **This is verification, not migration.** The plan's migration premise (§457,
+    §808 item 2, §256, §889 — regenerated hash invalidating stored results) is
+    **void**. All 25 stored results remain comparable; nothing is regenerated;
+    there is no rollback hazard.
+  - The earlier reviews were correct that no `sha256` call existed; only the
+    inference "therefore the literal is arbitrary" is disproved.
+  - **Fail-loud posture does not contradict DEC-047 §4.** DEC-047's fail-open
+    applies to the serving admission path with a live client; the benchmark
+    harness is first-party tooling where a silent wrong number is worse than a
+    stopped run.
+  - Limitation (recorded, not fixed): byte-identity of canonical JSON; an NFC vs
+    NFD spelling of the same prompt hashes differently. The suite is ASCII; no
+    Unicode normalization is added.
+- Compatibility: additive. `benchmarks/prompts/standard.json` and
+  `benchmarks/results/*.json` are read-only under this change.
+- Supersession: supersedes the plan's OS-5 migration framing. Remains in force
+  until a future DEC changes the canonical form or the stored digest format.
+
+### DEC-055
+- Date: 2026-08-04
+- Status: accepted
+- Title: `suite_version` is a necessary but not sufficient comparability key (OS-5)
+- Context: Phase A OS-5 (`docs/REVIEW-2026-08-04-os5-os6-finalization.md` §1.1,
+  §4). Before this change `storage.py:latest_per_model()` selected the newest
+  result per model regardless of suite version, and `advisor.py:rank()` ranked
+  whatever it was handed — so a verified `suite_version` had no consumer.
+- Problem: Verification without a consumer is decorative. Two results are only
+  comparable if their benchmark *input* matches; ranking across suite versions
+  produces a silent wrong answer.
+- Decision:
+  1. **Option A — filter in storage.** `storage.py` filters results by the expected
+     `suite_version` **before** latest-per-model selection. Mixed-suite sets never
+     reach the advisor. `advisor.py` is not touched by OS-5 (it is OS-6's file;
+     touching it would break the plan's OS-5 ∥ OS-2/OS-3 parallelism).
+  2. **Empty ≠ mismatch.** "No benchmark results exist" and "results exist but none
+     match the requested `suite_version`" are distinct, distinguishable outcomes.
+  3. **Immutable and append-only.** Incomparable results are excluded by the
+     consumer, never deleted or rewritten. Rollback never requires rewriting
+     historical benchmark files.
+  4. **Necessary, not sufficient.** `suite_version` pins the benchmark *input*, not
+     the runtime that consumed it. It is one necessary comparability gate alongside
+     hardware (DEC-036) and does not by itself prove full provenance.
+- Alternatives considered:
+  - **Close it in `advisor.py`.** Rejected: creates OS-5/OS-6 shared-file
+    contention the plan claims does not exist; `latest_per_model()` is already the
+    function that decides which results reach the advisor.
+  - **Defer with reason (closure b).** Rejected in favour of closing it now — the
+    filter is small and the 25 stored results share one suite version, so it is a
+    no-op on existing data.
+- Consequences:
+  - Positive: a verified `suite_version` becomes a *used* key; the advisor cannot
+    rank across suites.
+  - Negative: comparability remains broader than this key (concurrency, runtime
+    version). Those stay out of scope; the ADR records `suite_version` as
+    necessary-not-sufficient so the field is not later mistaken for a full
+    provenance token.
+- Compatibility: additive. Existing `latest_per_model()` is preserved; suite-aware
+  selection is a new method. No historical result file is modified.
+- Supersession: remains in force until a future DEC adds further comparability
+  keys or a run manifest.
+
+### DEC-056
+- Date: 2026-08-05
+- Status: accepted
+- Title: Advisor score reflects measured quantities only (OS-6)
+- Context: Phase A OS-6 (`docs/REVIEW-2026-08-04-os5-os6-finalization.md`). The
+  advisor blended a constant `quant_score = 1.0` (weight `0.10`) into every score.
+  A constant term contributes an identical additive floor to all models, so the
+  score neither ranked nor discriminated on that axis — it silently inflated every
+  number and implied a quantization signal that did not exist.
+- Problem: A score that mixes measured components with a constant placeholder is
+  dishonest: it looks like a four-factor judgement but is a three-factor one plus a
+  fixed offset. It also risks being read as an absolute quality metric.
+- Decision:
+  1. **Delete `quant_score`.** The advisor scores only measured quantities:
+     throughput, warm TTFT, and VRAM headroom.
+  2. **Exact weights.** Re-normalise the surviving three weights to exact fractions
+     `4/9` (throughput), `1/3` (TTFT), `2/9` (VRAM). These preserve the prior
+     `0.40 : 0.30 : 0.20` ratio. The `* 100.0` display scale is retained.
+  3. **Weights are uncalibrated editorial preference**, not a reasoned inference
+     from data. They are not tuned against any outcome and may change.
+  4. **`viable` is the sole viability signal.** A VRAM-gated model collapses to
+     `score = 0.0`; a viable-but-worst model may also be `0.0`. The two are
+     distinguished only by `viable`, never by the score value. No consumer may
+     derive viability from the score.
+  5. **Score is a within-report ordinal** used only to rank viable models produced
+     from the same benchmark suite. Score is NOT portable across benchmark suites,
+     NOT portable across hardware, NOT portable across future weighting changes, and
+     NOT an absolute quality metric. Normalisation is relative to the models in the
+     same report: a single result yields a zero TTFT component, and adding a model
+     can change the scores of the others.
+  6. **Ranking preservation.** Because all three components are non-negative linear
+     terms, the relative ordering of viable models is preserved under the
+     re-normalisation (affine-invariant); only the absolute numbers shift.
+- Alternatives considered:
+  - **Keep `quant_score` as a real signal.** Rejected: no quantization data exists
+    to populate it; a placeholder that always returns `1.0` is not a signal.
+  - **Expose per-component sub-scores.** Rejected: out of scope; no component-score
+    API in Phase A.
+- Consequences:
+  - Positive: the score reflects only measured quantities; the floor is gone; the
+    weights are exact and honestly labelled.
+  - Negative: absolute score values change (they no longer carry the `+10` floor);
+    this is a display change only and does not reorder viable models.
+- Compatibility: advisor-owned. Runner, storage, schemas, and `suite_identity` must
+  never embed these weights. Historical benchmark JSON is unaffected.
+- Supersession: remains in force until a future DEC recalibrates or replaces the
+  scoring weights.
+
+### DEC-057
+- Date: 2026-08-05
+- Status: accepted
+- Title: The benchmark VRAM number is device occupancy, named `vram_device_occupied_gib` (OS-6)
+- Context: Phase A OS-6. `BenchmarkResult.peak_vram_delta_gb` and
+  `AdvisorResult.vram_gb` named the number a "delta", but the runner measures
+  `total − min(free)` across before/after snapshots — device-wide occupied VRAM,
+  not a per-process delta. The unit was already GiB despite the `_gb` suffix.
+- Problem: A field name that misdescribes its referent invites wrong reasoning
+  (e.g. treating device occupancy as this process's marginal footprint).
+- Decision:
+  1. **Canonical field `vram_device_occupied_gib`** on `BenchmarkResult`, replacing
+     `peak_vram_delta_gb` as the stored/serialised name.
+  2. **Measurement unchanged:** `total − min(free)` across before/after GPU
+     snapshots. The number does not change; only its name does.
+  3. **Deprecated aliases through Phase A:** `peak_vram_delta_gb` (BenchmarkResult)
+     and `vram_gb` (AdvisorResult) remain readable and, for `vram_gb`, remain in the
+     serialised advisor payload. Removing either alias REQUIRES a future ADR.
+  4. **Canonical precedence (permanent).** Canonical fields always take precedence
+     over deprecated aliases during deserialization. If both are present with
+     conflicting values, the canonical field wins. This precedence rule is permanent
+     unless superseded by a future ADR.
+  5. **`HardwareProfile.vram_total_gb` / `vram_free_gb` are unchanged.** They name a
+     device capacity/availability, not an occupancy measurement; renaming them is
+     out of scope for this change (frozen unchanged, not deferred).
+  6. **Known coupling recorded, not fixed.** `runner._check_vram_budget` compares the
+     occupancy number against an estimated engine footprint. That comparison logic is
+     left unchanged in this change; the coupling is documented here so a future change
+     can revisit it deliberately.
+- Alternatives considered:
+  - **Hard rename with a migration pass over stored JSON.** Rejected: historical
+    benchmark JSON must remain readable without migration and is never rewritten.
+  - **Rename HardwareProfile fields for symmetry.** Rejected: different referent;
+    out of scope.
+- Consequences:
+  - Positive: the field name matches what is measured; historical files still load.
+  - Negative: two names for one number exist through Phase A (canonical + alias).
+- Compatibility: additive alias. New JSON uses the canonical field; historical JSON
+  loads via the alias and is never rewritten.
+- Supersession: alias removal requires a future ADR; the canonical-precedence rule is
+  permanent unless a future ADR supersedes it.

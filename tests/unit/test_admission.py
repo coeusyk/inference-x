@@ -6,10 +6,12 @@ from typing import Optional
 
 import pytest
 
+from inference_x.engines.base import BaseEngine
 from inference_x.routing.admission import (
     AdmissionController,
     ContextTooLongError,
     EngineSaturatedError,
+    StrictModeViolationError,
 )
 from inference_x.schemas.chat import ChatCompletionRequest, ChatMessage
 from inference_x.schemas.model import ModelEntry
@@ -22,15 +24,36 @@ class _FakeTier:
     max_num_seqs: int = 1000  # high enough to not trip the seq-concurrency gate by default
 
 
-class _FakeEngine:
-    """Engine stub exposing the two optional attributes AdmissionController reads."""
+class _FakeEngine(BaseEngine):
+    """Engine stub: the declared count_prompt_tokens plus the optional KV attribute.
+
+    Subclasses BaseEngine because admit() takes one — count_prompt_tokens is a
+    declared capability since OS-4, not a getattr probe (DEC-047 §3).
+    """
 
     def __init__(self, prompt_tokens: int = 10, kv_capacity_tokens: Optional[int] = None) -> None:
         self._prompt_tokens = prompt_tokens
         self.kv_capacity_tokens = kv_capacity_tokens
 
+    async def generate(self, request):  # pragma: no cover - admission never generates
+        raise AssertionError("not used")
+
+    async def generate_stream(self, request):  # pragma: no cover - never used
+        raise AssertionError("not used")
+        yield
+
+    def is_healthy(self) -> bool:
+        return True
+
     def count_prompt_tokens(self, request: ChatCompletionRequest) -> int:
         return self._prompt_tokens
+
+
+class _NoTokenizerEngine(_FakeEngine):
+    """An engine with no tokenizer to ask — the BaseEngine default applies."""
+
+    def count_prompt_tokens(self, request: ChatCompletionRequest) -> int | None:
+        return None
 
 
 def _registry(**overrides) -> ModelRegistry:
@@ -160,12 +183,135 @@ class TestPromptTokenFallback:
     def test_falls_back_to_chars_over_4_when_engine_has_no_tokenizer(self):
         controller = AdmissionController(_registry(max_model_len=4))
 
-        class _NoTokenizerEngine:
-            pass
-
         # "hi" is 2 chars -> max(1, 2 // 4) == 1 prompt token, well under the cap.
         result = controller.admit("m", _req(max_tokens=1), _NoTokenizerEngine())
         assert result.effective_max_tokens == 1
+
+    def test_the_estimate_is_reported_rather_than_absorbed(self):
+        controller = AdmissionController(_registry(max_model_len=4))
+        result = controller.admit("m", _req(max_tokens=1), _NoTokenizerEngine())
+        estimated = [w for w in result.warnings if w.code == "prompt_tokens_estimated"]
+        assert len(estimated) == 1
+        assert estimated[0].type == "degraded"
+        assert estimated[0].field == "messages"
+
+
+class TestTypedDegradation:
+    """§9 C.8: a skipped gate must be distinguishable from a gate that passed.
+
+    Every one of these conditions must still ADMIT. Making degradation visible
+    is the change; making it reject would turn admission fail-closed, which
+    DEC-047 §4 forbids for this milestone.
+    """
+
+    def test_no_tier_reports_the_skipped_sequence_gate(self):
+        controller = AdmissionController(_registry())
+        result = controller.admit("m", _req(max_tokens=10), _FakeEngine(prompt_tokens=1))
+        assert "sequence_gate_skipped" in {w.code for w in result.warnings}
+
+    def test_no_kv_capacity_reports_the_skipped_kv_gate(self):
+        controller = AdmissionController(_registry())
+        result = controller.admit(
+            "m", _req(max_tokens=10), _FakeEngine(prompt_tokens=1, kv_capacity_tokens=None)
+        )
+        assert "kv_gate_skipped" in {w.code for w in result.warnings}
+
+    @pytest.mark.parametrize("strict", [False, True])
+    def test_no_degraded_condition_ever_rejects(self, strict: bool):
+        """DEC-047 §4 — fail open, under either strict value."""
+        controller = AdmissionController(_registry(max_model_len=4096))
+        result = controller.admit("m", _req(max_tokens=10, strict=strict), _NoTokenizerEngine())
+        assert result.effective_max_tokens == 10
+        assert {w.type for w in result.warnings} == {"degraded"}
+
+    def test_a_clean_request_carries_no_warnings(self):
+        """The empty case. A warning path that stops firing fails silently."""
+        controller = AdmissionController(
+            _registry(max_model_len=4096), tier=_FakeTier(max_model_len_cap=4096)
+        )
+        result = controller.admit(
+            "m", _req(max_tokens=10), _FakeEngine(prompt_tokens=1, kv_capacity_tokens=100_000)
+        )
+        assert result.warnings == ()
+
+
+class TestStrictMode:
+    """DEC-052: strict may only convert a substitution into a rejection."""
+
+    def test_strict_rejects_where_the_default_clamps_on_context(self):
+        controller = AdmissionController(_registry(max_model_len=4096))
+        engine = _FakeEngine(prompt_tokens=10)
+        req = dict(max_tokens=4000, max_context_tokens=200)
+
+        lenient = controller.admit("m", _req(**req), engine)
+        assert lenient.effective_max_tokens == 190
+        assert "max_tokens_clamped_to_context" in {w.code for w in lenient.warnings}
+
+        with pytest.raises(StrictModeViolationError):
+            controller.admit("m", _req(strict=True, **req), engine)
+
+    def test_strict_rejects_where_the_default_clamps_on_kv_budget(self):
+        engine = _FakeEngine(prompt_tokens=10, kv_capacity_tokens=100)
+
+        # A fresh controller per call: admit() reserves against the KV tracker, so
+        # reusing one would saturate the pool and mask the strict check.
+        lenient = AdmissionController(_registry(max_model_len=4096)).admit(
+            "m", _req(max_tokens=4000), engine
+        )
+        assert "max_tokens_clamped_to_kv_budget" in {w.code for w in lenient.warnings}
+
+        with pytest.raises(StrictModeViolationError):
+            AdmissionController(_registry(max_model_len=4096)).admit(
+                "m", _req(max_tokens=4000, strict=True), engine
+            )
+
+    def test_strict_rejection_set_equals_the_substituted_warning_set(self):
+        """DEC-052 §2 — one predicate, two outcomes, enumerated not sampled.
+
+        Every condition that emits a `substituted` warning by default must raise
+        under strict, and nothing else may. Sampling two cases would pass while
+        the two sets drifted apart.
+        """
+        cases = {
+            "max_tokens_clamped_to_context": (
+                dict(max_tokens=4000, max_context_tokens=200),
+                _FakeEngine(prompt_tokens=10),
+            ),
+            "max_tokens_clamped_to_kv_budget": (
+                dict(max_tokens=4000),
+                _FakeEngine(prompt_tokens=10, kv_capacity_tokens=100),
+            ),
+        }
+
+        warns_by_default: set[str] = set()
+        rejects_under_strict: set[str] = set()
+
+        for code, (kwargs, engine) in cases.items():
+            controller = AdmissionController(_registry(max_model_len=4096))
+            result = controller.admit("m", _req(**kwargs), engine)
+            warns_by_default |= {
+                w.code for w in result.warnings if w.type == "substituted"
+            }
+
+            controller = AdmissionController(_registry(max_model_len=4096))
+            try:
+                controller.admit("m", _req(strict=True, **kwargs), engine)
+            except StrictModeViolationError:
+                rejects_under_strict.add(code)
+
+        assert warns_by_default == rejects_under_strict == set(cases)
+
+    def test_strict_does_not_change_an_admitted_result(self):
+        """Accepted under both modes -> identical AdmissionResult numbers."""
+        engine = _FakeEngine(prompt_tokens=10, kv_capacity_tokens=100_000)
+        lenient = AdmissionController(_registry(max_model_len=4096)).admit(
+            "m", _req(max_tokens=100), engine
+        )
+        strict = AdmissionController(_registry(max_model_len=4096)).admit(
+            "m", _req(max_tokens=100, strict=True), engine
+        )
+        assert lenient.effective_max_tokens == strict.effective_max_tokens
+        assert lenient.reserved_tokens == strict.reserved_tokens
 
 
 class TestSequenceConcurrencyGate:

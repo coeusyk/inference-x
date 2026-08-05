@@ -4,10 +4,22 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
+from typing import Literal, NamedTuple
 
 from inference_x.benchmarks.schemas import BenchmarkResult
 
 DEFAULT_RESULTS_DIR = "benchmarks/results"
+
+
+class SuiteSelection(NamedTuple):
+    """Outcome of suite-aware selection (DEC-055).
+
+    `status` distinguishes an empty store from a suite mismatch so callers never
+    present the two as the same thing. `latest` is populated only when `ok`.
+    """
+
+    status: Literal["empty", "suite_mismatch", "ok"]
+    latest: dict[str, BenchmarkResult]
 
 
 class ResultStore:
@@ -47,14 +59,39 @@ class ResultStore:
                 continue
         return results
 
-    def latest_per_model(
-        self, output_dir: str = DEFAULT_RESULTS_DIR
+    @staticmethod
+    def _latest_per_model(
+        results: list[BenchmarkResult],
     ) -> dict[str, BenchmarkResult]:
-        """Return the most recent BenchmarkResult for each model name."""
-        all_r = self.all_results(output_dir)
         latest: dict[str, BenchmarkResult] = {}
-        for result in all_r:
+        for result in results:
             existing = latest.get(result.model_name)
             if existing is None or result.timestamp > existing.timestamp:
                 latest[result.model_name] = result
         return latest
+
+    def latest_per_model(
+        self, output_dir: str = DEFAULT_RESULTS_DIR
+    ) -> dict[str, BenchmarkResult]:
+        """Return the most recent BenchmarkResult for each model name."""
+        return self._latest_per_model(self.all_results(output_dir))
+
+    def latest_per_model_for_suite(
+        self,
+        expected_suite_version: str,
+        output_dir: str = DEFAULT_RESULTS_DIR,
+    ) -> SuiteSelection:
+        """Filter by `expected_suite_version`, then select latest per model.
+
+        Filtering happens *before* latest-per-model so mixed-suite sets can never
+        reach the advisor (DEC-055, Option A). Non-matching result files are left
+        untouched on disk; they are excluded, never deleted. Distinguishes an
+        empty store from a suite mismatch.
+        """
+        all_r = self.all_results(output_dir)
+        if not all_r:
+            return SuiteSelection("empty", {})
+        matching = [r for r in all_r if r.suite_version == expected_suite_version]
+        if not matching:
+            return SuiteSelection("suite_mismatch", {})
+        return SuiteSelection("ok", self._latest_per_model(matching))

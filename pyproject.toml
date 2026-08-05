@@ -1,6 +1,6 @@
 [project]
 name = "inferencex"
-version = "0.1.0"
+version = "0.3.0"
 description = "Self-hosted LLM inference platform with smart routing and observability"
 requires-python = ">=3.13"
 dependencies = [
@@ -25,6 +25,8 @@ dev = [
     "pytest-asyncio>=0.25.0",
     "pytest-repeat>=0.9.3",
     "httpx2>=2.0",
+    "ruff>=0.16.1",
+    "mypy>=2.3.0",
 ]
 
 [tool.pytest.ini_options]
@@ -37,6 +39,43 @@ filterwarnings = [
     # WSL / CPU-only test hosts without NVML
     "ignore:Can't initialize NVML:UserWarning",
 ]
+
+[tool.ruff]
+target-version = "py313"
+
+[tool.ruff.lint]
+# Deliberately small (DEC-048): the rule set the tree already passes, so that
+# landing CI required no source edits. Widening it is a separate change.
+select = ["E4", "E7", "E9", "F"]
+ignore = [
+    # Deliberate: api/main.py applies the vLLM platform patch before importing
+    # any vLLM-touching module, and scripts/ set sys.path before importing.
+    "E402",
+    # Pre-existing occurrences, deferred rather than endorsed. Enabling either
+    # requires editing source, which OS-1 forbids.
+    "F401",
+    "F841",
+]
+
+[tool.mypy]
+python_version = "3.13"
+
+# Third-party packages shipping no type information. Not a code-quality
+# suppression — these say nothing about inference_x's own types.
+[[tool.mypy.overrides]]
+module = ["yaml", "pynvml"]
+ignore_missing_imports = true
+
+# Type-check baseline (DEC-048). Closed, enumerated list — no wildcards, so a
+# module added later is checked by default. This list must not grow during
+# Phase A; growth is a review finding, not a routine edit.
+[[tool.mypy.overrides]]
+module = [
+    "inference_x.engines.vllm_engine",  # 10 — vLLM's LLM is untyped
+    "inference_x.engines.driver",       # 7  — Optional narrowing; deleted in Phase B1
+    "inference_x.api.deps",             # 2  — composition-root arg types
+]
+ignore_errors = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/inference_x"]

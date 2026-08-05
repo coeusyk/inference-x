@@ -23,6 +23,7 @@ from inference_x.schemas.chat import (
     ChatCompletionResponse,
     ChatCompletionUsage,
     ChatMessage,
+    ChatStreamChunk,
 )
 from inference_x.schemas.model import ModelEntry
 from inference_x.services.chat_service import ChatService
@@ -54,8 +55,15 @@ class _StubEngine(BaseEngine):
         )
 
     async def generate_stream(self, request: ChatCompletionRequest):
-        yield "hello "
-        yield "world"
+        yield ChatStreamChunk(content="hello ")
+        yield ChatStreamChunk(content="world")
+        yield ChatStreamChunk(
+            content="",
+            finish_reason="stop",
+            usage=ChatCompletionUsage(
+                prompt_tokens=4, completion_tokens=7, total_tokens=11
+            ),
+        )
 
     def is_healthy(self) -> bool:
         return self._healthy
@@ -397,7 +405,7 @@ class TestObservabilityMiddleware:
 
             async def generate_stream(self, req: ChatCompletionRequest):
                 raise RuntimeError("boom")
-                yield ""
+                yield ChatStreamChunk(content="")
 
             def is_healthy(self) -> bool:
                 return True
@@ -427,8 +435,15 @@ class TestObservabilityMiddleware:
         assert '"content":"world"' in resp.text
         assert resp.text.rstrip().endswith("data: [DONE]")
 
-    def test_streaming_chat_request_records_ttft_and_tokens_once(self, obs_client):
-        """Exactly one RequestRecord per streamed request, with TTFT/tokens populated."""
+    def test_streaming_without_include_usage_records_no_token_counts(self, obs_client):
+        """No usage event -> no token figures. Absent, never estimated (DEC-049).
+
+        This is the absence half of OS-2's metric truth: before DEC-049 this
+        assertion read ``rec.completion_tokens == 2``, which was the whitespace
+        word count of "hello " + "world" — a number that had nothing to do with
+        tokens. Recording nothing is correct. Do not "fix" this by reinstating a
+        fallback estimate in the middleware.
+        """
         client, recorder = obs_client
         payload = {**self._chat_payload, "stream": True}
         resp = client.post("/v1/chat/completions", json=payload)
@@ -439,13 +454,81 @@ class TestObservabilityMiddleware:
 
         rec = chat_records[0]
         assert rec.error is False
+        # Timing is still observable without a usage event.
         assert rec.ttft_ms is not None and rec.ttft_ms >= 0
-        # "hello " + "world" -> 2 whitespace-separated words (word-count approximation).
-        assert rec.completion_tokens == 2
-        assert rec.total_tokens == 2
-        assert rec.tokens_per_sec is not None and rec.tokens_per_sec > 0
-        # Non-streaming token extraction never ran for this request.
+        # Token figures are absent — specifically None, not zero.
+        assert rec.completion_tokens is None
+        assert rec.total_tokens is None
         assert rec.prompt_tokens is None
+        assert rec.tokens_per_sec is None
+
+    def test_streaming_with_include_usage_records_engine_counts(self, obs_client):
+        """include_usage -> the recorded counts are the engine's, not an estimate."""
+        client, recorder = obs_client
+        payload = {
+            **self._chat_payload,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+        resp = client.post("/v1/chat/completions", json=payload)
+        assert resp.status_code == 200
+
+        chat_records = [r for r in recorder.storage.all() if r.path == "/v1/chat/completions"]
+        assert len(chat_records) == 1
+
+        rec = chat_records[0]
+        assert rec.error is False
+        assert rec.ttft_ms is not None and rec.ttft_ms >= 0
+        # The stub engine accounts 7 completion tokens for "hello " + "world";
+        # the whitespace word count would have been 2.
+        assert rec.completion_tokens == 7
+        assert rec.prompt_tokens == 4
+        assert rec.total_tokens == 11
+        assert rec.tokens_per_sec is not None and rec.tokens_per_sec > 0
+
+    def test_ttft_is_anchored_to_the_first_content_event(self):
+        """DEC-053: the pre-generation event must not enter the measurement.
+
+        Left on the first raw chunk, TTFT would silently absorb admission latency
+        and every /v1/metrics figure would stop being comparable with the ones
+        recorded before the event existed — a discontinuity introduced by
+        accident rather than by decision.
+        """
+        from inference_x.observability.middleware import _has_content_delta
+
+        pre_generation = (
+            b'data: {"id":"c","object":"chat.completion.chunk","choices":[],'
+            b'"resolved":{"model":"m"},"warnings":[]}'
+        )
+        content = (
+            b'data: {"id":"c","object":"chat.completion.chunk",'
+            b'"choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}'
+        )
+        terminal = (
+            b'data: {"id":"c","object":"chat.completion.chunk",'
+            b'"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}'
+        )
+        usage = (
+            b'data: {"id":"c","object":"chat.completion.chunk","choices":[],'
+            b'"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}'
+        )
+
+        assert _has_content_delta(pre_generation) is False
+        assert _has_content_delta(content) is True
+        assert _has_content_delta(terminal) is False
+        assert _has_content_delta(usage) is False
+        assert _has_content_delta(b"data: [DONE]") is False
+
+    def test_pre_generation_event_yields_no_token_figure(self):
+        """C4: the usage extractor must ignore it — no `usage` key to find."""
+        from inference_x.observability.middleware import _extract_sse_usage
+
+        pre_generation = (
+            b'data: {"id":"c","object":"chat.completion.chunk","choices":[],'
+            b'"resolved":{"model":"m"},"warnings":[{"type":"degraded",'
+            b'"code":"kv_gate_skipped","message":"x","field":null}]}'
+        )
+        assert _extract_sse_usage(pre_generation) is None
 
     def test_streaming_mid_stream_engine_failure_still_records_partial_progress(
         self, obs_client
@@ -463,7 +546,7 @@ class TestObservabilityMiddleware:
                 raise RuntimeError("boom")
 
             async def generate_stream(self, req: ChatCompletionRequest):
-                yield "partial "
+                yield ChatStreamChunk(content="partial ")
                 raise RuntimeError("boom mid-stream")
 
             def is_healthy(self) -> bool:
@@ -486,5 +569,9 @@ class TestObservabilityMiddleware:
 
         chat_records = [r for r in recorder.storage.all() if r.path == "/v1/chat/completions"]
         assert chat_records
-        assert chat_records[-1].completion_tokens == 1
+        # Partial *timing* progress is still recorded. Token counts are not: the
+        # stream died before any usage event, and a truncated stream has no
+        # engine-accounted count to report (DEC-049). Previously this asserted
+        # completion_tokens == 1, the word count of the one delta that arrived.
         assert chat_records[-1].ttft_ms is not None
+        assert chat_records[-1].completion_tokens is None

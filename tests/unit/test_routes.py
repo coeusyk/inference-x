@@ -20,6 +20,7 @@ from inference_x.schemas.chat import (
     ChatCompletionResponse,
     ChatCompletionUsage,
     ChatMessage,
+    ChatStreamChunk,
 )
 from inference_x.schemas.model import ModelEntry
 from inference_x.services.chat_service import ChatService
@@ -53,8 +54,15 @@ class _StubEngine(BaseEngine):
         )
 
     async def generate_stream(self, request: ChatCompletionRequest):
-        yield "Hello "
-        yield "from stub"
+        yield ChatStreamChunk(content="Hello ")
+        yield ChatStreamChunk(content="from stub")
+        yield ChatStreamChunk(
+            content="",
+            finish_reason="stop",
+            usage=ChatCompletionUsage(
+                prompt_tokens=2, completion_tokens=3, total_tokens=5
+            ),
+        )
 
     def is_healthy(self) -> bool:
         return self._healthy
@@ -87,7 +95,8 @@ class _AdmissionAwareEngine(BaseEngine):
         )
 
     async def generate_stream(self, request: ChatCompletionRequest):
-        yield "ok"
+        yield ChatStreamChunk(content="ok")
+        yield ChatStreamChunk(content="", finish_reason="stop")
 
     def is_healthy(self) -> bool:
         return self._healthy
@@ -224,7 +233,7 @@ class TestChatCompletionsEndpoint:
 
             async def generate_stream(self, request: ChatCompletionRequest):
                 raise RuntimeError("inference exploded")
-                yield ""
+                yield ChatStreamChunk(content="")
 
             def is_healthy(self) -> bool:
                 return True
@@ -257,6 +266,34 @@ class TestChatCompletionsEndpoint:
             assert resp.status_code == 400
             body = resp.json()
             assert body["error"]["type"] == "invalid_request_error"
+        app.dependency_overrides.clear()
+
+    def test_strict_rejects_with_400_where_the_default_clamps(self):
+        """§9 C.7: strict: true rejects where the default clamps; both covered.
+
+        DEC-052 — strict may only convert a substitution into a rejection, so the
+        default path here must still succeed and report the substitution rather
+        than hiding it.
+        """
+        engine = _AdmissionAwareEngine(prompt_tokens=50)
+        registry = _make_stub_registry()
+        router = TaskRouter(registry, _TEST_MODEL)
+        pool = EnginePool({_TEST_MODEL: engine})
+        svc = ChatService(engine_pool=pool, registry=registry, router=router)
+        app.dependency_overrides[get_chat_service] = lambda: svc
+        with TestClient(app) as c:
+            payload = dict(self._payload)
+            payload["max_context_tokens"] = 200
+            payload["max_tokens"] = 4000
+
+            lenient = c.post("/v1/chat/completions", json=payload)
+            assert lenient.status_code == 200
+            codes = {w["code"] for w in lenient.json()["warnings"]}
+            assert "max_tokens_clamped_to_context" in codes
+
+            strict = c.post("/v1/chat/completions", json={**payload, "strict": True})
+            assert strict.status_code == 400
+            assert strict.json()["error"]["type"] == "invalid_request_error"
         app.dependency_overrides.clear()
 
     def test_kv_saturation_returns_429_with_retry_after(self):

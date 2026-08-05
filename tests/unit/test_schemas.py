@@ -15,6 +15,8 @@ from inference_x.schemas.chat import (
     ChatCompletionResponse,
     ChatCompletionUsage,
     ChatMessage,
+    ResolvedRequest,
+    ResponseWarning,
 )
 from inference_x.schemas.model import ModelEntry
 from inference_x.services.chat_service import ChatService
@@ -139,6 +141,37 @@ class TestChatCompletionRequest:
         )
         assert req.max_tokens == 4096
 
+    def test_seed_integer_is_accepted(self):
+        req = ChatCompletionRequest(
+            model="m",
+            messages=[ChatMessage(role="user", content="x")],
+            seed=42,
+        )
+        assert req.seed == 42
+
+    def test_seed_minus_one_is_accepted(self):
+        req = ChatCompletionRequest(
+            model="m",
+            messages=[ChatMessage(role="user", content="x")],
+            seed=-1,
+        )
+        assert req.seed == -1
+
+    def test_seed_defaults_to_none(self):
+        req = ChatCompletionRequest(
+            model="m",
+            messages=[ChatMessage(role="user", content="x")],
+        )
+        assert req.seed is None
+
+    def test_seed_non_integer_raises(self):
+        with pytest.raises(ValidationError):
+            ChatCompletionRequest(
+                model="m",
+                messages=[ChatMessage(role="user", content="x")],
+                seed="not-an-int",  # type: ignore[arg-type]
+            )
+
 
 class TestSchemaConstraintsViaAPI:
     """Verify that out-of-range values produce HTTP 422 when sent through the API."""
@@ -197,6 +230,20 @@ class TestSchemaConstraintsViaAPI:
         resp = client.post("/v1/chat/completions", json=self._base_payload())
         assert resp.status_code == 200
 
+    def test_seed_integer_returns_200(self):
+        client = self._client()
+        payload = self._base_payload()
+        payload["seed"] = 42
+        resp = client.post("/v1/chat/completions", json=payload)
+        assert resp.status_code == 200
+
+    def test_seed_non_integer_returns_422(self):
+        client = self._client()
+        payload = self._base_payload()
+        payload["seed"] = "nope"
+        resp = client.post("/v1/chat/completions", json=payload)
+        assert resp.status_code == 422
+
 
 class TestChatCompletionResponse:
     def _make_response(self) -> ChatCompletionResponse:
@@ -235,3 +282,58 @@ class TestChatCompletionResponse:
         data = resp.model_dump()
         assert "choices" in data
         assert "usage" in data
+
+
+class TestEffectiveRequestSurfaces:
+    """OS-4: `resolved`, `warnings` and `strict` — the wire shape of substitution."""
+
+    # The two exclusion classes from the derivability rule: message content, and
+    # the transport/policy controls. Everything else must appear in `resolved`.
+    _EXCLUDED = {"messages", "stream", "stream_options", "strict"}
+
+    def test_resolved_field_set_is_derivable_from_the_request(self):
+        """The rule is enforced here rather than in review.
+
+        A field added to ChatCompletionRequest later fails this test, forcing an
+        explicit decision about whether it belongs in `resolved` — which is the
+        only thing stopping the block becoming a curated junk drawer.
+        """
+        assert set(ResolvedRequest.model_fields) == (
+            set(ChatCompletionRequest.model_fields) - self._EXCLUDED
+        )
+
+    def test_strict_defaults_to_false_and_is_last(self):
+        assert ChatCompletionRequest.model_fields["strict"].default is False
+        assert list(ChatCompletionRequest.model_fields)[-1] == "strict"
+
+    def test_non_boolean_strict_is_rejected(self):
+        with pytest.raises(ValidationError):
+            ChatCompletionRequest(
+                model="m",
+                messages=[ChatMessage(role="user", content="hi")],
+                strict="yes-please",
+            )
+
+    def test_response_defaults_are_additive(self):
+        """C1/C2: existing construction keeps working, and `warnings` is empty
+        rather than absent — an absent collection reads as 'not implemented'."""
+        resp = ChatCompletionResponse(
+            model="m",
+            choices=[
+                ChatCompletionChoice(
+                    index=0,
+                    message=ChatCompletionMessage(content="ok"),
+                    finish_reason="stop",
+                )
+            ],
+            usage=ChatCompletionUsage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+        )
+        assert resp.resolved is None
+        assert resp.warnings == []
+        assert "warnings" in resp.model_dump()
+
+    def test_warning_type_is_a_closed_two_member_set(self):
+        for ok in ("substituted", "degraded"):
+            assert ResponseWarning(type=ok, code="c", message="m").type == ok
+        with pytest.raises(ValidationError):
+            ResponseWarning(type="informational", code="c", message="m")

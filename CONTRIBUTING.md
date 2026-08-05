@@ -35,7 +35,14 @@ If your change would violate a decision in `DECISIONS.md` or cross a file bounda
 
 - Authentication / multi-user support (DEC-DEFER-01 — out of scope for local-only deployment)
 - Rate limiting (DEC-DEFER-02)
-- Non-vLLM inference backends at this time
+- Implementing a second inference backend, or introducing backend-neutral
+  packages/contracts (e.g. `inference_x/execution/`), without a dedicated
+  accepted change that authorizes a concrete second implementation (DEC-047).
+  vLLM is the only supported backend today; backend plurality is a long-term
+  architectural direction, not a scheduled deliverable.
+  Thin Engine Boundary hygiene (for example, an engine factory in
+  `engines/registry.py` and durable capability declarations on `BaseEngine`)
+  is in scope when it aligns with the current accepted architecture.
 - Breaking changes to the OpenAI-compatible API contract
 - New playground tabs or major UI additions without a prior discussion
 
@@ -51,10 +58,16 @@ cd inference-x
 uv sync
 cp .env.example .env
 uv run pytest tests/unit -q   # must pass without a GPU
+uv run ruff check .           # lint
+uv run mypy src/              # type check
 ```
 
 > `uv` is required. Do not use bare `pip` or `python` — vLLM and its CUDA wheels are
 > managed through the `.venv` created by `uv sync`.
+
+Those three commands are exactly what CI runs, so a green local run means a green
+CI run. Lint and type rules are configured in `pyproject.toml`; the reasoning behind
+the rule selection and the type baseline is DEC-048. Neither command formats code.
 
 For changes that require a GPU, test on WSL2 Ubuntu. That is the supported runtime.
 Non-WSL2 Linux may work but is not the primary target.
@@ -73,12 +86,36 @@ Describe:
 For bugs: include the exact error, the command that produced it, your GPU model, and
 the output of `nvidia-smi`.
 
-### 2. One concern per pull request
+### 2. Branch from `develop`, PR into `develop`
+
+Long-lived branches: `develop` (integration) and `main` (release).
+
+```bash
+git fetch origin
+git checkout develop
+git pull --ff-only
+git checkout -b feat/<short-topic>   # or fix/…, chore/…, docs/…
+```
+
+Push the feature branch and open a pull request **into `develop`**. Do not push
+feature commits directly to `develop` or `main`.
+
+**GitHub enforcement (do not bypass):**
+
+| Protection | Applies to | Effect |
+|---|---|---|
+| Ruleset [Protect Main](https://github.com/coeusyk/inference-x/rules/18108093) | `main` (default branch) | No direct create/delete/force-push; PR required; **code owner** review required |
+| Classic protection + required check **`checks`** | `develop` and `main` | Red CI blocks merge |
+
+Agents: follow the tooling and branch sections in `AGENTS.md` / `CLAUDE.md`
+(`rtk proxy` for git mutations; context-mode for read-only gates).
+
+### 3. One concern per pull request
 
 Keep PRs focused. A bug fix and an unrelated cleanup in the same PR will be asked to
 split. The diff should be readable in one sitting.
 
-### 3. Follow the file boundaries
+### 4. Follow the file boundaries
 
 From `AGENTS.md`:
 
@@ -86,7 +123,7 @@ From `AGENTS.md`:
 |---|---|
 | `src/inference_x/api/` | FastAPI routes, deps, error mapping — nothing else |
 | `src/inference_x/services/` | Orchestration and use-case logic |
-| `src/inference_x/engines/` | Engine interfaces and vLLM implementation |
+| `src/inference_x/engines/` | Engine interfaces, registry/factory, and concrete inference implementations (vLLM today) |
 | `src/inference_x/routing/` | Model selection policies |
 | `src/inference_x/observability/` | Middleware, metrics, storage, exporters |
 | `src/inference_x/schemas/` | Request/response models only |
@@ -99,7 +136,7 @@ From `AGENTS.md`:
 Route handlers must stay thin. Business logic goes in services. If you find yourself
 adding a database call or complex branching to a route handler, it belongs in a service.
 
-### 4. Tests
+### 5. Tests
 
 - Unit tests for any new logic in `src/inference_x/`
 - Unit tests do not require a GPU — mock the engine if needed
@@ -109,14 +146,14 @@ adding a database call or complex branching to a route handler, it belongs in a 
 The current count is 286 passing. A PR that reduces this number will not be merged
 unless the removed tests were covering deleted code.
 
-### 5. Record non-obvious decisions
+### 6. Record non-obvious decisions
 
 If your PR makes a choice that isn't obvious from the code — a tradeoff, a deliberate
 limitation, a rejected alternative — add a `DEC-XXX` entry to `docs/DECISIONS.md`
 using the existing template. This is how the project avoids relitigating settled
 questions.
 
-### 6. Code style
+### 7. Code style
 
 - Python 3.13+ — use modern type hints (`str | None`, not `Optional[str]`)
 - `from __future__ import annotations` at the top of every file
@@ -130,6 +167,8 @@ questions.
 
 ```
 [ ] uv run pytest tests/unit -q — all passing
+[ ] uv run ruff check . — clean
+[ ] uv run mypy src/ — clean (do not add modules to the DEC-048 baseline)
 [ ] No new warnings in pytest output
 [ ] File boundaries respected (see AGENTS.md)
 [ ] Non-obvious decisions recorded in docs/DECISIONS.md

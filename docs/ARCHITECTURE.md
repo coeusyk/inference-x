@@ -2,7 +2,28 @@
 
 ## Purpose
 
-InferenceX is a self-hosted LLM inference platform built incrementally on top of vLLM. The project starts with one stable OpenAI-compatible chat-completions API, then grows by adding model routing, observability, and a playground without forcing large rewrites.
+InferenceX is a self-hosted inference runtime with an OpenAI-compatible API.
+
+Today, vLLM is the sole supported inference backend.
+
+The runtime owns execution policy while inference backends remain replaceable
+implementation details over the lifetime of the project (DEC-047).
+
+The project evolves incrementally from a stable chat-completions runtime toward
+a more capable local inference platform without requiring large architectural
+rewrites.
+
+## Document authority
+
+Normative architecture lives in, in this order:
+
+1. `docs/DECISIONS.md`
+2. `docs/ARCHITECTURE.md`
+3. `CONTRIBUTING.md`
+4. `AGENTS.md`
+
+`docs/UNDERSTANDING-INFERENCE-X.md` describes the current codebase. Architecture
+review documents under `docs/` are historical artifacts, not policy.
 
 ## Architecture goals
 
@@ -42,6 +63,17 @@ The engine layer defines how inference is performed:
 - later support for additional engines if needed
 
 The rest of the system should depend on the engine interface, not directly on vLLM internals.
+
+#### Engine Boundary (DEC-047)
+
+- The runtime owns architectural / execution policy; backends own inference execution.
+- vLLM (`engines/vllm_engine.py`) is the only concrete backend today.
+- App construction should go through `engines/registry` (`create_engine`); route
+  handlers must not import concrete engines.
+- Backend-neutral abstractions must not be introduced until justified by at least
+  two concrete backend implementations. Do not add `inference_x/execution/` ahead
+  of that. Thin factory and durable capability declarations are hygiene, not a
+  gate on AsyncLLM (Phase B).
 
 ### 4. Routing layer
 
@@ -117,7 +149,8 @@ Contains typed request and response models only.
 Contains use-case-oriented orchestration code.
 
 #### `engines/`
-Contains the abstract engine contract and concrete inference implementations.
+Contains the abstract engine contract, construction registry/factory, and
+concrete inference implementations.
 
 #### `routing/`
 Contains model-selection policies and future fallback logic.

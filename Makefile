@@ -78,3 +78,8 @@ benchmark-all:
 .PHONY: advise
 advise:
 	uv run python scripts/advise.py
+
+# Compute the benchmark suite_version digest (add --write to update the file)
+.PHONY: suite-version
+suite-version:
+	uv run python scripts/suite_version.py

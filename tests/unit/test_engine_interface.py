@@ -9,6 +9,7 @@ from inference_x.schemas.chat import (
     ChatCompletionResponse,
     ChatCompletionUsage,
     ChatMessage,
+    ChatStreamChunk,
 )
 
 
@@ -34,7 +35,8 @@ class _StubEngine(BaseEngine):
         )
 
     async def generate_stream(self, request: ChatCompletionRequest):
-        yield "stub response"
+        yield ChatStreamChunk(content="stub response")
+        yield ChatStreamChunk(content="", finish_reason="stop")
 
     def is_healthy(self) -> bool:
         return self._healthy
@@ -69,4 +71,6 @@ class TestBaseEngineContract:
             messages=[ChatMessage(role="user", content="hi")],
         )
         chunks = [chunk async for chunk in engine.generate_stream(req)]
-        assert chunks == ["stub response"]
+        assert [c.content for c in chunks if c.content] == ["stub response"]
+        # The contract requires a terminal chunk carrying a finish reason.
+        assert chunks[-1].finish_reason == "stop"

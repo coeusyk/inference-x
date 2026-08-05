@@ -10,7 +10,11 @@ from concurrent.futures import TimeoutError as FuturesTimeoutError
 from typing import Any
 
 from inference_x.engines.base import BaseEngine
-from inference_x.engines.driver import EngineDriver, EngineDriverDeadError
+from inference_x.engines.driver import (
+    EngineDriver,
+    EngineDriverDeadError,
+    derive_terminal_metadata,
+)
 from inference_x.utils.cuda_env import ensure_vllm_runtime_env
 from inference_x.utils.vllm_pool_config import scale_model_config_for_pool
 from inference_x.schemas.chat import (
@@ -18,7 +22,7 @@ from inference_x.schemas.chat import (
     ChatCompletionMessage,
     ChatCompletionRequest,
     ChatCompletionResponse,
-    ChatCompletionUsage,
+    ChatStreamChunk,
 )
 
 logger = logging.getLogger(__name__)
@@ -465,11 +469,18 @@ class VLLMEngine(BaseEngine):
     def count_prompt_tokens(self, request: ChatCompletionRequest) -> int:
         """Real prompt token count via this model's tokenizer, for admission control.
 
-        Accessed via getattr() by routing/admission.py (BaseEngine doesn't declare
-        this — same optional-attribute pattern as kv_capacity_tokens in
-        api/routes/metrics.py). Falls back to a chars/4 estimate — the same
-        heuristic AdmissionController uses for engines without a tokenizer at
-        all — if tokenization fails for any reason.
+        Overrides the BaseEngine capability declared per DEC-047 §3, which
+        routing/admission.py now calls directly rather than discovering with
+        getattr. Narrowing the declared ``int | None`` to ``int`` is deliberate:
+        this engine always produces a number, falling back to a chars/4 estimate
+        — the same heuristic AdmissionController uses for engines with no
+        tokenizer at all — if tokenization fails for any reason.
+
+        A consequence worth naming: because this returns an estimate rather than
+        None on tokenizer failure, admission cannot tell that path from a real
+        count and emits no `prompt_tokens_estimated` warning for it. Recorded as a
+        known limitation of OS-4 rather than changed here — the engine's own
+        fallback contract is out of that change's scope.
         """
         try:
             prompt = self._stream_prompt(request)
@@ -498,6 +509,10 @@ class VLLMEngine(BaseEngine):
             kwargs["repetition_penalty"] = (
                 self._repetition_penalty if self._repetition_penalty is not None else 1.15
             )
+        # DEC-051 / OS-3: forward seed unchanged when set; omit when None.
+        # Do not normalize backend sentinels (e.g. -1).
+        if request.seed is not None:
+            kwargs["seed"] = request.seed
         return SamplingParams(**kwargs)
 
     def _stream_prompt(self, request: ChatCompletionRequest) -> str:
@@ -540,9 +555,20 @@ class VLLMEngine(BaseEngine):
 
     async def generate_stream(
         self, request: ChatCompletionRequest
-    ) -> AsyncGenerator[str, None]:
+    ) -> AsyncGenerator[ChatStreamChunk, None]:
+        """Yield engine chunks (DEC-049).
+
+        A pass-through over the driver's channel: the driver already builds
+        terminal metadata via `derive_terminal_metadata`, the same function
+        `generate` uses, so streamed and non-streamed counts agree by
+        construction. Nothing is translated or recomputed here.
+        """
         if not _VLLM_AVAILABLE:
-            yield "Streaming not available (vLLM not loaded)"
+            # Pre-OS-2 wire behavior: a single content message, no terminal
+            # finish_reason event (OpenSpec R3 — error path unchanged).
+            yield ChatStreamChunk(
+                content="Streaming not available (vLLM not loaded)",
+            )
             return
 
         sampling = self._sampling_params(request)
@@ -566,12 +592,10 @@ class VLLMEngine(BaseEngine):
         except Exception as exc:
             raise RuntimeError(f"vLLM generation failed: {exc}") from exc
 
-        out = outputs[0].outputs[0]
-        generated = out.text
-        finish = "stop" if out.finish_reason in ("stop", None) else "length"
-
-        prompt_tokens = len(outputs[0].prompt_token_ids) if outputs[0].prompt_token_ids else 0
-        completion_tokens = len(out.token_ids) if out.token_ids else 0
+        generated = outputs[0].outputs[0].text
+        # Same derivation the streaming terminal chunk uses (DEC-049) — one
+        # function, so the two paths cannot report different counts.
+        finish, usage = derive_terminal_metadata(outputs[0])
 
         return ChatCompletionResponse(
             model=self._model_name,
@@ -582,11 +606,7 @@ class VLLMEngine(BaseEngine):
                     finish_reason=finish,
                 )
             ],
-            usage=ChatCompletionUsage(
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                total_tokens=prompt_tokens + completion_tokens,
-            ),
+            usage=usage,
         )
 
     def is_healthy(self) -> bool:

@@ -23,6 +23,7 @@ if str(_src) not in sys.path:
 from inference_x.benchmarks.advisor import VRAM_SAFETY_BUFFER_GB, ModelAdvisor
 from inference_x.benchmarks.hardware import profile_hardware
 from inference_x.benchmarks.storage import DEFAULT_RESULTS_DIR, ResultStore
+from inference_x.benchmarks.suite_identity import suite_version_of
 from inference_x.services.model_service import ModelRegistry
 
 _PARAM_RE = re.compile(r"(\d+(?:\.\d+)?)\s*([bBmM])")
@@ -100,11 +101,23 @@ def _print_static_guidance(hardware, config_dir: str = "config") -> None:
 
 def main() -> None:
     store = ResultStore()
-    latest = store.latest_per_model(output_dir=DEFAULT_RESULTS_DIR)
+    selection = store.latest_per_model_for_suite(
+        suite_version_of(), output_dir=DEFAULT_RESULTS_DIR
+    )
 
     hardware = profile_hardware()
 
-    if not latest:
+    if selection.status == "suite_mismatch":
+        print(
+            "Benchmark results exist but none match the current suite version.\n"
+            "The prompt suite changed since these results were recorded.\n"
+            "Re-run benchmarks:\n"
+            "  make benchmark-all",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if selection.status == "empty":
         try:
             _print_static_guidance(hardware)
         except FileNotFoundError:
@@ -117,6 +130,8 @@ def main() -> None:
             )
             sys.exit(1)
         return
+
+    latest = selection.latest
 
     try:
         registry = ModelRegistry.from_config("config")

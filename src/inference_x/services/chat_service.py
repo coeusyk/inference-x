@@ -10,8 +10,31 @@ from inference_x.engines.base import BaseEngine
 from inference_x.engines.pool import EnginePool
 from inference_x.routing.admission import AdmissionController
 from inference_x.routing.task_router import TaskRouter
-from inference_x.schemas.chat import ChatCompletionRequest, ChatCompletionResponse
+from inference_x.schemas.chat import (
+    ChatCompletionRequest,
+    ChatCompletionResponse,
+    ChatStreamChunk,
+    ResolvedRequest,
+)
 from inference_x.services.model_service import ModelRegistry
+
+_RESOLVED_FIELDS = tuple(ResolvedRequest.model_fields)
+
+
+def _resolved(effective_request: ChatCompletionRequest) -> ResolvedRequest:
+    """Serialize the Effective Request — what the server actually ran (OS-4).
+
+    Built from *effective_request*, never from the client's original: building it
+    from the original would report what was asked for rather than what ran, which
+    inverts the point of the block.
+
+    Field membership is derived from ``ResolvedRequest`` rather than listed here,
+    so the derivability rule has exactly one home and this function cannot drift
+    from it (see ResolvedRequest, and the schema test that enforces the rule).
+    """
+    return ResolvedRequest(
+        **{name: getattr(effective_request, name) for name in _RESOLVED_FIELDS}
+    )
 
 
 class ChatService:
@@ -55,28 +78,87 @@ class ChatService:
             update={"max_tokens": admitted.effective_max_tokens}
         )
         try:
-            return await engine.generate(effective_request)
+            response = await engine.generate(effective_request)
         finally:
             self._admission.release(routed_model, admitted.reserved_tokens)
+        # Attached here, never by the engine: the Engine Boundary does not learn
+        # about admission (DEC-047).
+        return response.model_copy(
+            update={
+                "resolved": _resolved(effective_request),
+                "warnings": list(admitted.warnings),
+            }
+        )
 
     async def stream_response(
         self, request: ChatCompletionRequest
     ) -> AsyncGenerator[str, None]:
         """Route a chat request and yield OpenAI-compatible SSE events.
 
+        Event order is fixed (DEC-049 and OS-2 R3, extended at the head by
+        DEC-053) and is the protocol:
+
+        0. exactly one pre-generation event with ``choices: []`` carrying
+           ``resolved`` and ``warnings``, always, before any content;
+        1. zero or more content events, each with ``finish_reason: null``;
+        2. exactly one terminal event with an empty delta and a real
+           ``finish_reason``;
+        3. one usage event with ``choices: []`` — only when the client asked via
+           ``stream_options.include_usage`` and the engine accounted usage;
+        4. ``data: [DONE]``, always last.
+
+        Event 0 sits at the head rather than before ``[DONE]`` because everything
+        it carries is fixed the moment ``admit()`` returns, and a trailer would
+        be lost on the timeout path — the path where knowing what the server
+        resolved matters most (DEC-053). Nothing is ever emitted after the usage
+        event: OpenAI documents that chunk as the one streamed before ``[DONE]``
+        and clients use it as an end sentinel.
+
+        The terminal event is separate rather than folded into the last content
+        event, because the service cannot know a content event is the last one
+        until the engine says so.
+
         Applies a per-token timeout (INFERENCE_X_STREAM_TIMEOUT_S) so that a
-        stalled engine does not hold the connection open indefinitely.
+        stalled engine does not hold the connection open indefinitely. On
+        timeout the error event is emitted and neither a terminal nor a usage
+        event follows — only ``[DONE]``.
+
+        Reservation lifetime: from the instant ``admit()`` returns until this
+        generator terminates for any reason (normal completion, timeout, engine
+        exception, cancellation, or the caller closing the generator — which is
+        how a client disconnect surfaces here, including during the prologue
+        event above), exactly one matching ``release()`` occurs. The ``try``
+        below starts immediately after ``admit()`` and has a single ``finally``,
+        so every suspension point in between — the prologue ``yield`` included —
+        is covered by the same, single release call site.
         """
         routed_model, engine = self._resolve_engine(request)
         admitted = self._admission.admit(routed_model, request, engine)
-        effective_request = request.model_copy(
-            update={"max_tokens": admitted.effective_max_tokens}
-        )
-        completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
-        timeout_s = get_settings().stream_timeout_s
-
-        gen = engine.generate_stream(effective_request)
+        gen: AsyncGenerator[ChatStreamChunk, None] | None = None
         try:
+            effective_request = request.model_copy(
+                update={"max_tokens": admitted.effective_max_tokens}
+            )
+            completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
+            timeout_s = get_settings().stream_timeout_s
+            include_usage = bool(
+                request.stream_options and request.stream_options.include_usage
+            )
+
+            def _event(payload: dict) -> str:
+                return f"data: {json.dumps(payload, separators=(',', ':'))}\n\n"
+
+            yield _event(
+                {
+                    "id": completion_id,
+                    "object": "chat.completion.chunk",
+                    "choices": [],
+                    "resolved": _resolved(effective_request).model_dump(),
+                    "warnings": [w.model_dump() for w in admitted.warnings],
+                }
+            )
+
+            gen = engine.generate_stream(effective_request)
             while True:
                 try:
                     if timeout_s > 0:
@@ -93,19 +175,47 @@ class ChatService:
                     )
                     break
 
-                payload = {
-                    "id": completion_id,
-                    "object": "chat.completion.chunk",
-                    "choices": [
+                if chunk.content:
+                    yield _event(
                         {
-                            "delta": {"content": chunk},
-                            "index": 0,
+                            "id": completion_id,
+                            "object": "chat.completion.chunk",
+                            "choices": [
+                                {
+                                    "delta": {"content": chunk.content},
+                                    "index": 0,
+                                    "finish_reason": None,
+                                }
+                            ],
                         }
-                    ],
-                }
-                yield f"data: {json.dumps(payload, separators=(',', ':'))}\n\n"
+                    )
+
+                if chunk.finish_reason is not None:
+                    yield _event(
+                        {
+                            "id": completion_id,
+                            "object": "chat.completion.chunk",
+                            "choices": [
+                                {
+                                    "delta": {},
+                                    "index": 0,
+                                    "finish_reason": chunk.finish_reason,
+                                }
+                            ],
+                        }
+                    )
+                    if include_usage and chunk.usage is not None:
+                        yield _event(
+                            {
+                                "id": completion_id,
+                                "object": "chat.completion.chunk",
+                                "choices": [],
+                                "usage": chunk.usage.model_dump(),
+                            }
+                        )
         finally:
-            await gen.aclose()
+            if gen is not None:
+                await gen.aclose()
             self._admission.release(routed_model, admitted.reserved_tokens)
 
         yield "data: [DONE]\n\n"

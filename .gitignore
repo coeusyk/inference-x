@@ -1,6 +1,5 @@
 .venv/
 .idea/
-.github/
 
 .env
 *.egg-info
@@ -15,3 +14,12 @@ benchmarks/results/
 
 # Private writing — not for the public repo
 article-final.md
+
+# Graphify
+graphify-out/
+
+# Firecrawl
+.firecrawl/
+
+# token-savior local index cache (regenerable)
+.token-savior-cache.json
