@@ -431,3 +431,20 @@ latest-per-model consumption (DEC-055).
 - **THEN** the benchmark run does not proceed
 - **AND** no new result file is written from that failed load
 
+### Requirement: Hardware-aware model recommendation
+The system SHALL measure model performance on the operator's hardware and produce a
+ranked recommendation with plain-language reasoning. Ranking SHALL use only measured
+score components under the exact frozen weights, and SHALL expose viability solely
+through `viable`. score is a within-report ordinal used only to rank viable models
+produced from the same benchmark suite.
+
+#### Scenario: Advisor is run after benchmarking
+- **WHEN** `make advise` is run after at least one benchmark result exists for the
+  current suite
+- **THEN** the advisor produces a ranked list of models
+- **AND** each entry includes: throughput (tok/s), TTFT (ms), device VRAM occupancy
+  (GiB), a score that is a within-report ordinal used only to rank viable models
+  produced from the same benchmark suite, and a one-line recommendation string
+- **AND** models that exceed available VRAM are flagged as not viable via `viable`
+  rather than by score threshold alone
+

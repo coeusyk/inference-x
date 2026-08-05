@@ -166,7 +166,7 @@ code, never rewriting stored results.
 - **AND** new runs may append new files that use the canonical field
 - **AND** historical files remain readable via deprecated aliases
 
-## MODIFIED Requirements
+## ADDED Requirements
 
 ### Requirement: Hardware-aware model recommendation
 The system SHALL measure model performance on the operator's hardware and produce a
