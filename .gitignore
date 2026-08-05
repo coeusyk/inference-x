@@ -17,3 +17,9 @@ article-final.md
 
 # Graphify
 graphify-out/
+
+# Firecrawl
+.firecrawl/
+
+# token-savior local index cache (regenerable)
+.token-savior-cache.json
