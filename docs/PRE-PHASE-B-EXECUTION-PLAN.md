@@ -1,0 +1,217 @@
+# Pre-Phase-B Execution Plan
+
+**Input.** The "Immediate before Phase B" section of the Phase A architecture audit
+(`docs/REVIEW-2026-08-04-phase-a-final-audit.md`, Part 4). This document does
+not re-derive those findings; it converts four of them — SEV-A1, SEV-A2+SEV-A3, OWN-B5,
+SEV-A4 — into an executable sequence of OpenSpec changes and repository actions.
+
+**Scope discipline.** Phase B is not starting. No AsyncLLM work, no Engine Boundary
+widening, no alternative designs. Every item below is either a bug fix restoring an
+already-accepted contract (DEC-047 … DEC-057) or repository process (commit/archive). No
+new architecture is proposed anywhere in this document. This document is planning only —
+it contains no code and no `tasks.md`-style implementation checklists; those belong inside
+the OpenSpec changes it recommends opening.
+
+---
+
+## 1. SEV-A1 — Admission reservation leak on early SSE disconnect
+
+| Dimension | Answer |
+|---|---|
+| **OpenSpec required?** | **Yes.** Precedent: `openspec/changes/2026-07-01-fix-engine-driver-late-submit-race/` is a structurally identical case — a concurrency/lifecycle bug fix to an already-accepted contract, given a full change record (proposal.md + design.md + tasks.md). This repo does not treat "it's just a bug fix" as an exemption. |
+| **Bug fix vs architecture work** | Bug fix. `AdmissionController.admit()`'s own docstring already states the caller contract (`release()` MUST be called on every path). The fix makes `ChatService.stream_response` conform to a contract that already exists; it does not create, move, or widen any contract. |
+| **Repository impact** | One production file (`services/chat_service.py`: move the prologue `yield` inside the existing `try/finally`) and one new test (early-disconnect regression, using the stub-engine harness already built during the audit). No schema, config, or API-shape change. |
+| **ADR impact** | None. DEC-047 §4 and DEC-053 already require this behavior. No new DEC, no amendment to an existing one — the fix closes a gap between code and an already-accepted rule. |
+| **Rollback** | Trivial single-commit revert. No persisted state, no migration, no wire-format change — reverting restores the (buggy) prior behavior with zero side effects on anything else. |
+| **Testing** | New regression test asserting both `_seq_tracker` and KV reservation return to zero after `aclose()` is called immediately post-prologue (the exact scenario reproduced during the audit: 522 KV tokens / 1 sequence slot leaked). Full gate (`ruff`, `mypy`, `pytest`) must stay green. |
+| **Estimated size** | **XS** — one function reshaped, one test added, no new files besides the OpenSpec change record itself. |
+| **Mergeable independently?** | **Yes.** No dependency on SEV-A2/A3, OWN-B5, or SEV-A4. Ship first — it is the only item in this set with a live production failure mode (permanent capacity loss on client disconnects). |
+
+**Recommended change name:** `fix-admission-reservation-leak`.
+**Recommended artifacts:** `proposal.md` + `tasks.md`. Skip `design.md` — there is no design
+decision to record, only a contract-conformance fix; a one-line non-goals note ("does not
+touch admission gating, KV accounting formulas, or the DEC-053 event order") can live in
+`proposal.md`'s own "What Changes" section instead of a separate file.
+
+---
+
+## 2. SEV-A2 + SEV-A3 — `BaseEngine.generate_stream` declaration and the stale mypy baseline
+
+| Dimension | Answer |
+|---|---|
+| **OpenSpec required?** | **Yes**, for the same reason as SEV-A1 — the contract lives on `BaseEngine`, which DEC-047/048/049 explicitly govern, and DEC-049's own migration notes named clearing the `chat_service` baseline entry as an exit condition. A change record closes that provenance thread. |
+| **Bug fix vs architecture work** | Bug fix / type-soundness correction, explicitly **not** architecture. The task instruction is exact: correct the declaration, do not widen or redesign the Engine Boundary. Dropping `async` from the ABC signature changes zero runtime behavior — it only makes the declared type match what every implementation already does. |
+| **Repository impact** | Two files: `engines/base.py` (remove `async` from the `generate_stream` declaration) and `pyproject.toml` (remove `inference_x.services.chat_service` from the DEC-048 mypy `ignore_errors` baseline). Verified in a sandbox copy during the audit: this clears exactly 4 suppressed errors (3 in `chat_service`, 1 invalid-override in `vllm_engine`) and introduces none. No other file requires a change — `vllm_engine.py` and `chat_service.py` already behave as true async generators; only their declared type was wrong. |
+| **ADR impact** | None new. Recommend a one-line factual addendum to DEC-049's entry in `docs/DECISIONS.md` noting the baseline entry is cleared — a status update, not a new decision or a rewrite of the decision's text. |
+| **Rollback** | Trivial. Both changes are static-typing-only; there is no generated bytecode difference for any concrete method. Reverting restores the suppression with no runtime effect either way. |
+| **Testing** | `mypy src/` clean, confirming the exact 4-error clearance measured in the audit's sandbox check. Full `ruff` + `pytest` gate green. No new runtime test needed — nothing executable changes. |
+| **Estimated size** | **XS** — 2 files, single-digit line count. |
+| **Mergeable independently?** | **Yes.** No dependency on SEV-A1, OWN-B5, or SEV-A4. Safe to land in either order relative to SEV-A1; recommended second only because SEV-A1 has an active production failure mode and this does not. |
+
+**Recommended change name:** `close-generate-stream-contract-gap`.
+**Recommended artifacts:** `proposal.md` + `tasks.md` + a short `design.md` whose sole
+purpose is a **Non-Goals** section — mirroring the pattern already used in
+`add-honest-advisor-scoring/design.md` — stating explicitly: no Engine Boundary widening,
+no `kv_capacity_tokens` promotion, no factory (`create_engine`), no AsyncLLM. Given this
+change touches the single most load-bearing interface in the runtime, a written non-goals
+fence is worth the one extra file even though the diff itself is trivial.
+
+---
+
+## 3. OWN-B5 — `derive_terminal_metadata` relocation constraint for Phase B1
+
+| Dimension | Answer |
+|---|---|
+| **OpenSpec required?** | **No.** This is a documentation constraint for a *future* change (roadmap B1) that does not exist as an OpenSpec change yet. There is no code change to gate today. Precedent: `docs/PHASE-A-ARCHITECTURE.md` itself was authored directly, outside the OpenSpec flow, when the task was documentation rather than implementation. |
+| **Bug fix vs architecture work** | Neither. Nothing is broken and nothing is being redesigned — this is a guardrail recorded so a *future* implementer doesn't silently violate DEC-050 §3 while deleting `engines/driver.py`. |
+| **Repository impact** | One doc file, `docs/PHASE-A-ARCHITECTURE.md` §10 ("Deferred Phase B assumptions") — the section that already exists for exactly this purpose. Add one entry: `derive_terminal_metadata` (defined `engines/driver.py:41`, imported by `engines/vllm_engine.py:13-16`, called at `:598` and `driver.py:232`) must be **relocated, not reimplemented**, when `driver.py` is deleted, citing DEC-050 §3's "cannot drift apart again" guarantee. `docs/DECISIONS.md` is left untouched — DEC-050's historical text should not be edited; the forward-pointing note belongs only in the living architecture reference. |
+| **ADR impact** | None. No new decision, no amendment. |
+| **Rollback** | Trivial — revert one doc edit, zero runtime risk since no code is touched. |
+| **Testing** | Not applicable in the runtime sense. "Testing" here means a doc-accuracy check: confirm the cited file:line locations and the DEC-050 §3 quotation match current source before merging (already done once during the audit; re-verify at merge time in case the lines have moved). |
+| **Estimated size** | **XS** — one doc file, roughly 5–10 lines. |
+| **Mergeable independently?** | **Yes**, trivially — zero dependencies on anything else in this plan or in the codebase. Can land immediately, in parallel with everything else. |
+
+---
+
+## 4. SEV-A4 — Repository closure checklist
+
+**Current state (verified directly, not assumed):**
+
+| Artifact | State |
+|---|---|
+| `2026-07-01-fix-engine-driver-late-submit-race` | Implementing commit `6227105` already merged. `tasks.md` 9/9 checked. Never archived. |
+| `2026-07-01-resolve-default-model-via-variant-selector` | Implementing commit `77b64bc` already merged (later than `6227105`). `tasks.md` 13/13 checked. Never archived. |
+| `2026-08-04-add-ci-and-static-analysis-gate` (OS-1) | Implementing commit `99a0c12` already merged. `tasks.md` 25/26 checked — the one remaining box is "5.2 Archive this change," i.e. it is self-referentially waiting on this exact step. |
+| `verify-benchmark-suite-identity` (OS-5) | **Untracked.** `tasks.md` 0/57 checked, despite the implementation (`suite_identity.py`, `suite_version.py`, `test_suite_identity.py`, DEC-054/055) being present, gate-green, and verified during the audit. The change directory itself has never been committed. |
+| `add-honest-advisor-scoring` (OS-6) | **Untracked.** `tasks.md` 0/66 checked, same situation — DEC-056/057, the reweighted advisor, and the canonical-VRAM logic are implemented and verified, but the change record was never committed or marked. |
+
+Also currently modified/untracked and part of the same uncommitted body of work: `Makefile`,
+`docs/DECISIONS.md`, `scripts/advise.py`, `scripts/benchmark.py`,
+`src/inference_x/api/routes/benchmark.py`, `src/inference_x/benchmarks/{advisor,runner,
+schemas,storage}.py`, three test files, plus the new `PHASE-A-ARCHITECTURE.md` and
+`REVIEW-2026-08-04-os5-os6-finalization.md`.
+
+| Dimension | Answer |
+|---|---|
+| **OpenSpec required?** | **No new change.** This is executing the existing `openspec archive` lifecycle on five *already-implemented* changes, not proposing new behavior. |
+| **Bug fix vs architecture work** | Neither — repository/process hygiene. |
+| **Repository impact** | Multiple commits (see order below) plus five `openspec archive` invocations (which update `openspec/specs/platform/spec.md` and move each change directory under `openspec/changes/archive/`). |
+| **ADR impact** | None. DEC-047 … DEC-057 are already recorded and accepted; archiving does not alter any decision, only closes out the changes that implemented them. |
+| **Rollback** | Git-level revert per commit. `openspec archive` is a directory move plus a spec-file update — reversible with `git mv` back and a spec revert, but only cleanly if commits stay small and scoped (see recommendation below) rather than one monolithic commit. |
+| **Testing** | Full gate (`ruff`, `mypy`, `pytest`) green immediately before each archive step — matching the standard this repo has held for every other unit. For OS-5/OS-6 specifically, the `tasks.md` "V" verification items and DEC-hygiene items (V24–V28-equivalent) should be ticked only after actually re-running the check each one names, not rubber-stamped. |
+| **Estimated size** | Not a code-size question — effort is **M**, spread across ~4-6 commits and 5 archive operations; each individual step is mechanical and low-risk. |
+| **Mergeable independently?** | **Partially.** The two `2026-07-01-*` archives are fully independent of everything else in this repo right now and can happen immediately. Archiving OS-1 requires nothing further (already 100% checked). Archiving OS-5 and OS-6 requires committing their implementation and change directories *and* actually walking their verification checklists first — they cannot be archived "as-is." |
+
+### One judgment call to flag, not resolve silently
+
+Both `verify-benchmark-suite-identity/tasks.md` and `add-honest-advisor-scoring/tasks.md`
+end in a **"§9 / §8 Out of scope checklist (must remain undone)"** section — items like
+*"Confirm no advisor scoring / weight recalibration tasks were added."* There are two
+defensible readings and this document does not pick one:
+
+- **Reading A — leave unchecked.** The header says "must remain undone"; the checklist
+  enforces scope discipline precisely by staying unchecked, and a ticked box under that
+  header reads as "we added the out-of-scope thing," which is false.
+- **Reading B — tick after verifying.** Read as plain text, the item (*"Confirm no advisor
+  scoring tasks were added"*) is an action like every other item in the file — ticking it
+  asserts "I verified nothing out-of-scope was added," which is true and is the same kind
+  of assertion every other checked box in the document makes.
+
+**This needs a decision from whoever executes step 6/7 below, not a default baked into this
+plan.** Whichever reading is chosen, apply it consistently across both OS-5 and OS-6.
+
+A second, related gap: `tasks.md` for OS-5 and OS-6 also contain **preconditions and
+implementation-task boxes** (`0.x` and `1.x`–`8.x`) that are neither `V`-prefixed nor part
+of the out-of-scope section, and this plan owes them their own rule, not silence:
+
+- **Mechanical rule:** tick a box only if it asserts something true about the repository
+  *right now*. If it does, tick it against current source (this is the `V`-item rule,
+  generalized). If it cannot be truthfully ticked after the fact, leave it unchecked and
+  add a one-line annotation explaining why.
+- **Example — tickable as-is:** an item like "Add DEC-054, status accepted" is true right
+  now (DEC-054 exists and is accepted) → tick.
+- **Example — not tickable, annotate instead:** OS-5's `0.2` ("Confirm DEC-054 and DEC-055
+  are unused numbers in `docs/DECISIONS.md`") was true when OS-5 was authored but is false
+  today — both numbers are now used, by OS-5 and OS-6 themselves. Leave unchecked, annotate:
+  *"precondition satisfied at authoring time; DEC-054/055 subsequently assigned per the
+  entries this change added."*
+- **Example — not tickable, annotate instead:** `0.3` ("Record unit-test baseline") asks
+  for a pre-implementation measurement. It cannot be produced retroactively without
+  recording a fabricated number — leave unchecked, annotate why.
+
+### Exact archive order
+
+1. **`2026-07-01-fix-engine-driver-late-submit-race`** — run `openspec validate
+   2026-07-01-fix-engine-driver-late-submit-race --strict` first (its implementing commit
+   landed roughly a month ago, so confirm the spec delta it describes isn't already present
+   in `openspec/specs/platform/spec.md` before assuming the archive is a no-op move), then
+   `openspec archive 2026-07-01-fix-engine-driver-late-submit-race`. Zero dependencies,
+   implementing commit already on `develop`. Do this first — likely a pure paperwork gap,
+   but confirm rather than assume.
+2. **`2026-07-01-resolve-default-model-via-variant-selector`** — same `validate --strict`
+   check, same action, immediately after. Its implementing commit (`77b64bc`) landed after
+   step 1's (`6227105`), so this preserves chronological order in the archive.
+3. **`2026-08-04-add-ci-and-static-analysis-gate` (OS-1)** — `openspec validate
+   2026-08-04-add-ci-and-static-analysis-gate --strict`, tick the one remaining box
+   ("5.2 Archive this change") as part of the archive action itself, then `openspec archive
+   2026-08-04-add-ci-and-static-analysis-gate`. Do this here, not later: OS-5's own `tasks.md`
+   precondition 0.1 is "Confirm OS-1–OS-4 are archived / landed," so OS-5 (step 6 below)
+   cannot honestly proceed until this step is done.
+4. **Land SEV-A1** (`fix-admission-reservation-leak`) as its own commit(s) and, once merged
+   and gate-green, `openspec archive fix-admission-reservation-leak`.
+5. **Land SEV-A2+SEV-A3** (`close-generate-stream-contract-gap`) as its own commit(s) and
+   archive the same way.
+6. **Land OWN-B5** (the `PHASE-A-ARCHITECTURE.md` §10 addendum) — independent, can actually
+   be committed any time from step 1 onward; listed here only because grouping it with the
+   other doc-only work keeps the commit sequence legible.
+7. **Commit OS-5** (`verify-benchmark-suite-identity`): stage the implementation files
+   (`suite_identity.py`, `suite_version.py`, `test_suite_identity.py`, the DEC-054/055
+   portion of `docs/DECISIONS.md`, `Makefile`'s `suite-version` target) together with the
+   change directory itself. Walk `tasks.md` using the tick rules above (V-items and
+   truthful `0.x`/`1.x`+ items ticked with re-verification; untickable preconditions left
+   unchecked with an annotation; out-of-scope section per whichever reading was chosen),
+   run `openspec validate verify-benchmark-suite-identity --strict`, then `openspec archive
+   verify-benchmark-suite-identity`.
+8. **Commit OS-6** (`add-honest-advisor-scoring`): stage `advisor.py`, `runner.py`,
+   `schemas.py`, `storage.py`, the three test files, the DEC-056/057 portion of
+   `DECISIONS.md`, `scripts/advise.py`, `scripts/benchmark.py`, `api/routes/benchmark.py`,
+   and the change directory. Same tick/validate/archive sequence as step 7. OS-6 depends on
+   OS-5 per its own `tasks.md` precondition ("Confirm OS-5 is merged/archived"), so this
+   step must follow step 7, not precede or parallel it.
+9. **Commit remaining Phase A documentation** not already covered above:
+   `REVIEW-2026-08-04-os5-os6-finalization.md`, `docs/REVIEW-2026-08-04-phase-a-final-audit.md`
+   (the persisted copy of the audit this plan cites as its input), and this document itself
+   (`docs/PRE-PHASE-B-EXECUTION-PLAN.md`), plus `PHASE-A-ARCHITECTURE.md` if not already
+   committed in an earlier step.
+
+Steps 1–3 can happen today, independent of everything else, and should each be preceded by
+`openspec validate --strict` rather than assumed clean. Steps 4–6 can interleave with each
+other in any order but should each land as their own reviewable commit. Steps 7–8 are
+strictly ordered relative to each other (OS-6 depends on OS-5) and must follow step 3 (OS-5
+depends on OS-1) and should follow 4–6 so that the "Phase A closed" boundary also contains
+the two bug fixes the audit found — otherwise a future contributor reviews an
+already-archived Phase A and still finds a live reservation leak in it.
+
+---
+
+## Recommended merge order before Phase B
+
+1. `2026-07-01-fix-engine-driver-late-submit-race` — `validate --strict`, then archive.
+   No code.
+2. `2026-07-01-resolve-default-model-via-variant-selector` — same, archive only, no code.
+3. **`2026-08-04-add-ci-and-static-analysis-gate` (OS-1)** — tick its last box, `validate
+   --strict`, archive. **Required before #6** — OS-5's own precondition 0.1 names it.
+4. **`fix-admission-reservation-leak` (SEV-A1)** — highest priority: the only item with an
+   active production failure mode.
+5. **`close-generate-stream-contract-gap` (SEV-A2+SEV-A3)** — independent of #4; ordered
+   after it only because #4 is more urgent, not because of a dependency.
+6. **OWN-B5 doc addendum** — can slot anywhere from step 1 onward; grouped here for
+   commit-sequence legibility.
+7. **Commit + verify + archive `verify-benchmark-suite-identity` (OS-5)** — must follow #3.
+8. **Commit + verify + archive `add-honest-advisor-scoring` (OS-6)** — must follow #7.
+9. Commit any remaining Phase A documentation not swept up above, including the persisted
+   audit (`docs/REVIEW-2026-08-04-phase-a-final-audit.md`) and this plan document itself.
+
+No step in this order requires Phase B, AsyncLLM, or any architectural decision beyond what
+DEC-047 … DEC-057 already accepted. Steps 1–3 and 4–6 are each internally reorderable; 3
+must precede 7; 7 must precede 8.
