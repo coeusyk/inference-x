@@ -412,3 +412,22 @@ callers SHALL treat an unavailable count as a degraded input rather than an erro
 - **THEN** KV capacity is not declared on it
 - **AND** it is still discovered as an optional attribute by its existing callers
 
+
+### Requirement: Reproducible benchmark results
+The benchmark runner SHALL use a fixed, versioned prompt suite so results are
+comparable across runs only when they share verified suite identity. The suite's
+`suite_version` SHALL be the pinned content hash of the parsed prompt collection
+(DEC-054), verified at load, and used as a necessary selection key before
+latest-per-model consumption (DEC-055).
+
+#### Scenario: Benchmark is run twice on the same hardware
+- **WHEN** the same model is benchmarked twice with the standard prompt suite
+- **THEN** results are stored separately with timestamps
+- **AND** the advisor uses the most recent result per model among results that match
+  the expected `suite_version`
+
+#### Scenario: Unverified suite cannot produce results
+- **WHEN** the prompt suite fails identity verification at load
+- **THEN** the benchmark run does not proceed
+- **AND** no new result file is written from that failed load
+

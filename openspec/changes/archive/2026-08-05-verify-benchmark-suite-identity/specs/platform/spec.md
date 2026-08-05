@@ -173,7 +173,7 @@ REQUIRES a future ADR and is out of scope for OS-5.
 - **THEN** no deprecated benchmark JSON or HTTP field alias is removed
 - **AND** no OS-5 task schedules alias removal without a future ADR
 
-## MODIFIED Requirements
+## ADDED Requirements
 
 ### Requirement: Reproducible benchmark results
 The benchmark runner SHALL use a fixed, versioned prompt suite so results are
