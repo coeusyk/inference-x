@@ -1808,3 +1808,100 @@ Use this document to capture non-obvious design decisions as the project evolves
   loads via the alias and is never rewritten.
 - Supersession: alias removal requires a future ADR; the canonical-precedence rule is
   permanent unless a future ADR supersedes it.
+
+### DEC-058
+- Date: 2026-08-05
+- Status: accepted
+- Title: `VLLMEngine` migrates from `LLM` + `EngineDriver` to `AsyncLLM` (B1, `migrate-async-llm-engine`)
+- Context: Phase B1 (`docs/PHASE-A-ARCHITECTURE.md` §10, `docs/REVIEW-2026-08-03-architecture.md`
+  §9). `EngineDriver` (`engines/driver.py`) owned a synchronous `vllm.LLM.llm_engine`
+  exclusively and was the sole caller of `add_request`/`step()`, demultiplexing `step()`
+  output to the right request by id — built to fix a specific, reproduced race
+  (DEC-038: a one-shot `finished=True` handoff losing output when a different thread's
+  `step()` call surfaces your request's terminal output; DEC-039: the driver-thread fix;
+  DEC-043: the `_dead_lock` atomicity fix). vLLM 0.22.1 ships `AsyncLLM`
+  (`vllm/v1/engine/async_llm.py`), a v1-engine async client that already solves
+  per-request delivery, cancellation, and health signaling without a driver thread.
+- Problem: `EngineDriver`'s race-class history (DEC-038/039/043) is real complexity
+  carried solely to work around the offline `LLM` class having no async per-request
+  API. `AsyncLLM` removes the reason for that complexity to exist.
+- Decision (full rationale and verification evidence: `openspec/changes/migrate-async-llm-engine/design.md`,
+  archived under `openspec/changes/archive/`):
+  1. **`_POOL_STEP_LOCK` deleted, not relocated.** Each `AsyncLLM` instance owns an
+     independent background engine-core *process* (`async_llm.py:146`), not a shared
+     in-process step loop — there is no shared resource left to guard. This does not
+     prove multiple co-located `AsyncLLM` instances are safe, only that the specific
+     mechanism the old lock guarded against has no equivalent here (see 3).
+  2. **`generate()` is derived from `generate_stream()`.** Exactly one code path calls
+     into `AsyncLLM.generate()`; both public methods are expressed in terms of it (or a
+     shared internal primitive), so terminal metadata cannot be derived twice and drift
+     (preserves the DEC-050 single-source guarantee).
+  3. **`pool_size > 1`: not guaranteed, not forbidden.** Nothing verified (not
+     `PHASE-A-ARCHITECTURE.md`, not DEC-047, not `async_llm.py`) demonstrates `AsyncLLM`
+     cannot safely support multiple co-located instances, so B1 adds no new
+     construction-time validation for `pool_size` in either direction. B6 remains the
+     only phase authorized to redesign multi-engine serving.
+  4. **Cancellation is a compatibility invariant.** `AsyncLLM.generate()`'s
+     `except (asyncio.CancelledError, GeneratorExit)` handler calls a real
+     `engine_core.abort_requests_async(...)` — a genuine behavioral improvement over
+     `EngineDriver`, where an abandoned consumer only stopped *reading*
+     (`_pending[request_id]` removed solely on `output.finished`), so a disconnected
+     client's computation kept running to completion regardless. This is an intentional
+     behavior change, recorded as a compatibility invariant so a later "simplification"
+     cannot silently swallow `GeneratorExit` and regress it back to
+     consumer-side-only abandonment.
+  5. **Health: `AsyncLLM.errored` / `dead_error` replace `is_dead` / `EngineDriverDeadError`.**
+     `VLLMEngine.is_healthy()` becomes `not self._llm.errored`. The repo-local
+     `EngineDriverDeadError` wrapper is deleted; vLLM's own `EngineDeadError` is used
+     directly.
+  6. **KV cache stats: same attribute chain, different root.** `_log_kv_cache_stats()`
+     reads `self._llm.vllm_config.cache_config` instead of
+     `self._llm.llm_engine.vllm_config.cache_config` — root object only; the
+     `.num_gpu_blocks`/`.block_size` chain is unchanged.
+  7. **Timeout: the wrapper becomes effective, not cosmetic.** `AsyncLLM.generate()` has
+     no native per-request timeout. `VLLMEngine` still supplies its own
+     `_COMPLETION_TIMEOUT_S` wrapper, but where a pre-migration timeout only stopped
+     *waiting* (the underlying computation ran to completion regardless), the same
+     wrapper now delivers a real `CancelledError` into `AsyncLLM.generate()`, which
+     (per 4) triggers a real engine-side abort. A timeout now actually stops the
+     engine-side computation, for the first time. Intentional behavioral change, not a
+     preserved one.
+  8. **`derive_terminal_metadata` relocated, not reimplemented.** Moved from
+     `driver.py` into `vllm_engine.py` verbatim (signature and body unchanged) per
+     DEC-050 §3 and the Phase A audit's OWN-B5 finding — the function is not
+     `EngineDriver`-specific, and reimplementing it would have reopened the exact
+     usage-drift risk DEC-050 closed.
+  - Verified before implementation (not assumed): installed vLLM version (0.22.1);
+    `AsyncLLM.generate()`'s cancellation → abort path; `AsyncLLM.errored`/`dead_error`/
+    `check_health()` semantics; and — the one substantive open question carried into
+    implementation — that a request submitted after the engine has entered a terminal
+    failure state is rejected immediately and synchronously, via two independent
+    redundant guards (`AsyncLLM.add_request()`'s own `errored` check, and the transport
+    client's `ensure_alive()`), not accepted-then-failed-later or orphaned.
+- Alternatives considered:
+  - **Keep `EngineDriver`, relocate it unchanged.** Rejected: keeps the DEC-038/039/043
+    race-class complexity alive for no reason once `AsyncLLM` provides the same
+    guarantees natively.
+  - **A second independent `AsyncLLM.generate()` call site for the non-streaming path.**
+    Rejected (Decision 2): would re-derive terminal metadata outside
+    `derive_terminal_metadata`, reopening the DEC-050 drift risk, and double the surface
+    that must implement cancellation/timeout handling correctly.
+  - **Fail loudly on `pool_size > 1`.** Rejected (Decision 3): no verified evidence
+    supports it; would be a construction-time claim the evidence does not back.
+- Consequences:
+  - Positive: `EngineDriver` and its race-class history (DEC-038/039/043) are deleted
+    outright, not carried forward. Cancellation and timeout become real engine-side
+    signals for the first time — see the changelog entry for the user-facing framing.
+  - Negative: two real behavioral changes (Decision 4, Decision 7) mean this is not a
+    pure refactor; anyone benchmarking timeout- or disconnect-adjacent scenarios will
+    see different engine-side resource usage than before this change.
+  - Neutral: `pool_size > 1` remains an open architectural question, explicitly not
+    resolved by this change (Decision 3) — deferred to B6.
+- Compatibility: `BaseEngine`'s declared contract, `ChatService`, `AdmissionController`,
+  and every route handler required zero code changes (verified: no diff outside
+  `engines/`, `tests/`, `pyproject.toml`, and documentation). Streamed and non-streamed
+  usage continue to derive from exactly one function. No new package or dual type
+  system introduced.
+- Supersession: `pool_size > 1` semantics remain open until a future phase (most likely
+  B6) verifies `AsyncLLM` multi-instance behavior explicitly; this DEC does not resolve
+  that question and is not superseded by leaving it open.

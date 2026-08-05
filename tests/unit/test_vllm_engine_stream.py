@@ -1,188 +1,30 @@
-"""Tests for VLLMEngine streaming via the startup-loaded sync llm_engine."""
+"""Tests for VLLMEngine's tokenizer-facing helpers and KV-cache introspection.
+
+Streaming/completion behavior against the engine's generation primitive moved
+to test_vllm_engine_async.py (migrate-async-llm-engine, Task 4) — this file
+now covers only what doesn't depend on that primitive.
+"""
 from __future__ import annotations
 
-import threading
-from dataclasses import dataclass, field
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
-import pytest
-
-from inference_x.engines.driver import EngineDriver
 from inference_x.engines.vllm_engine import VLLMEngine
 from inference_x.schemas.chat import ChatCompletionRequest, ChatMessage
 
 
-@dataclass
-class _FakeCompletion:
-    text: str = ""
-    finish_reason: str | None = None
-    token_ids: list[int] = field(default_factory=list)
-
-
-@dataclass
-class _FakeRequestOutput:
-    request_id: str
-    outputs: list[_FakeCompletion]
-    finished: bool
-    prompt_token_ids: list[int] = field(default_factory=lambda: [1, 2, 3])
-
-
-def _make_engine(step_batches: list[list[_FakeRequestOutput]]) -> VLLMEngine:
-    """Build a VLLMEngine backed by a real EngineDriver over a mocked llm_engine.
-
-    generate_stream now submits through engine._driver (see engines/driver.py)
-    instead of running its own add_request/step() loop, so the driver itself
-    must be real here — only the underlying llm_engine is mocked.
-    """
-    engine = VLLMEngine.__new__(VLLMEngine)
-    engine._model_name = "test-model"
-    engine._pool_size = 1
-    engine._healthy = True
-    engine._supports_chat = False
-    engine._engine_lock = threading.Lock()
-    engine._sampling_params = lambda request: MagicMock()
-    engine._stream_prompt = lambda request: "User: hi\nAssistant:"
-    engine._llm = MagicMock()
-    llm_engine = MagicMock()
-    llm_engine.step.side_effect = step_batches
-    engine._llm.llm_engine = llm_engine
-
-    def add_request(rid, prompt, sampling):
-        for batch in step_batches:
-            for item in batch:
-                item.request_id = rid
-
-    llm_engine.add_request.side_effect = add_request
-    engine._driver = EngineDriver(llm_engine, engine._engine_lock)
-    return engine
-
-
-@pytest.mark.asyncio
-async def test_generate_stream_yields_incremental_chunks_from_llm_engine():
-    engine = _make_engine(
-        [
-            [
-                _FakeRequestOutput(
-                    request_id="",
-                    outputs=[_FakeCompletion(text="Hello")],
-                    finished=False,
-                )
-            ],
-            [
-                _FakeRequestOutput(
-                    request_id="",
-                    outputs=[_FakeCompletion(text="Hello world")],
-                    finished=True,
-                )
-            ],
-        ]
-    )
-
-    req = ChatCompletionRequest(
-        model="test-model",
-        messages=[ChatMessage(role="user", content="hi")],
-        stream=True,
-    )
-
-    with patch("inference_x.engines.vllm_engine._VLLM_AVAILABLE", True):
-        chunks = [chunk async for chunk in engine.generate_stream(req)]
-
-    assert [c.content for c in chunks if c.content] == ["Hello", " world"]
-    terminal = chunks[-1]
-    assert terminal.finish_reason == "stop"
-    assert terminal.usage is not None
-    engine._driver.shutdown()
-
-
-@pytest.mark.asyncio
-async def test_generate_stream_does_not_use_async_llm_engine():
-    engine = _make_engine(
-        [
-            [
-                _FakeRequestOutput(
-                    request_id="",
-                    outputs=[_FakeCompletion(text="ok")],
-                    finished=True,
-                )
-            ]
-        ]
-    )
-
-    req = ChatCompletionRequest(
-        model="test-model",
-        messages=[ChatMessage(role="user", content="hi")],
-        stream=True,
-    )
-
-    with patch("inference_x.engines.vllm_engine._VLLM_AVAILABLE", True):
-        chunks = [chunk async for chunk in engine.generate_stream(req)]
-
-    assert [c.content for c in chunks if c.content] == ["ok"]
-    assert chunks[-1].finish_reason == "stop"
-    assert getattr(engine, "_async_llm", None) is None
-    engine._driver.shutdown()
-
-
-@pytest.mark.asyncio
-async def test_generate_completes_via_driver():
-    """Non-streaming generate() now submits through the same EngineDriver as
-    generate_stream (see engines/driver.py, DEC-038/DEC-039) instead of a
-    blocking .chat()/.generate() call."""
-    engine = _make_engine(
-        [
-            [
-                _FakeRequestOutput(
-                    request_id="",
-                    outputs=[_FakeCompletion(text="partial")],
-                    finished=False,
-                )
-            ],
-            [
-                _FakeRequestOutput(
-                    request_id="",
-                    outputs=[
-                        _FakeCompletion(
-                            text="final answer",
-                            finish_reason="stop",
-                            token_ids=[1, 2, 3, 4],
-                        )
-                    ],
-                    finished=True,
-                )
-            ],
-        ]
-    )
-
-    req = ChatCompletionRequest(
-        model="test-model",
-        messages=[ChatMessage(role="user", content="hi")],
-    )
-
-    resp = await engine.generate(req)
-
-    assert resp.choices[0].message.content == "final answer"
-    assert resp.choices[0].finish_reason == "stop"
-    assert resp.usage.completion_tokens == 4
-    engine._driver.shutdown()
-
-
 def test_log_kv_cache_stats_reads_cache_config_from_vllm_config():
-    """Regression guard: vLLM 0.22.1's V1 LLMEngine has cache_config=None at the top
-    level — the real CacheConfig lives under llm_engine.vllm_config.cache_config.
-    Reading the wrong attribute silently leaves kv_capacity_tokens as None forever
-    (no exception), which is exactly what happened before this was caught via a live
-    GPU smoke test. This test pins the correct attribute path with a mock engine.
+    """Regression guard: AsyncLLM exposes `vllm_config` directly as an
+    instance attribute (no `llm_engine` indirection, unlike the offline `LLM`
+    class this replaced) — verified against vLLM 0.22.1
+    (migrate-async-llm-engine Decision 6). Reading the wrong attribute
+    silently leaves kv_capacity_tokens as None forever (no exception).
     """
     engine = VLLMEngine.__new__(VLLMEngine)
     engine._model_name = "test-model"
     engine._kv_capacity_tokens = None
     engine._llm = MagicMock()
-
-    llm_engine = MagicMock()
-    llm_engine.cache_config = None  # top-level attribute is always None on V1
-    llm_engine.vllm_config.cache_config.num_gpu_blocks = 14822
-    llm_engine.vllm_config.cache_config.block_size = 16
-    engine._llm.llm_engine = llm_engine
+    engine._llm.vllm_config.cache_config.num_gpu_blocks = 14822
+    engine._llm.vllm_config.cache_config.block_size = 16
 
     engine._log_kv_cache_stats()
 
@@ -194,11 +36,7 @@ def test_log_kv_cache_stats_defaults_to_none_when_cache_config_missing():
     engine._model_name = "test-model"
     engine._kv_capacity_tokens = None
     engine._llm = MagicMock()
-
-    llm_engine = MagicMock()
-    llm_engine.cache_config = None
-    llm_engine.vllm_config = None
-    engine._llm.llm_engine = llm_engine
+    engine._llm.vllm_config = None
 
     engine._log_kv_cache_stats()
 
@@ -233,48 +71,3 @@ def test_count_prompt_tokens_falls_back_to_chars_over_4_on_error():
         model="test-model", messages=[ChatMessage(role="user", content="12345678")]
     )
     assert engine.count_prompt_tokens(req) == 2  # 8 chars // 4
-
-
-@pytest.mark.asyncio
-async def test_streamed_and_non_streamed_usage_agree():
-    """OS-2 acceptance criterion 2: the two paths report the same counts.
-
-    Both derive usage from `derive_terminal_metadata`, so agreement is
-    structural rather than coincidental — this test pins that. Note the counts
-    come from vLLM's token_ids (5), not from counting words in "Hello world"
-    (2), which is exactly what DEC-049 replaced.
-    """
-    final = _FakeRequestOutput(
-        request_id="",
-        outputs=[
-            _FakeCompletion(
-                text="Hello world",
-                finish_reason="stop",
-                token_ids=[10, 11, 12, 13, 14],
-            )
-        ],
-        finished=True,
-    )
-
-    stream_engine = _make_engine([[final]])
-    req = ChatCompletionRequest(
-        model="test-model",
-        messages=[ChatMessage(role="user", content="hi")],
-        stream=True,
-    )
-    with patch("inference_x.engines.vllm_engine._VLLM_AVAILABLE", True):
-        chunks = [c async for c in stream_engine.generate_stream(req)]
-    stream_engine._driver.shutdown()
-    streamed_usage = chunks[-1].usage
-
-    # Non-streaming path over an identical RequestOutput.
-    complete_engine = _make_engine([[final]])
-    complete_engine._run_completion = lambda request: [final]
-    resp = await complete_engine.generate(req)
-    complete_engine._driver.shutdown()
-
-    assert streamed_usage is not None
-    assert streamed_usage.completion_tokens == resp.usage.completion_tokens == 5
-    assert streamed_usage.prompt_tokens == resp.usage.prompt_tokens == 3
-    assert streamed_usage.total_tokens == resp.usage.total_tokens == 8
-    assert chunks[-1].finish_reason == resp.choices[0].finish_reason == "stop"
