@@ -412,6 +412,95 @@ callers SHALL treat an unavailable count as a degraded input rather than an erro
 - **THEN** KV capacity is not declared on it
 - **AND** it is still discovered as an optional attribute by its existing callers
 
+### Requirement: Engine driver rejects requests immediately after failure
+The system SHALL guarantee that once an `EngineDriver`'s underlying `step()` call
+has failed and the driver has been marked dead, no request submitted afterward is
+silently enqueued and left unserved — it SHALL be rejected immediately with the
+driver's failure, not left to time out.
+
+#### Scenario: Submission during the failure transition is rejected, not orphaned
+- WHEN a request is submitted concurrently with a driver's `step()` call failing
+- AND the driver's dead-flag transition and the request's enqueue decision race
+- THEN the request either lands in the pre-failure queue and is included in the
+  broadcast of the failure to all pending requests, or is rejected immediately by
+  the submission call — never silently enqueued with no thread left to serve it
+
+#### Scenario: Submission after death raises immediately
+- WHEN a request is submitted to a driver that is already marked dead
+- THEN the submission call raises immediately, carrying the original failure
+- AND the caller does not wait for any completion or streaming timeout to learn
+  the driver has failed
+
+### Requirement: Default model resolves family names via variant selection
+The system SHALL resolve `INFERENCE_X_DEFAULT_MODEL` through
+`variant_selector.select_variant()` when its value matches a registered model
+family, so the highest-precision variant that fits the current VRAM tier is
+selected at startup. A value that is already a concrete registered model name
+SHALL continue to pass through unchanged.
+
+#### Scenario: Family name resolves to the best-fit variant at startup
+- WHEN `INFERENCE_X_DEFAULT_MODEL` matches a `ModelEntry.family` in the loaded
+  registry and a VRAM tier is resolved
+- THEN the value is resolved via `select_variant()` to the highest-precision
+  variant that fits the current tier's available VRAM
+- AND that resolved variant name is used to construct the default-model policy
+
+#### Scenario: Concrete model names pass through unchanged
+- WHEN `INFERENCE_X_DEFAULT_MODEL` is already an exact registered model name
+- THEN the value is used unchanged
+- AND no call to `select_variant()` is made
+
+### Requirement: Default model resolution surfaces its outcome, not silence
+The system SHALL make the outcome of default-model resolution observable and
+SHALL NOT silently fall back to an arbitrary variant when a recognized family
+has no fitting variant for the current VRAM tier.
+
+#### Scenario: Resolution is logged at startup
+- WHEN a family name is resolved to a concrete variant
+- THEN the system logs, at INFO level, the family name, the resolved variant
+  name, and the current tier name
+
+#### Scenario: Missing-family-fit is a hard startup error
+- WHEN `INFERENCE_X_DEFAULT_MODEL` matches a registered family but no variant
+  in that family fits the current VRAM tier's available budget
+- THEN startup raises an error naming the family, the available variants, and
+  the current tier's VRAM budget
+- AND the system does not silently start with a different, unrequested variant
+
+### Requirement: Changes are verified automatically before merge
+The project SHALL verify every proposed change against the unit suite, the
+configured lint rules, and the configured type baseline automatically, without
+relying on a contributor or reviewer to run those checks by hand.
+
+#### Scenario: A proposed change breaks an existing test
+- WHEN a change is proposed that causes any test in the unit suite to fail
+- THEN the automated verification reports failure
+- AND the change cannot be merged into a long-lived branch until it passes
+
+#### Scenario: A proposed change violates lint or type rules
+- WHEN a change is proposed that violates a configured lint rule, or introduces a
+  type error in a module outside the recorded type baseline
+- THEN the automated verification reports failure
+- AND the change cannot be merged into a long-lived branch until it passes
+
+#### Scenario: Verification requires no accelerator
+- WHEN automated verification runs
+- THEN it completes on a standard hosted runner with no GPU present
+- AND no test is skipped solely because verification ran without a GPU
+
+#### Scenario: The type baseline is explicit and bounded
+- WHEN a module is exempted from type checking
+- THEN that module is named individually in the recorded baseline
+- AND no repository-wide or wildcard exemption is configured, so that a module
+  added later is checked by default rather than silently exempted
+
+#### Scenario: Change is applied
+- WHEN this change is archived
+- THEN automated verification runs on pull requests and on pushes to long-lived
+  branches
+- AND the required checks are enforced at merge time, not merely reported
+- AND the type baseline and the policy governing it are recorded in
+  `docs/DECISIONS.md`
 
 ### Requirement: Reproducible benchmark results
 The benchmark runner SHALL use a fixed, versioned prompt suite so results are
