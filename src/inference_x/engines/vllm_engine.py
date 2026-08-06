@@ -18,6 +18,7 @@ from inference_x.schemas.chat import (
     ChatCompletionResponse,
     ChatCompletionUsage,
     ChatStreamChunk,
+    EngineTiming,
 )
 
 logger = logging.getLogger(__name__)
@@ -35,19 +36,23 @@ _COMPLETION_TIMEOUT_S = 300.0
 
 def derive_terminal_metadata(
     output: Any,
-) -> tuple[Literal["stop", "length"], ChatCompletionUsage]:
-    """Map a finished vLLM `RequestOutput` to a finish reason and engine usage.
+) -> tuple[Literal["stop", "length"], ChatCompletionUsage, EngineTiming | None]:
+    """Map a finished vLLM `RequestOutput` to a finish reason, engine usage,
+    and per-request engine timing (Phase B3).
 
-    Shared by the streaming terminal chunk and non-streaming `generate`, so the
-    two paths cannot drift: OS-2 requires that a streamed and a non-streamed
-    request for the same prompt report the same `completion_tokens`, and one
-    function is the only way to guarantee that rather than hope for it.
+    Shared by the streaming terminal chunk and non-streaming `generate`, so
+    the two paths cannot drift: OS-2/DEC-050 requires that a streamed and a
+    non-streamed request for the same prompt report the same
+    `completion_tokens`, and this change extends that same guarantee to
+    timing — one function is the only way to guarantee it rather than hope
+    for it.
 
     Counts come from vLLM's own token ids. Nothing here counts text.
 
     Relocated verbatim from the deleted `engines/driver.py` during the
     migrate-async-llm-engine change (DEC-050 §3 / OWN-B5): moved, not
-    reimplemented — the body is unchanged from its EngineDriver-era form.
+    reimplemented — the body is unchanged from its EngineDriver-era form,
+    aside from the Phase B3 timing addition below.
     """
     completion = output.outputs[0]
     finish: Literal["stop", "length"] = (
@@ -55,10 +60,52 @@ def derive_terminal_metadata(
     )
     prompt_tokens = len(output.prompt_token_ids) if output.prompt_token_ids else 0
     completion_tokens = len(completion.token_ids) if completion.token_ids else 0
-    return finish, ChatCompletionUsage(
+    usage = ChatCompletionUsage(
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
         total_tokens=prompt_tokens + completion_tokens,
+    )
+    return finish, usage, _derive_engine_timing(output)
+
+
+def _derive_engine_timing(output: Any) -> EngineTiming | None:
+    """Derive `EngineTiming` from a finished `RequestOutput.metrics`, or
+    `None` on any failure (Phase B3, expose-per-request-engine-timing).
+
+    Reads defensively (`getattr` with a `None` default) because
+    `RequestStateStats` is a vLLM-internal type (`vllm.v1.metrics.stats`)
+    with no documented field-stability guarantee — see that change's
+    design.md §6. Any missing or non-numeric field degrades the whole block
+    to `None` rather than a partially populated `EngineTiming` (design.md
+    Decision 5): a partial timing block would imply completeness that
+    isn't there.
+
+    Uses only `queued_ts`, `scheduled_ts`, `first_token_ts`, `last_token_ts`
+    — all engine-core-process `time.monotonic()` timestamps, verified to
+    share one clock domain (design.md §3). Deliberately never reads
+    `arrival_time` (frontend wall-clock — a different, unverified-safe
+    domain) or `first_token_latency` (duplicates existing HTTP-boundary
+    TTFT, DEC-049) — see design.md §5.
+    """
+    metrics = getattr(output, "metrics", None)
+    if metrics is None:
+        return None
+    queued_ts = getattr(metrics, "queued_ts", None)
+    scheduled_ts = getattr(metrics, "scheduled_ts", None)
+    first_token_ts = getattr(metrics, "first_token_ts", None)
+    last_token_ts = getattr(metrics, "last_token_ts", None)
+    if not all(
+        isinstance(v, (int, float))
+        for v in (queued_ts, scheduled_ts, first_token_ts, last_token_ts)
+    ):
+        return None
+    prefill_time_ms = (first_token_ts - scheduled_ts) * 1000
+    decode_time_ms = (last_token_ts - first_token_ts) * 1000
+    return EngineTiming(
+        queue_time_ms=(scheduled_ts - queued_ts) * 1000,
+        prefill_time_ms=prefill_time_ms,
+        decode_time_ms=decode_time_ms,
+        inference_time_ms=prefill_time_ms + decode_time_ms,
     )
 
 
@@ -604,8 +651,10 @@ class VLLMEngine(BaseEngine):
                 if chunk:
                     yield ChatStreamChunk(content=chunk)
                 if output.finished:
-                    finish, usage = derive_terminal_metadata(output)
-                    yield ChatStreamChunk(content="", finish_reason=finish, usage=usage)
+                    finish, usage, timing = derive_terminal_metadata(output)
+                    yield ChatStreamChunk(
+                        content="", finish_reason=finish, usage=usage, timing=timing
+                    )
         except (asyncio.CancelledError, GeneratorExit):
             raise
         except Exception as exc:
@@ -635,6 +684,7 @@ class VLLMEngine(BaseEngine):
         generated_parts: list[str] = []
         finish: Literal["stop", "length"] = "stop"
         usage: ChatCompletionUsage | None = None
+        timing: EngineTiming | None = None
         try:
             async with asyncio.timeout(_COMPLETION_TIMEOUT_S):
                 async for chunk in self._stream_chunks(request):
@@ -648,6 +698,7 @@ class VLLMEngine(BaseEngine):
                         # widen `finish`'s type to match ChatStreamChunk's.
                         finish = "length" if chunk.finish_reason == "length" else "stop"
                         usage = chunk.usage
+                        timing = chunk.timing
         except TimeoutError as exc:
             raise RuntimeError(
                 f"vLLM completion timed out after {_COMPLETION_TIMEOUT_S}s "
@@ -665,6 +716,7 @@ class VLLMEngine(BaseEngine):
                 )
             ],
             usage=usage,
+            timing=timing,
         )
 
     def is_healthy(self) -> bool:

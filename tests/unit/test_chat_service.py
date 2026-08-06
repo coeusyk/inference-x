@@ -16,6 +16,7 @@ from inference_x.schemas.chat import (
     ChatCompletionUsage,
     ChatMessage,
     ChatStreamChunk,
+    EngineTiming,
 )
 from inference_x.schemas.model import ModelEntry
 from inference_x.services.chat_service import ChatService
@@ -104,6 +105,12 @@ class _StubEngine(BaseEngine):
             finish_reason="stop",
             usage=ChatCompletionUsage(
                 prompt_tokens=3, completion_tokens=1, total_tokens=4
+            ),
+            timing=EngineTiming(
+                queue_time_ms=1.0,
+                prefill_time_ms=2.0,
+                decode_time_ms=3.0,
+                inference_time_ms=5.0,
             ),
         )
 
@@ -422,6 +429,42 @@ class TestStreamingContract:
         assert usage["id"] == content["id"]
 
         assert done == "[DONE]"
+
+    @pytest.mark.asyncio
+    async def test_include_usage_bundles_timing_onto_the_usage_event(self):
+        """Phase B3: timing rides the existing usage event, gated by the same
+        include_usage opt-in — not a new flag (design.md Decision 6)."""
+        events = _parse(
+            [
+                e
+                async for e in _make_service().stream_response(
+                    self._req(stream_options={"include_usage": True})
+                )
+            ]
+        )
+
+        usage = events[3]
+        assert usage["usage"] == {
+            "prompt_tokens": 3,
+            "completion_tokens": 1,
+            "total_tokens": 4,
+        }
+        assert usage["timing"] == {
+            "queue_time_ms": 1.0,
+            "prefill_time_ms": 2.0,
+            "decode_time_ms": 3.0,
+            "inference_time_ms": 5.0,
+        }
+
+    @pytest.mark.asyncio
+    async def test_default_stream_never_emits_timing(self):
+        """No stream_options -> no usage event, so no timing event either,
+        even though the stub engine supplies timing on its terminal chunk."""
+        events = _parse(
+            [e async for e in _make_service().stream_response(self._req())]
+        )
+
+        assert all("timing" not in e for e in events if isinstance(e, dict))
 
     @pytest.mark.asyncio
     async def test_nothing_is_emitted_after_the_usage_event(self):
