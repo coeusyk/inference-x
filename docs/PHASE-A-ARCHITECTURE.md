@@ -298,12 +298,13 @@ Broader Phase B/C roadmap (`docs/REVIEW-2026-08-03-architecture.md` §9),
 sequenced after Phase A and explicitly not gated by Engine Boundary hygiene:
 
 - **Phase B** (highest leverage): migrate `LLM` + `EngineDriver` to
-  `AsyncLLM` (B1, deletes the driver and its DEC-038/039 race-class
-  history); expose vLLM's native Prometheus stats (B2); per-request
-  queue/prefill/decode timing in the response body (B3); re-scope
-  admission to what the scheduler cannot already do (B4); batch queueing
-  instead of `429` for `priority: batch` (B5); split multi-model serving
-  into separate processes (B6).
+  `AsyncLLM` (**B1 — complete**, deletes the driver and its DEC-038/039
+  race-class history); expose vLLM's native Prometheus stats (**B2 —
+  complete**); per-request queue/prefill/decode timing in the response
+  body (B3);
+  re-scope admission to what the scheduler cannot already do (B4); batch
+  queueing instead of `429` for `priority: batch` (B5); split multi-model
+  serving into separate processes (B6).
 - **Phase C** (the differentiator): a signed run manifest and `X-Run-Id`
   (C1); `batch.co_batched_request_ids` (C2); `deterministic: true` wiring
   `VLLM_BATCH_INVARIANT=1`, refusing on unsupported hardware (C3); an
@@ -313,6 +314,75 @@ sequenced after Phase A and explicitly not gated by Engine Boundary hygiene:
   optional-`vllm`, a `llama-server` proxy backend): requires its own
   accepted ADR authorizing a concrete second backend before it can begin;
   DEC-047 does not authorize it.
+
+### B1 status: complete
+
+`VLLMEngine` now constructs and drives vLLM's `AsyncLLM` (v1 async engine
+client) directly; `LLM` + `EngineDriver` and the DEC-038/039/043 race-class
+history are deleted. Full rationale, verification evidence, and the 8
+implementation decisions: DEC-058, `openspec/changes/archive/` (change id
+`migrate-async-llm-engine`). Summary:
+
+- `_POOL_STEP_LOCK` deleted outright — each `AsyncLLM` instance owns an
+  independent engine-core process, so the in-process race it guarded against
+  has no equivalent under `AsyncLLM`.
+- `generate()` is derived from `generate_stream()` — exactly one code path
+  calls into `AsyncLLM.generate()`, preserving the DEC-050 single-source
+  guarantee for terminal usage metadata.
+- `pool_size > 1` remains an open question — B1 neither guarantees nor
+  forbids it; B6 remains the only phase authorized to redesign multi-engine
+  serving.
+- Cancellation and per-request timeout are now real, engine-side signals
+  (previously a disconnected or timed-out request's computation ran to
+  completion regardless) — see `CHANGELOG.md`.
+- Health (`AsyncLLM.errored`) and KV-cache introspection
+  (`self._llm.vllm_config.cache_config`) are sourced directly from
+  `AsyncLLM`; no repo-local dead-flag or driver wrapper remains.
+- Zero edits landed in `api/`, `services/`, or `routing/` — the migration is
+  contained entirely within `engines/` as scoped.
+
+This directly affects the first deferred-assumption bullet above
+(`_warm_ttft_ms`): `AsyncLLM` is now the live runtime, so that assumption is
+active, not merely anticipated. It is not re-verified here — a benchmarking
+change is needed to confirm or refute it, tracked as future Phase B/C work
+(Phase A audit, "Advisor assumption review").
+
+### B2 status: complete
+
+`GET /metrics` mounts vLLM's own default `PrometheusStatLogger` output as a
+Prometheus text-exposition endpoint, additive alongside the pre-existing
+`GET /v1/metrics` JSON summary — no other InferenceX API surface changed. No
+OpenSpec proposal existed for B2 before this change; it is tracked as
+`openspec/changes/expose-native-engine-metrics/`. Summary, verified directly
+against the shipped implementation rather than restated from `design.md`:
+
+- **Registry identity was confirmed empirically, not assumed.** vLLM's
+  default `PrometheusStatLogger` (`vllm.v1.metrics.loggers`) registers its
+  `vllm:*` series directly onto the process-global `prometheus_client.
+  REGISTRY` — confirmed by constructing a real `PrometheusStatLogger`
+  against a real `VllmConfig` and observing new `vllm:`-prefixed collectors
+  appear in `REGISTRY._names_to_collectors`. `api/main.py` mounts
+  `prometheus_client.make_asgi_app()` with no registry argument and no
+  `vllm` import in `api/` — the Engine Boundary (DEC-047) stays clean.
+- **`GET /metrics` is excluded from `ObservabilityMiddleware`**, so scraping
+  it never enters `InMemoryStorage` or affects `GET /v1/metrics`'s
+  aggregates (`total_requests`, `avg_latency_ms`, etc.). This is the only
+  path added to the exclusion. **`GET /health` is not excluded** and was
+  never claimed to need to be: it was already recorded into `/v1/metrics`
+  before this change and still is — pre-existing behavior this change does
+  not touch.
+- `pool_size > 1` now logs one startup `WARNING` naming the metric-label
+  collision risk of multiple `AsyncLLM` instances' default stat loggers
+  sharing one process-wide registry. Recorded, not guarded against — no new
+  construction-time validation in either direction, consistent with B1
+  Decision 3's stance that `pool_size > 1` is neither guaranteed nor
+  forbidden.
+- `prometheus-client` is now a direct `pyproject.toml` dependency (previously
+  transitive via `vllm` only), because `api/main.py` imports its public API
+  directly.
+- No wire-format or existing-endpoint behavior changed: `/v1/chat/
+  completions`, `/v1/models`, `/health`, and `/v1/metrics` are unaffected —
+  the only addition is the new `GET /metrics` route.
 
 ## 11. ADR index
 

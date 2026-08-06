@@ -3,21 +3,27 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+from inference_x.engines import vllm_engine as vllm_engine_module
 from inference_x.engines.vllm_engine import VLLMEngine
 
 
-def _init_engine(scaled_config: dict) -> dict:
+def _init_engine(scaled_config: dict, *, pool_size: int = 1) -> dict:
     captured: dict = {}
 
-    class FakeLLM:
+    class FakeAsyncEngineArgs:
         def __init__(self, **kwargs):
             captured.update(kwargs)
-            self.llm_engine = MagicMock()
 
+    class FakeLLM:
         def get_tokenizer(self):
             tok = MagicMock()
             tok.chat_template = None
             return tok
+
+    class FakeAsyncLLM:
+        @classmethod
+        def from_engine_args(cls, engine_args):
+            return FakeLLM()
 
     with patch("inference_x.engines.vllm_engine._VLLM_AVAILABLE", True):
         with patch("inference_x.engines.vllm_engine._load_vllm"):
@@ -30,13 +36,17 @@ def _init_engine(scaled_config: dict) -> dict:
                         with patch("inference_x.engines.vllm_engine._check_vram_budget"):
                             with patch.dict(
                                 "inference_x.engines.vllm_engine.__dict__",
-                                {"LLM": FakeLLM},
+                                {
+                                    "AsyncEngineArgs": FakeAsyncEngineArgs,
+                                    "AsyncLLM": FakeAsyncLLM,
+                                },
                             ):
                                 VLLMEngine(
                                     {
                                         "name": scaled_config["name"],
                                         "model_path": scaled_config["model_path"],
-                                    }
+                                    },
+                                    pool_size=pool_size,
                                 )
     return captured
 
@@ -79,3 +89,46 @@ def test_tier_knobs_omitted_when_absent():
         "enable_prefix_caching",
     ):
         assert key not in captured
+
+
+# ---------------------------------------------------------------------------
+# pool_size > 1 metric-label collision warning (expose-native-engine-metrics)
+# ---------------------------------------------------------------------------
+
+_BASE_CONFIG = {
+    "name": "qwen2.5-0.5b",
+    "model_path": "Qwen/Qwen2.5-0.5B-Instruct",
+    "gpu_memory_utilization": 0.82,
+}
+
+
+def _capture_warnings(monkeypatch) -> list[str]:
+    # Assert on the logger call directly rather than caplog: config/logging.yaml sets
+    # propagate: false on the "inference_x" logger once any test imports
+    # inference_x.api.main (which applies the dictConfig), so records never reach
+    # caplog's root-attached handler even though the console handler does fire
+    # (same workaround as tests/unit/test_vram_tiers.py).
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        vllm_engine_module.logger,
+        "warning",
+        lambda msg, *args, **kw: warnings.append(msg % args if args else msg),
+    )
+    return warnings
+
+
+def test_pool_size_one_emits_no_collision_warning(monkeypatch):
+    warnings = _capture_warnings(monkeypatch)
+    _init_engine(dict(_BASE_CONFIG), pool_size=1)
+    assert not any("process-wide" in w for w in warnings)
+
+
+def test_pool_size_greater_than_one_emits_exactly_one_collision_warning(monkeypatch):
+    warnings = _capture_warnings(monkeypatch)
+    _init_engine(dict(_BASE_CONFIG), pool_size=2)
+    collision_warnings = [w for w in warnings if "process-wide" in w]
+    assert len(collision_warnings) == 1
+    message = collision_warnings[0]
+    assert "process-wide" in message
+    assert "collision" in message
+    assert "not yet verified" in message

@@ -1,6 +1,6 @@
 [project]
 name = "inferencex"
-version = "0.3.0"
+version = "0.4.0"
 description = "Self-hosted LLM inference platform with smart routing and observability"
 requires-python = ">=3.13"
 dependencies = [
@@ -13,6 +13,7 @@ dependencies = [
     "uvicorn>=0.32.0",
     "rich>=13.0",
     "textual>=8.2,<9",
+    "prometheus-client>=0.25.0",
 ]
 
 [project.optional-dependencies]
@@ -71,8 +72,7 @@ ignore_missing_imports = true
 # Phase A; growth is a review finding, not a routine edit.
 [[tool.mypy.overrides]]
 module = [
-    "inference_x.engines.vllm_engine",  # 10 — vLLM's LLM is untyped
-    "inference_x.engines.driver",       # 7  — Optional narrowing; deleted in Phase B1
+    "inference_x.engines.vllm_engine",  # 8 — vLLM's AsyncLLM is untyped (5); 3 pre-existing, unrelated to B1
     "inference_x.api.deps",             # 2  — composition-root arg types
 ]
 ignore_errors = true

@@ -1,11 +1,14 @@
 import logging
 import logging.config
 import os
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 import yaml
 from fastapi import FastAPI
+from prometheus_client import make_asgi_app
+from starlette.routing import Mount
 
 from inference_x.utils.vllm_platform_patch import apply as apply_vllm_platform_patch
 
@@ -77,3 +80,14 @@ app.include_router(chat_router, prefix="/v1")
 app.include_router(models_router, prefix="/v1")
 app.include_router(metrics_router, prefix="/v1")
 app.include_router(benchmark_router, prefix="/v1/benchmark")
+
+# vLLM's own native Prometheus stat logger, mounted as-is against the default
+# prometheus_client.REGISTRY it already registers into (verified empirically —
+# see openspec/changes/expose-native-engine-metrics/design.md Decision 1).
+# Distinct from GET /v1/metrics (InferenceX's own HTTP-boundary JSON summary).
+# path_regex override avoids Starlette's default Mount behavior of 307-
+# redirecting the bare "/metrics" path to "/metrics/" before reaching the
+# sub-app (same workaround vLLM's own instrumentator mounting code uses).
+_metrics_route = Mount("/metrics", make_asgi_app())
+_metrics_route.path_regex = re.compile("^/metrics(?P<path>.*)$")
+app.routes.append(_metrics_route)
