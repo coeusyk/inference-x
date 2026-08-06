@@ -143,6 +143,27 @@ class ChatCompletionUsage(BaseModel):
     total_tokens: int
 
 
+class EngineTiming(BaseModel):
+    """Per-request engine-internal timing (Phase B3).
+
+    Derived exclusively from the engine's own process-clock timestamps —
+    never from a frontend wall-clock or HTTP-boundary timestamp (see
+    `expose-per-request-engine-timing` design.md, "clock domain"). This is
+    deliberately distinct from `GET /v1/metrics`'s HTTP-boundary latency/TTFT
+    and from `GET /metrics`'s process-wide Prometheus series: this block
+    answers "how was *this* request served," not "how is the engine doing."
+
+    `inference_time_ms` is `prefill_time_ms + decode_time_ms`, reported
+    directly (mirroring vLLM's own internal tracing) rather than requiring
+    the client to re-derive it.
+    """
+
+    queue_time_ms: float
+    prefill_time_ms: float
+    decode_time_ms: float
+    inference_time_ms: float
+
+
 class ChatStreamChunk(BaseModel):
     """One event on the engine streaming channel (DEC-049).
 
@@ -151,14 +172,17 @@ class ChatStreamChunk(BaseModel):
     models: DEC-047 forbids a backend-neutral execution package, and a second
     type system for the same information is exactly what that prohibits.
 
-    Content events set `content` and leave `finish_reason` and `usage` None.
-    The terminal event sets `finish_reason`, and sets `usage` when the backend
-    can account it. Per-request timings are Phase B3 and are not carried here.
+    Content events set `content` and leave `finish_reason`, `usage`, and
+    `timing` None. The terminal event sets `finish_reason`, and sets `usage`
+    and `timing` when the backend can account them — an engine that cannot
+    supply per-request timing leaves `timing` None rather than estimating it
+    (Phase B3, mirroring DEC-049's usage-absence rule).
     """
 
     content: str = ""
     finish_reason: Optional[Literal["stop", "length", "error"]] = None
     usage: Optional[ChatCompletionUsage] = None
+    timing: Optional[EngineTiming] = None
 
 
 class ChatCompletionResponse(BaseModel):
@@ -168,6 +192,13 @@ class ChatCompletionResponse(BaseModel):
     model: str
     choices: list[ChatCompletionChoice]
     usage: ChatCompletionUsage
+    timing: Optional[EngineTiming] = Field(
+        default=None,
+        description="Per-request engine-internal timing (Phase B3): queue, "
+        "prefill, decode, and total inference time, sourced from the "
+        "engine's own process-clock timestamps. None when the backend "
+        "cannot supply it — never estimated.",
+    )
     resolved: Optional[ResolvedRequest] = Field(
         default=None,
         description="The request the server actually executed (OS-4). Attached by "

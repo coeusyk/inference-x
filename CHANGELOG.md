@@ -15,6 +15,14 @@ refactors with no observable behavior change are not listed — see
   text-exposition format. `/v1/metrics` is unchanged — it continues to
   report only HTTP-boundary metrics (latency, TTFT, tokens/sec) — and
   scraping `/metrics` never affects `/v1/metrics`'s figures.
+- **Chat completion responses now include per-request engine timing.** Both
+  `POST /v1/chat/completions` (non-streaming) and the streaming terminal
+  event carry an optional `timing` field: `queue_time_ms`, `prefill_time_ms`,
+  `decode_time_ms`, and `inference_time_ms`, sourced directly from the
+  engine's own internal clock. This decomposes a request's latency into
+  queueing versus prefill versus decode — a breakdown no client could
+  reconstruct from the outside. `timing` is `None` when the engine cannot
+  supply it, never an estimate.
 
 ### Changed
 

@@ -29,10 +29,35 @@ class _FakeCompletion:
 
 
 class _FakeRequestOutput:
-    def __init__(self, outputs, finished, prompt_token_ids=(1, 2, 3)):
+    def __init__(self, outputs, finished, prompt_token_ids=(1, 2, 3), metrics=None):
         self.outputs = outputs
         self.finished = finished
         self.prompt_token_ids = list(prompt_token_ids)
+        self.metrics = metrics
+
+
+class _FakeRequestStateStats:
+    """Stand-in for `vllm.v1.metrics.stats.RequestStateStats` (verified
+    Task 1.1/1.2 — expose-per-request-engine-timing). Values below reproduce
+    the real live-verification run recorded in that change's design.md.
+    """
+
+    def __init__(
+        self,
+        queued_ts=187239.580166,
+        scheduled_ts=187239.580180,
+        first_token_ts=187240.235890,
+        last_token_ts=187240.331037,
+    ):
+        self.queued_ts = queued_ts
+        self.scheduled_ts = scheduled_ts
+        self.first_token_ts = first_token_ts
+        self.last_token_ts = last_token_ts
+        # Present on the real object but deliberately never read by
+        # _derive_engine_timing (different clock domain / duplicates
+        # existing TTFT — design.md §3, §5).
+        self.arrival_time = 1786012425.083239
+        self.first_token_latency = 0.658468
 
 
 class _FakeSamplingParams:
@@ -267,3 +292,85 @@ async def test_streamed_and_non_streamed_usage_agree():
     assert streamed_usage.prompt_tokens == resp.usage.prompt_tokens == 3
     assert streamed_usage.total_tokens == resp.usage.total_tokens == 8
     assert chunks[-1].finish_reason == resp.choices[0].finish_reason == "stop"
+
+
+async def test_streamed_and_non_streamed_timing_agree():
+    """Phase B3 acceptance criterion (expose-per-request-engine-timing
+    design.md, Compatibility Invariant 4): both paths derive from the same
+    `derive_terminal_metadata` call, so agreement is structural."""
+    final = _FakeRequestOutput(
+        [_FakeCompletion("Hello world", "stop", [10, 11, 12, 13, 14])],
+        True,
+        metrics=_FakeRequestStateStats(),
+    )
+    stream_engine = _make_engine(_FakeAsyncLLM({_prompt("hi"): [final]}))
+    complete_engine = _make_engine(_FakeAsyncLLM({_prompt("hi"): [final]}))
+
+    chunks = [c async for c in stream_engine.generate_stream(_req())]
+    resp = await complete_engine.generate(_req())
+
+    streamed_timing = chunks[-1].timing
+    assert streamed_timing is not None
+    assert resp.timing is not None
+    assert streamed_timing == resp.timing
+
+
+async def test_engine_timing_matches_verified_formula():
+    """Regression-anchors the derivation to the real numbers recorded in
+    expose-per-request-engine-timing design.md's live-verification run —
+    not just internal arithmetic consistency."""
+    final = _FakeRequestOutput(
+        [_FakeCompletion("Hello world", "stop", [10, 11, 12, 13, 14])],
+        True,
+        metrics=_FakeRequestStateStats(),
+    )
+    engine = _make_engine(_FakeAsyncLLM({_prompt("hi"): [final]}))
+
+    resp = await engine.generate(_req())
+
+    assert resp.timing is not None
+    assert resp.timing.queue_time_ms == pytest.approx(0.014, abs=1e-2)
+    assert resp.timing.prefill_time_ms == pytest.approx(655.71, abs=1e-1)
+    assert resp.timing.decode_time_ms == pytest.approx(95.147, abs=1e-1)
+    assert resp.timing.inference_time_ms == pytest.approx(
+        resp.timing.prefill_time_ms + resp.timing.decode_time_ms
+    )
+
+
+async def test_engine_timing_absent_when_metrics_missing():
+    """A backend that cannot supply per-request timing leaves `timing` None
+    rather than a partial or estimated EngineTiming (design.md Decision 4/5,
+    mirroring DEC-049's usage-absence rule)."""
+    final = _FakeRequestOutput(
+        [_FakeCompletion("Hello world", "stop", [10, 11, 12])], True
+    )  # metrics defaults to None
+    stream_engine = _make_engine(_FakeAsyncLLM({_prompt("hi"): [final]}))
+    complete_engine = _make_engine(_FakeAsyncLLM({_prompt("hi"): [final]}))
+
+    chunks = [c async for c in stream_engine.generate_stream(_req())]
+    resp = await complete_engine.generate(_req())
+
+    assert chunks[-1].timing is None
+    assert resp.timing is None
+
+
+async def test_engine_timing_absent_when_a_field_is_missing():
+    """A partially populated metrics object degrades to `timing=None`
+    entirely — never a partial EngineTiming (design.md Decision 5)."""
+
+    class _IncompleteMetrics:
+        queued_ts = 1.0
+        scheduled_ts = 1.1
+        first_token_ts = None  # missing/unreadable
+        last_token_ts = 1.5
+
+    final = _FakeRequestOutput(
+        [_FakeCompletion("Hello world", "stop", [10, 11, 12])],
+        True,
+        metrics=_IncompleteMetrics(),
+    )
+    engine = _make_engine(_FakeAsyncLLM({_prompt("hi"): [final]}))
+
+    resp = await engine.generate(_req())
+
+    assert resp.timing is None
