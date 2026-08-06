@@ -13,6 +13,7 @@ dependencies = [
     "uvicorn>=0.32.0",
     "rich>=13.0",
     "textual>=8.2,<9",
+    "prometheus-client>=0.25.0",
 ]
 
 [project.optional-dependencies]
