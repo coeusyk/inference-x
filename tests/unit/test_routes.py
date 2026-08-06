@@ -5,6 +5,7 @@ is never imported in this test — it runs on any machine without a GPU.
 """
 import pytest
 from fastapi.testclient import TestClient
+from prometheus_client import REGISTRY, Gauge
 
 from inference_x.api.deps import get_chat_service, get_engine_pool, get_metrics_service, get_registry
 from inference_x.api.main import app
@@ -484,3 +485,76 @@ class TestMetricsEndpoint:
         body = resp.json()
         assert body["total_requests"] == 1
         assert body["avg_latency_ms"] == 12.0
+
+
+# ---------------------------------------------------------------------------
+# Native Prometheus metrics endpoint (GET /metrics) — expose-native-engine-metrics
+# ---------------------------------------------------------------------------
+
+class TestNativeMetricsEndpoint:
+    """GET /metrics: vLLM's native Prometheus stat logger, mounted as a
+    passthrough (see openspec/changes/expose-native-engine-metrics). Distinct
+    from GET /v1/metrics (InferenceX's own JSON summary, tested above).
+    """
+
+    @pytest.fixture()
+    def native_metrics_client(self):
+        registry = _make_stub_registry()
+        pool = EnginePool({_TEST_MODEL: _StubEngine()})
+        recorder = MetricsRecorder(storage=InMemoryStorage())
+
+        app.dependency_overrides[get_registry] = lambda: registry
+        app.dependency_overrides[get_engine_pool] = lambda: pool
+        app.dependency_overrides[get_metrics_service] = lambda: MetricsService(recorder)
+        app.dependency_overrides[get_chat_service] = _stub_service_factory(healthy=True)
+        with TestClient(app) as c:
+            yield c, recorder
+        app.dependency_overrides.clear()
+
+    def test_returns_200(self, native_metrics_client):
+        client, _ = native_metrics_client
+        resp = client.get("/metrics")
+        assert resp.status_code == 200
+
+    def test_content_type_is_prometheus_exposition(self, native_metrics_client):
+        client, _ = native_metrics_client
+        resp = client.get("/metrics")
+        content_type = resp.headers["content-type"]
+        assert content_type.startswith("text/plain")
+        assert "version=0.0.4" in content_type
+
+    def test_contains_a_vllm_prefixed_metric(self, native_metrics_client):
+        """No real AsyncLLM is constructed in this unit test (per this module's
+        own "vLLM is never imported" contract), so there is no real
+        PrometheusStatLogger to produce vllm: series here. Instead this
+        registers a vllm:-prefixed Gauge directly onto prometheus_client's
+        global REGISTRY — exactly where design.md Decision 1 verified vLLM's
+        own default stat logger registers its series — and asserts the mount
+        surfaces it. This proves the mount is a correct, unfiltered passthrough
+        of whatever the registry holds, independent of vLLM being importable.
+        """
+        client, _ = native_metrics_client
+        gauge = Gauge("vllm:test_probe_metric", "test probe", registry=REGISTRY)
+        gauge.set(1)
+        try:
+            resp = client.get("/metrics")
+            assert "vllm:test_probe_metric" in resp.text
+        finally:
+            REGISTRY.unregister(gauge)
+
+    def test_scrape_does_not_affect_metrics_service_summary(self, native_metrics_client):
+        client, recorder = native_metrics_client
+        recorder.record(path="/v1/chat/completions", method="POST", status_code=200, latency_ms=12.0)
+
+        service = MetricsService(recorder)
+        before = service.summary()
+
+        for _ in range(3):
+            resp = client.get("/metrics")
+            assert resp.status_code == 200
+
+        after = service.summary()
+        assert after.total_requests == before.total_requests
+        assert after.avg_latency_ms == before.avg_latency_ms
+        assert after.error_count == before.error_count
+        assert len(recorder.storage.all()) == 1

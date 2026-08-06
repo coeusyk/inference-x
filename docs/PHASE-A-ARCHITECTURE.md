@@ -299,8 +299,9 @@ sequenced after Phase A and explicitly not gated by Engine Boundary hygiene:
 
 - **Phase B** (highest leverage): migrate `LLM` + `EngineDriver` to
   `AsyncLLM` (**B1 — complete**, deletes the driver and its DEC-038/039
-  race-class history); expose vLLM's native Prometheus stats (B2);
-  per-request queue/prefill/decode timing in the response body (B3);
+  race-class history); expose vLLM's native Prometheus stats (**B2 —
+  complete**); per-request queue/prefill/decode timing in the response
+  body (B3);
   re-scope admission to what the scheduler cannot already do (B4); batch
   queueing instead of `429` for `priority: batch` (B5); split multi-model
   serving into separate processes (B6).
@@ -345,6 +346,43 @@ This directly affects the first deferred-assumption bullet above
 active, not merely anticipated. It is not re-verified here — a benchmarking
 change is needed to confirm or refute it, tracked as future Phase B/C work
 (Phase A audit, "Advisor assumption review").
+
+### B2 status: complete
+
+`GET /metrics` mounts vLLM's own default `PrometheusStatLogger` output as a
+Prometheus text-exposition endpoint, additive alongside the pre-existing
+`GET /v1/metrics` JSON summary — no other InferenceX API surface changed. No
+OpenSpec proposal existed for B2 before this change; it is tracked as
+`openspec/changes/expose-native-engine-metrics/`. Summary, verified directly
+against the shipped implementation rather than restated from `design.md`:
+
+- **Registry identity was confirmed empirically, not assumed.** vLLM's
+  default `PrometheusStatLogger` (`vllm.v1.metrics.loggers`) registers its
+  `vllm:*` series directly onto the process-global `prometheus_client.
+  REGISTRY` — confirmed by constructing a real `PrometheusStatLogger`
+  against a real `VllmConfig` and observing new `vllm:`-prefixed collectors
+  appear in `REGISTRY._names_to_collectors`. `api/main.py` mounts
+  `prometheus_client.make_asgi_app()` with no registry argument and no
+  `vllm` import in `api/` — the Engine Boundary (DEC-047) stays clean.
+- **`GET /metrics` is excluded from `ObservabilityMiddleware`**, so scraping
+  it never enters `InMemoryStorage` or affects `GET /v1/metrics`'s
+  aggregates (`total_requests`, `avg_latency_ms`, etc.). This is the only
+  path added to the exclusion. **`GET /health` is not excluded** and was
+  never claimed to need to be: it was already recorded into `/v1/metrics`
+  before this change and still is — pre-existing behavior this change does
+  not touch.
+- `pool_size > 1` now logs one startup `WARNING` naming the metric-label
+  collision risk of multiple `AsyncLLM` instances' default stat loggers
+  sharing one process-wide registry. Recorded, not guarded against — no new
+  construction-time validation in either direction, consistent with B1
+  Decision 3's stance that `pool_size > 1` is neither guaranteed nor
+  forbidden.
+- `prometheus-client` is now a direct `pyproject.toml` dependency (previously
+  transitive via `vllm` only), because `api/main.py` imports its public API
+  directly.
+- No wire-format or existing-endpoint behavior changed: `/v1/chat/
+  completions`, `/v1/models`, `/health`, and `/v1/metrics` are unaffected —
+  the only addition is the new `GET /metrics` route.
 
 ## 11. ADR index
 

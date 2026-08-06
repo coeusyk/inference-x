@@ -73,6 +73,13 @@ class ObservabilityMiddleware(BaseHTTPMiddleware):
         self._recorder = recorder
 
     async def dispatch(self, request: Request, call_next) -> Response:
+        # vLLM's native Prometheus scrape endpoint (mounted in api/main.py) is
+        # excluded entirely: no timing, no extraction, no recorder call. A
+        # scrape must never enter InMemoryStorage or skew GET /v1/metrics
+        # aggregates (expose-native-engine-metrics design.md Decision 2).
+        if request.url.path.startswith("/metrics"):
+            return await call_next(request)
+
         start = time.perf_counter()
         is_chat = request.method == "POST" and request.url.path == _CHAT_PATH
 

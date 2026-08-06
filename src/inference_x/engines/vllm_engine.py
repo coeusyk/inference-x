@@ -395,6 +395,16 @@ class VLLMEngine(BaseEngine):
                 model_config["name"],
             )
 
+        if pool_size > 1:
+            logger.warning(
+                "pool_size=%d: each AsyncLLM instance's native Prometheus stat "
+                "logger registers its vllm: metrics into the same process-wide "
+                "prometheus_client registry, so metric-label collisions across "
+                "engine instances on GET /metrics are possible. This "
+                "configuration is not yet verified.",
+                pool_size,
+            )
+
         logger.info("Initializing vLLM engine for model=%s path=%s", self._model_name, self._model_path)
         logger.info(
             "Loading weights (first run downloads from HuggingFace with no progress "

@@ -6,6 +6,16 @@ refactors with no observable behavior change are not listed — see
 
 ## [Unreleased]
 
+### Added
+
+- **`GET /metrics`: vLLM's own native Prometheus stats are now exposed
+  directly**, alongside the existing `GET /v1/metrics` JSON summary.
+  `/metrics` returns vLLM's `vllm:`-prefixed series (request queue depth, KV
+  cache utilization, per-phase timing, and more) in standard Prometheus
+  text-exposition format. `/v1/metrics` is unchanged — it continues to
+  report only HTTP-boundary metrics (latency, TTFT, tokens/sec) — and
+  scraping `/metrics` never affects `/v1/metrics`'s figures.
+
 ### Changed
 
 - **Cancellation now actually stops the model computing for a disconnected
@@ -25,3 +35,8 @@ refactors with no observable behavior change are not listed — see
   has no effect on the request/response format, streaming protocol, or
   reported token usage — see DEC-058 for the full record if you're
   curious about the internals.
+- Running with `pool_size > 1` (multi-engine serving) now logs a startup
+  warning that each engine's native Prometheus stat logger shares one
+  process-wide metrics registry, so `/metrics` labels may collide across
+  engines. This is a recorded, known limitation, not a new restriction —
+  `pool_size > 1` remains neither guaranteed nor forbidden.
