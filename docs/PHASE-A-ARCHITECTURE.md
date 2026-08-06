@@ -301,7 +301,7 @@ sequenced after Phase A and explicitly not gated by Engine Boundary hygiene:
   `AsyncLLM` (**B1 — complete**, deletes the driver and its DEC-038/039
   race-class history); expose vLLM's native Prometheus stats (**B2 —
   complete**); per-request queue/prefill/decode timing in the response
-  body (B3);
+  body (**B3 — complete**);
   re-scope admission to what the scheduler cannot already do (B4); batch
   queueing instead of `429` for `priority: batch` (B5); split multi-model
   serving into separate processes (B6).
@@ -383,6 +383,40 @@ against the shipped implementation rather than restated from `design.md`:
 - No wire-format or existing-endpoint behavior changed: `/v1/chat/
   completions`, `/v1/models`, `/health`, and `/v1/metrics` are unaffected —
   the only addition is the new `GET /metrics` route.
+
+### B3 status: complete
+
+Per-request engine timing (`timing.queue_time_ms`, `.prefill_time_ms`,
+`.decode_time_ms`, `.inference_time_ms`) is now additive on
+`ChatCompletionResponse` and the streaming terminal event. Tracked as
+`openspec/changes/archive/` (change id `expose-per-request-engine-timing`).
+Summary:
+
+- **Every field was verified empirically against vLLM 0.22.1 before
+  design**, not assumed: `RequestOutput.metrics` is a
+  `vllm.v1.metrics.stats.RequestStateStats`, confirmed populated by a real
+  `AsyncLLM.generate()` call. Its four monotonic fields (`queued_ts`,
+  `scheduled_ts`, `first_token_ts`, `last_token_ts`) were traced to their
+  exact `time.monotonic()` call sites inside the engine-core process.
+- **Engine timing and HTTP-boundary timing are clock-domain separated by
+  construction**, not by convention. `arrival_time`
+  (`RequestStateStats`) and `first_token_latency` are frontend
+  wall-clock (`time.time()`) values and are deliberately never read —
+  `first_token_latency` in particular would duplicate `GET /v1/metrics`'s
+  existing TTFT (DEC-049).
+- **The four exposed fields are vLLM's own formula**, lifted from its
+  internal `do_tracing()` span builder — not independently derived. A
+  fifth field ("scheduler delay" distinct from "queue wait") was
+  considered and rejected: vLLM 0.22.1 tracks exactly one
+  `QUEUED`→`SCHEDULED` interval per request, not two.
+- Derivation extends `derive_terminal_metadata()` (the same DEC-050
+  single-source call site `usage`/`finish_reason` already used) — no
+  second read of engine state, so streaming and non-streaming report
+  identical timing for the same request, structurally.
+- Reads are defensive (`getattr` with a `None` default): any missing or
+  non-numeric field on `RequestStateStats` — an internal vLLM type with no
+  documented field-stability guarantee — degrades `timing` to `None`
+  entirely, never a partially populated block.
 
 ## 11. ADR index
 

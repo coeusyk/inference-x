@@ -104,7 +104,10 @@ class ChatService:
         2. exactly one terminal event with an empty delta and a real
            ``finish_reason``;
         3. one usage event with ``choices: []`` — only when the client asked via
-           ``stream_options.include_usage`` and the engine accounted usage;
+           ``stream_options.include_usage`` and the engine accounted usage.
+           Carries ``timing`` alongside ``usage`` (Phase B3) when the engine
+           supplied it — one opt-in event for all terminal metadata, not a
+           second flag;
         4. ``data: [DONE]``, always last.
 
         Event 0 sits at the head rather than before ``[DONE]`` because everything
@@ -205,14 +208,15 @@ class ChatService:
                         }
                     )
                     if include_usage and chunk.usage is not None:
-                        yield _event(
-                            {
-                                "id": completion_id,
-                                "object": "chat.completion.chunk",
-                                "choices": [],
-                                "usage": chunk.usage.model_dump(),
-                            }
-                        )
+                        payload = {
+                            "id": completion_id,
+                            "object": "chat.completion.chunk",
+                            "choices": [],
+                            "usage": chunk.usage.model_dump(),
+                        }
+                        if chunk.timing is not None:
+                            payload["timing"] = chunk.timing.model_dump()
+                        yield _event(payload)
         finally:
             if gen is not None:
                 await gen.aclose()
