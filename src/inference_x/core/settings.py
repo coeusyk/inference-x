@@ -74,6 +74,27 @@ class AppSettings:
             os.environ.get("INFERENCE_X_ADMISSION_WAIT_S", "5")
         )
 
+        # Maximum seconds AdmissionController.admit() waits for a sequence-
+        # concurrency slot for a priority: batch request (add-batch-priority
+        # -queueing, B5). Same mechanism as admission_wait_s above, just a
+        # longer bound — batch requests are expected to tolerate a longer
+        # wait than interactive ones. Provisional default from a targeted
+        # live-load experiment at a 4x-max_num_seqs burst (opt-125m, ~0.39s/
+        # wave observed); not validated at much larger batch scales — see
+        # openspec/changes/add-batch-priority-queueing/design.md §2.6/§4.
+        self.batch_admission_wait_s: float = float(
+            os.environ.get("INFERENCE_X_BATCH_ADMISSION_WAIT_S", "30")
+        )
+
+        # Multiplier on a model's resolved max_num_seqs bounding how many
+        # priority: batch requests may be queued (waiting on the sequence-
+        # concurrency semaphore) at once. A batch request arriving when that
+        # many are already queued is rejected immediately instead of
+        # queueing. Provisional default; see design.md §3.
+        self.batch_waiter_multiplier: int = int(
+            os.environ.get("INFERENCE_X_MAX_QUEUED_BATCH_MULTIPLIER", "8")
+        )
+
     def get_model_config(self, model_name: str | None = None) -> dict[str, Any]:
         """Return the config block for *model_name* from models.yaml.
 

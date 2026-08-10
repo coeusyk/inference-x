@@ -12,13 +12,19 @@ Three independent gates, each keyed on real numbers where they're available:
    model must stay at or below the resolved max_num_seqs (tier ceiling ∩ any
    per-model ModelEntry.max_num_seqs override — see
    utils/vllm_pool_config.apply_tier_knobs for the same composition applied at
-   engine-construction time). Enforced by a per-model asyncio.BoundedSemaphore:
-   a request waits up to admission_wait_s for a slot to free rather than being
-   rejected instantly, since vLLM's own scheduler queues (rather than rejects)
-   past this ceiling too (see openspec/changes/rescope-admission-control).
-   Unlike the two gates below, there is no clamp path: a request either gets a
-   sequence slot within the wait or it doesn't, so both 'interactive' and
-   'batch' priority get EngineSaturatedError when the wait elapses.
+   engine-construction time). Enforced by a per-model asyncio.BoundedSemaphore,
+   same FIFO waiter order for both priorities: a request waits for a slot to
+   free rather than being rejected instantly, since vLLM's own scheduler
+   queues (rather than rejects) past this ceiling too. 'interactive' waits up
+   to admission_wait_s; 'batch' waits up to the longer batch_admission_wait_s
+   (see openspec/changes/add-batch-priority-queueing), and is additionally
+   subject to a bounded per-model waiter cap (batch_waiter_multiplier ×
+   max_num_seqs) — a batch request arriving when that many batch requests are
+   already queued is rejected immediately, without waiting. Unlike the two
+   gates below, there is no clamp path: a request either gets a sequence slot
+   within its wait or it doesn't, so both priorities get EngineSaturatedError
+   when their wait elapses (or, batch only, when the waiter cap is already
+   full).
 
 2. Context length: prompt_tokens + requested_output_tokens must fit the
    model's context window (min of ModelEntry.max_model_len, the resolved VRAM
@@ -65,6 +71,8 @@ _DEFAULT_KV_SAFETY_MARGIN = 0.9  # leave headroom below the real KV pool size
 _MIN_CLAMPED_OUTPUT_TOKENS = 16  # below this a "clamp" is really a rejection in disguise
 _CHARS_PER_TOKEN_FALLBACK = 4  # used only when the engine has no tokenizer to ask
 _DEFAULT_ADMISSION_WAIT_S = 5.0  # fallback only; production value comes from settings
+_DEFAULT_BATCH_ADMISSION_WAIT_S = 30.0  # fallback only; production value comes from settings
+_DEFAULT_BATCH_WAITER_MULTIPLIER = 8  # fallback only; production value comes from settings
 
 
 class ContextTooLongError(ValueError):
@@ -190,13 +198,18 @@ class AdmissionController:
         tier: Any | None = None,
         kv_safety_margin: float = _DEFAULT_KV_SAFETY_MARGIN,
         admission_wait_s: float = _DEFAULT_ADMISSION_WAIT_S,
+        batch_admission_wait_s: float = _DEFAULT_BATCH_ADMISSION_WAIT_S,
+        batch_waiter_multiplier: int = _DEFAULT_BATCH_WAITER_MULTIPLIER,
     ) -> None:
         self._registry = registry
         self._tier = tier
         self._kv_safety_margin = kv_safety_margin
         self._admission_wait_s = admission_wait_s
+        self._batch_admission_wait_s = batch_admission_wait_s
+        self._batch_waiter_multiplier = batch_waiter_multiplier
         self._tracker = _PerModelCounter()
         self._semaphores: dict[str, asyncio.BoundedSemaphore] = {}
+        self._batch_waiters = _PerModelCounter()
 
     def _context_ceiling(self, routed_model: str) -> int:
         """Highest token count (prompt + output) this model's context window allows."""
@@ -262,10 +275,12 @@ class AdmissionController:
                 requested_output can't be clamped to a usable size (batch tier,
                 or interactive with essentially no room left).
             EngineSaturatedError: KV pool is saturated and the request is
-                batch-tier (429; caller should retry later), or the model's
-                sequence-concurrency ceiling stayed full for longer than
-                admission_wait_s (429 for either priority — there is no clamp
-                path for a sequence slot).
+                batch-tier (429; caller should retry later); or the model's
+                sequence-concurrency ceiling stayed full longer than the
+                request's wait bound (admission_wait_s for interactive,
+                batch_admission_wait_s for batch — there is no clamp path for
+                a sequence slot); or, batch-tier only, the per-model batch
+                waiter cap was already full when this request arrived.
             StrictModeViolationError: request.strict is set and this method would
                 otherwise have clamped a parameter (400).
         """
@@ -283,6 +298,38 @@ class AdmissionController:
                     "run for this request."
                 ),
             )
+        elif request.priority == "batch":
+            # B5 (add-batch-priority-queueing): same per-model semaphore, same
+            # FIFO waiter order as interactive — only the wait bound and the
+            # waiter cap differ. The cap check happens before the semaphore is
+            # ever touched, so an over-cap rejection has no semaphore lifecycle
+            # to reason about. The waiter counter is decremented in its own
+            # finally, independent of Gates 2/3's exception handler below,
+            # because a Gate-1 timeout/cancellation never reaches that handler
+            # (it's textually outside it) — see design.md "Cancellation and
+            # lifecycle correctness", path 8.
+            waiter_cap = self._batch_waiter_multiplier * effective_max_num_seqs
+            if self._batch_waiters.current(routed_model) >= waiter_cap:
+                raise EngineSaturatedError(
+                    f"Model '{routed_model}' batch queue is full "
+                    f"({waiter_cap} requests already waiting); retry shortly.",
+                    retry_after_s=1.0,
+                )
+            sem = self._get_semaphore(routed_model, effective_max_num_seqs)
+            self._batch_waiters.add(routed_model, 1)
+            try:
+                await asyncio.wait_for(
+                    sem.acquire(), timeout=self._batch_admission_wait_s
+                )
+            except TimeoutError:
+                raise EngineSaturatedError(
+                    f"Model '{routed_model}' is at its concurrent-sequence limit; "
+                    f"no slot freed within {self._batch_admission_wait_s}s; "
+                    f"retry shortly.",
+                    retry_after_s=1.0,
+                )
+            finally:
+                self._batch_waiters.add(routed_model, -1)
         else:
             sem = self._get_semaphore(routed_model, effective_max_num_seqs)
             try:

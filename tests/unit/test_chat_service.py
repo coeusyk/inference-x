@@ -833,3 +833,48 @@ class TestBoundedAdmissionSharedByBothPaths:
                 await agen.__anext__()
         finally:
             admission.release("test", holder.reserved_tokens)
+
+    async def test_batch_priority_non_streaming_and_streaming_both_time_out_through_the_same_gate(self):
+        """B5 variant: batch priority uses batch_admission_wait_s instead of
+        admission_wait_s, but is still the identical admit() call for both
+        complete() and stream_response() — no separate batch-only code path
+        in ChatService itself."""
+        registry = _make_registry("test")
+        router = TaskRouter(registry, "test")
+        admission = AdmissionController(
+            registry,
+            tier=_ReservationTestTier(max_num_seqs=1),
+            batch_admission_wait_s=0.05,
+        )
+        pool = EnginePool({"test": _StubEngine()})
+        svc = ChatService(engine_pool=pool, registry=registry, router=router, admission=admission)
+
+        holder = await admission.admit(
+            "test",
+            ChatCompletionRequest(model="test", messages=[ChatMessage(role="user", content="x")]),
+            pool.get("test"),
+        )
+        try:
+            with pytest.raises(EngineSaturatedError, match="concurrent-sequence limit"):
+                await svc.complete(
+                    ChatCompletionRequest(
+                        model="test",
+                        messages=[ChatMessage(role="user", content="hi")],
+                        priority="batch",
+                    )
+                )
+            assert admission._batch_waiters.current("test") == 0
+
+            agen = svc.stream_response(
+                ChatCompletionRequest(
+                    model="test",
+                    messages=[ChatMessage(role="user", content="hi")],
+                    stream=True,
+                    priority="batch",
+                )
+            )
+            with pytest.raises(EngineSaturatedError, match="concurrent-sequence limit"):
+                await agen.__anext__()
+            assert admission._batch_waiters.current("test") == 0
+        finally:
+            admission.release("test", holder.reserved_tokens)

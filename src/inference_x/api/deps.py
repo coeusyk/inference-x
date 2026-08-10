@@ -174,8 +174,13 @@ def _build_admission_controller(config_dir: str) -> AdmissionController:
             "VRAM tier resolution failed for admission control (using default cap): %s",
             exc,
         )
+    settings = get_settings()
     return AdmissionController(
-        registry, tier=tier, admission_wait_s=get_settings().admission_wait_s
+        registry,
+        tier=tier,
+        admission_wait_s=settings.admission_wait_s,
+        batch_admission_wait_s=settings.batch_admission_wait_s,
+        batch_waiter_multiplier=settings.batch_waiter_multiplier,
     )
 
 
