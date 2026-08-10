@@ -45,9 +45,10 @@ class AppSettings:
         )
         self.config_dir: str = os.environ.get("INFERENCE_X_CONFIG_DIR", "config")
 
-        # Comma-separated list of models to load at startup.
-        # Falls back to default_model when not set.
-        # Example: INFERENCE_X_LOADED_MODELS=qwen2.5-0.5b,tinyllama-chat
+        # Comma-separated list of models to load at startup. Falls back to
+        # default_model when not set. Resolving to more than one distinct
+        # model is rejected at engine-pool build time (api/deps.py) — each
+        # process serves exactly one model (docs/DECISIONS.md DEC-059).
         _raw = os.environ.get("INFERENCE_X_LOADED_MODELS", "")
         self.loaded_models: list[str] = (
             [m.strip() for m in _raw.split(",") if m.strip()]

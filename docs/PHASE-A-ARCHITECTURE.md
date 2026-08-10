@@ -304,7 +304,9 @@ sequenced after Phase A and explicitly not gated by Engine Boundary hygiene:
   body (**B3 — complete**);
   re-scope admission to what the scheduler cannot already do (B4); batch
   queueing instead of `429` for `priority: batch` (B5); split multi-model
-  serving into separate processes (B6).
+  serving into separate processes (**B6 — complete**, deletes `enforce_eager`
+  coupling, the `max_model_len` 2048 clamp, and the multi-engine sequential-VRAM
+  heuristics; DEC-059).
 - **Phase C** (the differentiator): a signed run manifest and `X-Run-Id`
   (C1); `batch.co_batched_request_ids` (C2); `deterministic: true` wiring
   `VLLM_BATCH_INVARIANT=1`, refusing on unsupported hardware (C3); an

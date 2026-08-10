@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 import re
+import subprocess
+import time
 from functools import lru_cache
 from typing import Any
 
@@ -18,7 +20,6 @@ _CUDAGRAPH_OVERHEAD_GIB = 0.45  # vLLM 0.21+ CUDA graph memory profiling reserve
 _FREE_VRAM_SAFETY = 0.98
 _DEFAULT_WEIGHT_GIB = 1.5
 _DEFAULT_KV_GIB = 0.4
-_MULTI_ENGINE_OVERHEAD_GIB = 0.6  # non-utilization VRAM per engine transition; see _apply_sequential_vram_caps
 
 # Approximate on-GPU bytes/param by quantization scheme, matched against
 # ModelEntry.quantization (vLLM's own quant method string, lowercased).
@@ -53,17 +54,73 @@ def _bytes_per_param(quantization: str | None) -> float:
     return _BYTES_PER_PARAM
 
 
+_PROBE_CACHE_TTL_S = 2.0  # ponytail: process-global cache, no per-caller TTL — raise if a caller needs fresher
+_probe_cache: tuple[float, tuple[float | None, float | None]] | None = None
+
+
 def probe_gpu_memory_gib() -> tuple[float | None, float | None]:
-    """Return (free_gib, total_gib) for cuda:0, or (None, None) if unavailable."""
+    """Return (free_gib, total_gib) for GPU 0, or (None, None) if unavailable.
+
+    Queries `nvidia-smi` first — it reads the driver's device-wide view,
+    unlike `torch.cuda.mem_get_info()`, which reports memory as seen by this
+    process's own CUDA context and goes stale across sibling processes and
+    sequential engine loads (docs/DECISIONS.md DEC-059). Falls back to torch
+    only when nvidia-smi itself is unavailable (no GPU, no driver — e.g.
+    CI), logging a warning since that fallback reintroduces the staleness
+    this function exists to avoid. Result is cached for a couple of seconds
+    so a burst of callers (e.g. repeated `/v1/metrics` scrapes) doesn't spawn
+    a subprocess per request.
+    """
+    global _probe_cache
+    now = time.monotonic()
+    if _probe_cache is not None and now - _probe_cache[0] < _PROBE_CACHE_TTL_S:
+        return _probe_cache[1]
+    result = _probe_gpu_memory_gib_uncached()
+    _probe_cache = (now, result)
+    return result
+
+
+def _probe_gpu_memory_gib_uncached() -> tuple[float | None, float | None]:
+    free, total = _probe_via_nvidia_smi()
+    if free is not None and total is not None:
+        return free, total
+
     try:
         import torch
 
         if torch.cuda.is_available():
-            free, total = torch.cuda.mem_get_info(0)
-            return free / (1024**3), total / (1024**3)
+            logger.warning(
+                "nvidia-smi unavailable; falling back to torch.cuda.mem_get_info(), "
+                "which can report stale free-VRAM figures across sibling processes "
+                "(docs/DECISIONS.md DEC-059)."
+            )
+            free_bytes, total_bytes = torch.cuda.mem_get_info(0)
+            return free_bytes / (1024**3), total_bytes / (1024**3)
     except Exception:
         pass
     return None, None
+
+
+def _probe_via_nvidia_smi() -> tuple[float | None, float | None]:
+    """Query GPU 0's free/total memory (MiB) via nvidia-smi, or (None, None)."""
+    try:
+        result = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=memory.free,memory.total",
+                "--format=csv,noheader,nounits",
+                "-i",
+                "0",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10.0,
+            check=True,
+        )
+        free_mib, total_mib = result.stdout.strip().splitlines()[0].split(",")
+        return float(free_mib) / 1024, float(total_mib) / 1024
+    except Exception:
+        return None, None
 
 
 @lru_cache(maxsize=32)
@@ -239,114 +296,12 @@ def _weights_only_utilization(
     return estimate_weight_gib(model_path, quantization) / total_vram_gib
 
 
-def _multi_engine_overhead_gib() -> float:
-    """VRAM held outside utilization fractions during a sequential engine transition.
-
-    Was ``min(3.35, total_vram_gib * 0.42)`` — despite the "scales with GPU
-    size" docstring, the 0.42 branch only wins below ~8 GiB total VRAM, so
-    every actual GPU (6/8/12/24 GiB tiers) got the same flat 3.35 GiB anyway.
-    That flat reservation, on top of the *next* engine's own full footprint,
-    made qwen2.5-0.5b + qwen2.5-1.5b (a real `make playground` compare pair
-    needing only ~7.3 GiB combined on an 8 GiB card) fail sequential-cap
-    validation with a *negative* allowed utilization — even though
-    validate_pool_fits()'s own pool-level aggregate checks, earlier in the
-    same call, already confirmed the pair fits. Recalibrated to a flat 0.6
-    GiB (what the formula actually was for any real GPU) after live-verifying
-    both engines load and serve real completions together on an 8 GiB card,
-    with ~0.74 GiB still free (2026-07-03). Only verified for a 2-engine
-    pool — revisit if a 3+-engine compare pool is added.
-    """
-    return _MULTI_ENGINE_OVERHEAD_GIB
-
-
 def _user_util_cap(config: dict[str, Any]) -> float | None:
     """Optional user ceiling from models.yaml (omit to fully auto-size)."""
     raw = config.get("gpu_memory_utilization")
     if raw is None or raw == "auto":
         return None
     return float(raw)
-
-
-def _weight_scaled_utilization(
-    config: dict[str, Any],
-    *,
-    pool_size: int,
-    pool_configs: list[dict[str, Any]],
-    total_vram_gib: float,
-) -> float:
-    """Weight-aware utilization before sequential VRAM caps."""
-    name = str(config.get("name", ""))
-    model_path = str(config.get("model_path", ""))
-    max_model_len = int(config.get("max_model_len") or 2048)
-    quantization = config.get("quantization")
-    user_cap = _user_util_cap(config)
-
-    equal_share = _POOL_GPU_HEADROOM / pool_size
-    floor = _minimum_utilization(model_path, max_model_len, total_vram_gib, quantization)
-
-    weights = [
-        estimate_weight_gib(str(c.get("model_path", "")), c.get("quantization"))
-        for c in pool_configs
-    ]
-    total_weight = sum(weights) or 1.0
-    my_weight = estimate_weight_gib(model_path, quantization)
-    weight_share = my_weight / total_weight
-
-    mem_budget_gib = estimate_engine_footprint_gib(model_path, max_model_len, quantization) * (
-        0.85 + 0.15 * weight_share
-    )
-    weight_based = mem_budget_gib / total_vram_gib
-
-    candidates = [equal_share, weight_based, floor]
-    if user_cap is not None:
-        candidates.append(user_cap)
-    effective = min(candidates)
-    effective = max(effective, floor)
-    return round(min(effective, _POOL_GPU_HEADROOM), 4)
-
-
-def _apply_sequential_vram_caps(
-    util: float,
-    config: dict[str, Any],
-    *,
-    engine_index: int,
-    pool_size: int,
-    pool_configs: list[dict[str, Any]],
-    total_vram_gib: float,
-    free_vram_gib: float | None,
-) -> float:
-    """Cap utilization so vLLM's free-memory check passes for sequential pool loads."""
-    model_path = str(config.get("model_path", ""))
-    weights_floor = _weights_only_utilization(model_path, total_vram_gib, config.get("quantization"))
-    capped = util
-
-    if free_vram_gib is not None and total_vram_gib > 0:
-        max_from_free = (_FREE_VRAM_SAFETY * free_vram_gib) / total_vram_gib
-        capped = min(capped, max_from_free)
-
-    if engine_index < pool_size - 1:
-        remaining = pool_configs[engine_index + 1 :]
-        max_next_util = max(
-            _minimum_utilization(
-                str(c.get("model_path", "")),
-                int(c.get("max_model_len") or 2048),
-                total_vram_gib,
-                c.get("quantization"),
-            )
-            for c in remaining
-        )
-        overhead = _multi_engine_overhead_gib()
-        max_current = 1.0 - (overhead / total_vram_gib) - max_next_util
-        capped = min(capped, max_current)
-
-    capped = round(capped, 4)
-    if capped + 1e-6 < weights_floor:
-        raise ValueError(
-            f"Model {config.get('name')} cannot fit in the remaining GPU memory for this pool. "
-            f"Need gpu_memory_utilization >= {weights_floor:.3f} but capped at {capped:.3f}. "
-            "Load fewer models or use a GPU with more VRAM."
-        )
-    return capped
 
 
 def _single_engine_utilization(
@@ -385,74 +340,24 @@ def _single_engine_utilization(
     return round(min(util, _POOL_GPU_HEADROOM), 4)
 
 
-def validate_pool_fits(
-    model_configs: list[dict[str, Any]],
+def validate_model_fits(
+    config: dict[str, Any],
     *,
     total_vram_gib: float = 8.0,
+    free_vram_gib: float | None = None,
 ) -> None:
-    """Raise ValueError when the pool cannot fit on probed VRAM."""
-    if len(model_configs) <= 1:
-        return
+    """Raise ValueError when *config*'s model cannot fit on probed VRAM.
 
-    needed_gib = sum(
-        estimate_engine_footprint_gib(
-            str(c.get("model_path", "")),
-            int(c.get("max_model_len") or 2048),
-            c.get("quantization"),
-        )
-        for c in model_configs
+    Delegates to `_single_engine_utilization`'s own sizing check rather than
+    reimplementing it, so this preflight and the actual
+    `gpu_memory_utilization` sizing (`scale_model_config`) always agree on
+    the same free-VRAM basis — a preflight computed on a different basis
+    (e.g. total VRAM × a flat headroom) could pass here and then still fail
+    during sizing.
+    """
+    _single_engine_utilization(
+        config, total_vram_gib=total_vram_gib, free_vram_gib=free_vram_gib
     )
-    budget_gib = total_vram_gib * _POOL_GPU_HEADROOM
-    if needed_gib > budget_gib:
-        names = ", ".join(str(c.get("name", "?")) for c in model_configs)
-        raise ValueError(
-            f"Models [{names}] need ~{needed_gib:.1f} GiB on GPU but only "
-            f"~{budget_gib:.1f} GiB is available ({total_vram_gib:.1f} GiB total × "
-            f"{_POOL_GPU_HEADROOM:.0%} headroom). Load fewer models, use smaller "
-            "max_model_len values, or run separate server instances."
-        )
-
-    needed = sum(
-        _minimum_utilization(
-            str(c.get("model_path", "")),
-            int(c.get("max_model_len") or 2048),
-            total_vram_gib,
-            c.get("quantization"),
-        )
-        for c in model_configs
-    )
-    if needed > _POOL_GPU_HEADROOM:
-        names = ", ".join(str(c.get("name", "?")) for c in model_configs)
-        raise ValueError(
-            f"Models [{names}] need ~{needed:.0%} of GPU memory combined on a "
-            f"{total_vram_gib:.0f} GiB GPU (cap {_POOL_GPU_HEADROOM:.0%}). "
-            "Load fewer models, use smaller models, or run separate server instances."
-        )
-
-    pool_size = len(model_configs)
-    for idx, config in enumerate(model_configs):
-        util = _weight_scaled_utilization(
-            config,
-            pool_size=pool_size,
-            pool_configs=model_configs,
-            total_vram_gib=total_vram_gib,
-        )
-        try:
-            _apply_sequential_vram_caps(
-                util,
-                config,
-                engine_index=idx,
-                pool_size=pool_size,
-                pool_configs=model_configs,
-                total_vram_gib=total_vram_gib,
-                free_vram_gib=None,
-            )
-        except ValueError as exc:
-            names = ", ".join(str(c.get("name", "?")) for c in model_configs)
-            raise ValueError(
-                f"Models [{names}] cannot load sequentially on a {total_vram_gib:.0f} GiB "
-                f"GPU: {exc}"
-            ) from exc
 
 
 def apply_tier_knobs(config: dict[str, Any], tier: VramTier | None) -> dict[str, Any]:
@@ -496,16 +401,11 @@ def apply_tier_knobs(config: dict[str, Any], tier: VramTier | None) -> dict[str,
     return resolved
 
 
-def scale_model_config_for_pool(
+def scale_model_config(
     config: dict[str, Any],
     *,
-    pool_size: int,
-    pool_models: list[str] | None = None,
-    pool_configs: list[dict[str, Any]] | None = None,
     total_vram_gib: float = 8.0,
-    engine_index: int = 0,
     free_vram_gib: float | None = None,
-    session_free_vram_gib: float | None = None,
 ) -> dict[str, Any]:
     """Return a copy of *config* with gpu_memory_utilization sized for this GPU.
 
@@ -517,34 +417,13 @@ def scale_model_config_for_pool(
     which is why a 125M-param model could claim >85% of an 8 GiB GPU: fixed.
     """
     scaled = dict(config)
-    if pool_configs is None:
-        pool_configs = [scaled]
     is_auto = scaled.get("gpu_memory_utilization") == "auto"
 
-    if pool_size <= 1:
-        util = _single_engine_utilization(
-            scaled,
-            total_vram_gib=total_vram_gib,
-            free_vram_gib=free_vram_gib,
-        )
-    else:
-        util = _weight_scaled_utilization(
-            scaled,
-            pool_size=pool_size,
-            pool_configs=pool_configs,
-            total_vram_gib=total_vram_gib,
-        )
-        util = _apply_sequential_vram_caps(
-            util,
-            scaled,
-            engine_index=engine_index,
-            pool_size=pool_size,
-            pool_configs=pool_configs,
-            total_vram_gib=total_vram_gib,
-            free_vram_gib=free_vram_gib,
-        )
-        if "max_model_len" in scaled:
-            scaled["max_model_len"] = min(int(scaled["max_model_len"]), 2048)
+    util = _single_engine_utilization(
+        scaled,
+        total_vram_gib=total_vram_gib,
+        free_vram_gib=free_vram_gib,
+    )
 
     scaled["gpu_memory_utilization"] = util
     logger.info(

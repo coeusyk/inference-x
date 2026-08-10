@@ -58,11 +58,7 @@ uv run python playground/client.py --allow-internal "What is the capital of Fran
 # Target a specific model
 uv run python playground/client.py --model tinyllama-chat "Explain transformers in one sentence."
 
-# Compare two models side-by-side on a single server (both loaded)
-uv run python playground/client.py --compare qwen2.5-0.5b tinyllama-chat \
-  "Write a haiku about a GPU running out of memory."
-
-# Compare across two server instances
+# Compare two models side-by-side (each on its own server process)
 # Terminal 1:
 INFERENCE_X_DEFAULT_MODEL=qwen2.5-0.5b ./scripts/dev.sh serve
 # Terminal 2:
@@ -119,10 +115,13 @@ uv run python playground/app.py --allow-internal
 ### Startup flow
 
 1. **Model selection screen** — pick two models from `config/models.yaml` (or the
-   server registry when it is already running). Continue loads both models.
-2. **Loading screen** — phase title, step indicators (Server → Model → Ready), and live tail of
-   `logs/playground-server.log` while the server starts. On failure, an error banner shows a
-   parsed summary from the server log (VRAM OOM, vLLM errors, etc.).
+   server registry when it is already running). Continue starts one server process
+   per model.
+2. **Loading screen** — phase title, step indicators (Server → Model → Ready), and a
+   live tail of both processes' logs (`logs/playground-server.log` for the first
+   model, `logs/playground-server-1.log` for the second) while they start, each line
+   prefixed with its model name. On failure, an error banner shows a parsed summary
+   from the failing process's log (VRAM OOM, vLLM errors, etc.).
 3. **Compare UI** — stream the same prompt to both models side-by-side with Markdown
    rendering; per-panel titles show elapsed time and state; usage footers show token
    counts on completion.
@@ -260,20 +259,33 @@ Red bordered panel to stderr — never a bare `print()`.
 
 ---
 
-## Compare mode (single GPU — recommended)
+## Compare mode (dual-server — recommended)
 
-On a single GPU with `INFERENCE_X_LOADED_MODELS=qwen2.5-0.5b,tinyllama-chat` both models
-load into the same server process and compare works directly:
+Each server process serves exactly one model, so comparing two models means running
+two processes — one per model, each on its own port. `make playground` /
+`make playground-compare` do this automatically (see "Interactive compare app" below).
+To drive it manually with the batch client:
 
 ```bash
-INFERENCE_X_LOADED_MODELS=qwen2.5-0.5b,tinyllama-chat ./scripts/dev.sh serve
+# Terminal 1 — model A
+INFERENCE_X_DEFAULT_MODEL=qwen2.5-0.5b ./scripts/dev.sh serve
 
-# In another terminal:
+# Terminal 2 — model B
+INFERENCE_X_DEFAULT_MODEL=tinyllama-chat \
+  uv run uvicorn inference_x.api.main:app --host 127.0.0.1 --port 8001
+
+# Terminal 3 — compare
 uv run python playground/client.py --compare qwen2.5-0.5b tinyllama-chat \
+  --base-url-a http://localhost:8000 --base-url-b http://localhost:8001 \
   --prompts-file playground/prompts/sample_prompts.json
 ```
 
-For sequential compare on a single-model server (restart between models):
+This works on one GPU as well as two — two independent single-model processes fit
+comfortably on a single card for real model pairs (verified on an 8 GiB card,
+docs/DECISIONS.md DEC-059).
+
+For sequential compare on a single server instead (restart between models — slower,
+but only ever runs one model process at a time):
 
 ```bash
 # Terminal 1 — start with model A
@@ -289,24 +301,6 @@ The client will:
 2. Show a spinner while waiting for tinyllama-chat to become ready
 3. Print a green ✓ checkmark when the model is loaded
 4. Run all prompts against `tinyllama-chat` and render side-by-side results
-
----
-
-## Compare mode (two GPUs / dual-server)
-
-```bash
-# Terminal 1 — model A
-INFERENCE_X_DEFAULT_MODEL=qwen2.5-0.5b ./scripts/dev.sh serve
-
-# Terminal 2 — model B
-INFERENCE_X_DEFAULT_MODEL=tinyllama-chat \
-  uv run uvicorn inference_x.api.main:app --host 127.0.0.1 --port 8001
-
-# Terminal 3 — compare
-uv run python playground/client.py --compare qwen2.5-0.5b tinyllama-chat \
-  --base-url-a http://localhost:8000 --base-url-b http://localhost:8001 \
-  "Your prompt here"
-```
 
 ---
 

@@ -1,12 +1,14 @@
-"""Tests for multi-model GPU memory scaling."""
+"""Tests for single-model GPU memory scaling (B6: one model per process)."""
+
+import sys
 
 import pytest
 
 from inference_x.utils import vllm_pool_config as pool
 from inference_x.utils.vllm_pool_config import (
     apply_tier_knobs,
-    scale_model_config_for_pool,
-    validate_pool_fits,
+    scale_model_config,
+    validate_model_fits,
 )
 from inference_x.utils.vram_tiers import VramTier
 
@@ -77,16 +79,15 @@ def _tiny_cfg() -> dict:
 
 def test_single_model_computes_utilization(fixed_footprints):
     cfg = {"name": "a", "model_path": "org/a", "max_model_len": 2048}
-    scaled = scale_model_config_for_pool(cfg, pool_size=1, total_vram_gib=8.0)
+    scaled = scale_model_config(cfg, total_vram_gib=8.0)
     assert scaled["gpu_memory_utilization"] > 0.1
     assert scaled["gpu_memory_utilization"] <= 0.92
 
 
 def test_single_model_respects_free_vram_cap(fixed_footprints):
     cfg = _qwen_cfg()
-    scaled = scale_model_config_for_pool(
+    scaled = scale_model_config(
         cfg,
-        pool_size=1,
         total_vram_gib=6.0,
         free_vram_gib=2.4,
     )
@@ -98,9 +99,8 @@ def test_single_model_respects_free_vram_cap(fixed_footprints):
 def test_single_model_raises_when_free_vram_too_low(fixed_footprints):
     cfg = _tiny_cfg()
     with pytest.raises(ValueError, match="VRAM free"):
-        scale_model_config_for_pool(
+        scale_model_config(
             cfg,
-            pool_size=1,
             total_vram_gib=6.0,
             free_vram_gib=1.0,
         )
@@ -197,7 +197,7 @@ def test_single_model_respects_user_cap(fixed_footprints):
         "max_model_len": 2048,
         "gpu_memory_utilization": 0.25,
     }
-    scaled = scale_model_config_for_pool(cfg, pool_size=1, total_vram_gib=8.0)
+    scaled = scale_model_config(cfg, total_vram_gib=8.0)
     assert scaled["gpu_memory_utilization"] <= 0.25
 
 
@@ -211,178 +211,29 @@ def test_auto_matches_explicit_footprint_sizing(fixed_footprints):
     """
     auto_cfg = _qwen_cfg()
     auto_cfg["gpu_memory_utilization"] = "auto"
-    auto_scaled = scale_model_config_for_pool(auto_cfg, pool_size=1, total_vram_gib=8.0)
+    auto_scaled = scale_model_config(auto_cfg, total_vram_gib=8.0)
 
     non_binding_cfg = _qwen_cfg()
     non_binding_cfg["gpu_memory_utilization"] = 0.9  # above the footprint, so it never binds
-    explicit_scaled = scale_model_config_for_pool(
-        non_binding_cfg, pool_size=1, total_vram_gib=8.0
-    )
+    explicit_scaled = scale_model_config(non_binding_cfg, total_vram_gib=8.0)
 
     assert auto_scaled["gpu_memory_utilization"] == explicit_scaled["gpu_memory_utilization"]
     assert auto_scaled["gpu_memory_utilization"] < 0.3  # small model, not a flat 0.82
 
 
-def test_two_model_pool_uses_weight_aware_share(fixed_footprints):
-    qwen = _qwen_cfg()
-    tiny = _tiny_cfg()
-    pool_models = ["qwen2.5-0.5b", "tinyllama-chat"]
-    pool_configs = [qwen, tiny]
-
-    q_scaled = scale_model_config_for_pool(
-        qwen,
-        pool_size=2,
-        pool_models=pool_models,
-        pool_configs=pool_configs,
-        engine_index=0,
-        total_vram_gib=8.0,
-    )
-    t_scaled = scale_model_config_for_pool(
-        tiny,
-        pool_size=2,
-        pool_models=pool_models,
-        pool_configs=pool_configs,
-        engine_index=1,
-        free_vram_gib=3.5,
-        total_vram_gib=8.0,
-    )
-
-    assert q_scaled["gpu_memory_utilization"] < t_scaled["gpu_memory_utilization"]
-    # 0.2625, not the pre-DEC-046 0.175 — _multi_engine_overhead_gib's old flat
-    # ~3.35 GiB reservation left less room here than the corrected 0.6 GiB does.
-    assert q_scaled["gpu_memory_utilization"] == pytest.approx(0.2625, abs=0.03)
-    assert t_scaled["gpu_memory_utilization"] >= 0.35
-    assert q_scaled["max_model_len"] == 2048
+def test_validate_model_fits_rejects_when_free_vram_too_low(fixed_footprints):
+    with pytest.raises(ValueError, match="VRAM free"):
+        validate_model_fits(_tiny_cfg(), total_vram_gib=6.0, free_vram_gib=1.0)
 
 
-def test_sequential_cap_limits_second_engine_to_free_vram(fixed_footprints):
-    tiny = _tiny_cfg()
-    pool_models = ["qwen2.5-0.5b", "tinyllama-chat"]
-    pool_configs = [_qwen_cfg(), tiny]
-    scaled = scale_model_config_for_pool(
-        tiny,
-        pool_size=2,
-        pool_models=pool_models,
-        pool_configs=pool_configs,
-        engine_index=1,
-        free_vram_gib=2.3,
-        total_vram_gib=8.0,
-    )
-    assert scaled["gpu_memory_utilization"] < 0.38
-    assert scaled["gpu_memory_utilization"] >= 0.25
+def test_validate_model_fits_allows_model_with_ample_free_vram(fixed_footprints):
+    validate_model_fits(_qwen_cfg(), total_vram_gib=8.0, free_vram_gib=6.0)
 
 
-def test_auto_multi_model_uses_weight_scaled_sizing(fixed_footprints):
-    """"auto" in a multi-model pool must weight-scale by footprint like an
-    explicit ceiling would, not grab a flat (free - buffer)/total ratio with a
-    0.50 floor regardless of model size (same bug class as
-    test_auto_matches_explicit_footprint_sizing, in the pool_size>1 path).
-    """
-    qwen = _qwen_cfg()
-    qwen["gpu_memory_utilization"] = "auto"
-    opt = {
-        "name": "opt-125m",
-        "model_path": "facebook/opt-125m",
-        "max_model_len": 2048,
-        "gpu_memory_utilization": "auto",
-    }
-    pool_configs = [opt, qwen]
-    opt_scaled = scale_model_config_for_pool(
-        opt,
-        pool_size=2,
-        pool_configs=pool_configs,
-        engine_index=0,
-        free_vram_gib=6.93,
-        total_vram_gib=8.0,
-        session_free_vram_gib=6.93,
-    )
-    qwen_scaled = scale_model_config_for_pool(
-        qwen,
-        pool_size=2,
-        pool_configs=pool_configs,
-        engine_index=1,
-        free_vram_gib=3.5,
-        total_vram_gib=8.0,
-        session_free_vram_gib=6.93,
-    )
-    # opt is the heavier mock footprint here, so it earns the larger weight share.
-    assert opt_scaled["gpu_memory_utilization"] > qwen_scaled["gpu_memory_utilization"]
-    assert 0.25 < opt_scaled["gpu_memory_utilization"] < 0.45
-    assert 0.15 < qwen_scaled["gpu_memory_utilization"] < 0.35
-
-
-def test_validate_pool_fits_rejects_impossible_combo(fixed_footprints):
-    with pytest.raises(ValueError, match="need ~"):
-        validate_pool_fits(
-            [_qwen_cfg(), {"name": "llama3-8b", "model_path": "meta-llama/Meta-Llama-3-8B-Instruct", "max_model_len": 4096}],
-            total_vram_gib=8.0,
-        )
-
-
-def test_validate_pool_fits_allows_small_pair(fixed_footprints):
-    validate_pool_fits([_qwen_cfg(), _tiny_cfg()], total_vram_gib=8.0)
-
-
-def test_validate_pool_fits_allows_real_compare_pair_on_8gib(monkeypatch):
-    """Regression for the make playground compare-mode failure (2026-07-03):
-    qwen2.5-0.5b + qwen2.5-1.5b at max_model_len=8192 each (~7.3 GiB combined,
-    comfortably under 8 GiB) was rejected with a *negative* allowed
-    utilization by _apply_sequential_vram_caps. Root cause was
-    _multi_engine_overhead_gib's flat ~3.35 GiB reservation (42% of an 8 GiB
-    card) on top of the next engine's full footprint, never subtracted from
-    the pool-level budget validate_pool_fits() itself already confirmed fit.
-    Live-verified after the fix: both engines load and serve real completions
-    together on an 8 GiB card with ~0.74 GiB still free (DEC-046).
-
-    Configs are real HF values (hidden_size/vocab_size/num_hidden_layers) for
-    Qwen2.5-0.5B/1.5B-Instruct, mocked to avoid a network/cache dependency.
-    """
-    pool._hf_config_dict.cache_clear()
-    configs = {
-        "Qwen/Qwen2.5-0.5B-Instruct": {
-            "hidden_size": 896,
-            "num_hidden_layers": 24,
-            "vocab_size": 151936,
-            "intermediate_size": 4864,
-            "tie_word_embeddings": True,
-        },
-        "Qwen/Qwen2.5-1.5B-Instruct": {
-            "hidden_size": 1536,
-            "num_hidden_layers": 28,
-            "vocab_size": 151936,
-            "intermediate_size": 8960,
-            "tie_word_embeddings": True,
-        },
-    }
-    monkeypatch.setattr(pool, "_hf_config_dict", lambda path: configs.get(path))
-
-    validate_pool_fits(
-        [
-            {"name": "qwen2.5-0.5b", "model_path": "Qwen/Qwen2.5-0.5B-Instruct", "max_model_len": 8192},
-            {"name": "qwen2.5-1.5b", "model_path": "Qwen/Qwen2.5-1.5B-Instruct", "max_model_len": 8192},
-        ],
-        total_vram_gib=8.0,
-    )
-
-
-def test_validate_pool_fits_rejects_dual_model_on_6gb(fixed_footprints):
-    """qwen2.5-0.5b + llama3-8b: llama3-8b alone (15 GiB mocked) can't fit any
-    pool on a 6 GiB card regardless of overhead calibration — unlike
-    qwen2.5-0.5b + tinyllama-chat, which _multi_engine_overhead_gib's old
-    flat ~3.35 GiB reservation wrongly rejected on 8 GiB (see DEC-046) and,
-    it turns out, would have wrongly rejected here too."""
-    with pytest.raises(ValueError, match="need ~|cannot load sequentially"):
-        validate_pool_fits(
-            [
-                _qwen_cfg(),
-                {
-                    "name": "llama3-8b",
-                    "model_path": "meta-llama/Meta-Llama-3-8B-Instruct",
-                    "max_model_len": 4096,
-                },
-            ],
-            total_vram_gib=6.0,
-        )
+def test_validate_model_fits_skips_check_when_free_vram_unknown(fixed_footprints):
+    """No probe reading available (free_vram_gib=None) -> no raise, matching
+    scale_model_config's own fail-open posture when the probe is unavailable."""
+    validate_model_fits(_tiny_cfg(), total_vram_gib=6.0, free_vram_gib=None)
 
 
 # ---------------------------------------------------------------------------
@@ -431,3 +282,88 @@ def test_apply_tier_knobs_skips_max_num_batched_tokens_when_tier_omits_it():
     config = {"name": "m", "model_path": "org/m", "max_num_batched_tokens": 1024}
     resolved = apply_tier_knobs(config, _tier(max_num_batched_tokens=None))
     assert resolved["max_num_batched_tokens"] == 1024  # left untouched, not cleared
+
+
+# ---------------------------------------------------------------------------
+# probe_gpu_memory_gib (B6: nvidia-smi first, torch.cuda.mem_get_info() as a
+# loud fallback — see docs/DECISIONS.md DEC-059)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _clear_probe_cache():
+    pool._probe_cache = None
+    yield
+    pool._probe_cache = None
+
+
+def test_probe_gpu_memory_gib_uses_nvidia_smi(monkeypatch):
+    class _Result:
+        stdout = "1234, 8188\n"
+
+    monkeypatch.setattr(pool.subprocess, "run", lambda *a, **kw: _Result())
+    free, total = pool.probe_gpu_memory_gib()
+    assert free == pytest.approx(1234 / 1024)
+    assert total == pytest.approx(8188 / 1024)
+
+
+def test_probe_gpu_memory_gib_falls_back_to_torch_with_warning(monkeypatch):
+    def _raise(*a, **kw):
+        raise FileNotFoundError("nvidia-smi not found")
+
+    monkeypatch.setattr(pool.subprocess, "run", _raise)
+
+    class _FakeCuda:
+        @staticmethod
+        def is_available():
+            return True
+
+        @staticmethod
+        def mem_get_info(_index):
+            return 2 * 1024**3, 8 * 1024**3
+
+    fake_torch = type("FakeTorch", (), {"cuda": _FakeCuda})()
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        pool.logger, "warning", lambda msg, *a, **kw: warnings.append(msg % a if a else msg)
+    )
+
+    free, total = pool.probe_gpu_memory_gib()
+    assert free == pytest.approx(2.0)
+    assert total == pytest.approx(8.0)
+    assert any("stale" in w for w in warnings)
+
+
+def test_probe_gpu_memory_gib_returns_none_when_nothing_available(monkeypatch):
+    def _raise(*a, **kw):
+        raise FileNotFoundError("nvidia-smi not found")
+
+    monkeypatch.setattr(pool.subprocess, "run", _raise)
+
+    class _FakeCuda:
+        @staticmethod
+        def is_available():
+            return False
+
+    fake_torch = type("FakeTorch", (), {"cuda": _FakeCuda})()
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+    assert pool.probe_gpu_memory_gib() == (None, None)
+
+
+def test_probe_gpu_memory_gib_caches_briefly(monkeypatch):
+    calls = {"n": 0}
+
+    class _Result:
+        stdout = "1000, 8000\n"
+
+    def _run(*a, **kw):
+        calls["n"] += 1
+        return _Result()
+
+    monkeypatch.setattr(pool.subprocess, "run", _run)
+    pool.probe_gpu_memory_gib()
+    pool.probe_gpu_memory_gib()
+    assert calls["n"] == 1

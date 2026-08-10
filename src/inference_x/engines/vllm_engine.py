@@ -10,7 +10,7 @@ from typing import Any, Literal
 
 from inference_x.engines.base import BaseEngine
 from inference_x.utils.cuda_env import ensure_vllm_runtime_env
-from inference_x.utils.vllm_pool_config import scale_model_config_for_pool
+from inference_x.utils.vllm_pool_config import probe_gpu_memory_gib, scale_model_config
 from inference_x.schemas.chat import (
     ChatCompletionChoice,
     ChatCompletionMessage,
@@ -110,19 +110,14 @@ def _derive_engine_timing(output: Any) -> EngineTiming | None:
 
 
 def _probe_cuda_vram() -> dict[str, float | bool]:
-    try:
-        import torch
-
-        if not torch.cuda.is_available():
-            return {"cuda_available": False}
-        free, total = torch.cuda.mem_get_info(0)
-        return {
-            "cuda_available": True,
-            "free_gib": round(free / (1024**3), 2),
-            "total_gib": round(total / (1024**3), 2),
-        }
-    except Exception as exc:
-        return {"cuda_available": False, "probe_error": str(exc)}
+    free, total = probe_gpu_memory_gib()
+    if free is None or total is None:
+        return {"cuda_available": False}
+    return {
+        "cuda_available": True,
+        "free_gib": round(free, 2),
+        "total_gib": round(total, 2),
+    }
 
 
 def _vram_budget_error(
@@ -361,13 +356,8 @@ class VLLMEngine(BaseEngine):
         self,
         model_config: dict[str, Any],
         *,
-        pool_size: int = 1,
-        pool_models: list[str] | None = None,
-        pool_configs: list[dict[str, Any]] | None = None,
-        engine_index: int = 0,
         free_vram_gib: float | None = None,
         total_vram_gib: float | None = None,
-        session_free_vram_gib: float | None = None,
     ) -> None:
         _load_vllm()
         if not _VLLM_AVAILABLE:
@@ -376,15 +366,10 @@ class VLLMEngine(BaseEngine):
                 "Install it with: pip install vllm  (requires a CUDA-capable GPU)"
             )
 
-        model_config = scale_model_config_for_pool(
+        model_config = scale_model_config(
             model_config,
-            pool_size=pool_size,
-            pool_models=pool_models,
-            pool_configs=pool_configs,
-            engine_index=engine_index,
             free_vram_gib=free_vram_gib,
             total_vram_gib=total_vram_gib or _probe_cuda_vram().get("total_gib") or 8.0,
-            session_free_vram_gib=session_free_vram_gib,
         )
         required = {"name", "model_path"}
         missing = required - model_config.keys()
@@ -393,7 +378,6 @@ class VLLMEngine(BaseEngine):
 
         self._model_name: str = model_config["name"]
         self._model_path: str = model_config["model_path"]
-        self._pool_size = pool_size
         self._max_completion_tokens: int | None = model_config.get("max_completion_tokens")
         self._instruction_tuned: bool = bool(model_config.get("instruction_tuned", True))
         self._repetition_penalty: float | None = model_config.get("repetition_penalty")
@@ -431,33 +415,13 @@ class VLLMEngine(BaseEngine):
             kwargs["enable_prefix_caching"] = model_config["enable_prefix_caching"]
         if model_config.get("quantization"):
             kwargs["quantization"] = model_config["quantization"]
-        if pool_size > 1:
-            kwargs["enforce_eager"] = True
-
-        if pool_size > 1 and "gpu_memory_utilization" in model_config:
-            logger.info(
-                "Multi-model pool (%d engines): gpu_memory_utilization=%s for model=%s",
-                pool_size,
-                model_config["gpu_memory_utilization"],
-                model_config["name"],
-            )
-
-        if pool_size > 1:
-            logger.warning(
-                "pool_size=%d: each AsyncLLM instance's native Prometheus stat "
-                "logger registers its vllm: metrics into the same process-wide "
-                "prometheus_client registry, so metric-label collisions across "
-                "engine instances on GET /metrics are possible. This "
-                "configuration is not yet verified.",
-                pool_size,
-            )
 
         logger.info("Initializing vLLM engine for model=%s path=%s", self._model_name, self._model_path)
         logger.info(
             "Loading weights (first run downloads from HuggingFace with no progress "
             "log until complete — can take several minutes on slow links)"
         )
-        cuda_home = ensure_vllm_runtime_env(pool_size=pool_size)
+        cuda_home = ensure_vllm_runtime_env()
         if cuda_home is None and not os.environ.get("CUDA_HOME"):
             logger.warning(
                 "CUDA_HOME not set and nvcc not found; FlashInfer JIT may fail on WSL2"

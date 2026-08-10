@@ -43,8 +43,22 @@ refactors with no observable behavior change are not listed — see
   has no effect on the request/response format, streaming protocol, or
   reported token usage — see DEC-058 for the full record if you're
   curious about the internals.
-- Running with `pool_size > 1` (multi-engine serving) now logs a startup
-  warning that each engine's native Prometheus stat logger shares one
-  process-wide metrics registry, so `/metrics` labels may collide across
-  engines. This is a recorded, known limitation, not a new restriction —
-  `pool_size > 1` remains neither guaranteed nor forbidden.
+- The free-VRAM probe (`GET /v1/metrics`'s VRAM breakdown, and the
+  preflight check run before a model loads) now queries `nvidia-smi`
+  instead of reading `torch.cuda.mem_get_info()`, which reported memory as
+  seen by this process's own CUDA context and went stale across sibling
+  processes — see DEC-059.
+
+### Removed
+
+- **A single server process can no longer load more than one model.**
+  `INFERENCE_X_LOADED_MODELS` set to more than one distinct model is now a
+  startup error instead of loading every listed model into one process.
+  Every model sharing a process paid for it for the whole session — no CUDA
+  graphs (`enforce_eager` forced), `max_model_len` silently clamped to
+  2048, and gpu_memory_utilization sized by heuristics calibrated against
+  past failures rather than measured VRAM. Comparing two models (`make
+  playground`, `playground/client.py --compare`) now runs one process per
+  model instead — `make playground` and `make playground-compare` do this
+  automatically; see `playground/README.md` for the manual dual-process
+  pattern. Full rationale: DEC-059.

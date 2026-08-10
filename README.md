@@ -175,15 +175,18 @@ make benchmark-all
 make advise
 ```
 
-To load multiple models for compare mode or benchmarks across models:
+Each server process serves exactly one model (`INFERENCE_X_DEFAULT_MODEL`). For compare
+mode or benchmarks across models, run one process per model on its own port:
 
 ```bash
-INFERENCE_X_LOADED_MODELS=qwen2.5-0.5b,tinyllama-chat ./scripts/dev.sh serve
+# Terminal 1
+INFERENCE_X_DEFAULT_MODEL=qwen2.5-0.5b ./scripts/dev.sh serve
+# Terminal 2
+INFERENCE_X_DEFAULT_MODEL=tinyllama-chat uv run uvicorn inference_x.api.main:app --port 8001
 ```
 
-The `INFERENCE_X_LOADED_MODELS` environment variable accepts a comma-separated list of
-model names from `config/models.yaml`. All listed models are loaded at startup and served
-simultaneously. VRAM is split automatically between them.
+`make playground` and `make playground-compare` do this automatically — see
+`playground/README.md`.
 
 ---
 
@@ -225,8 +228,8 @@ Key environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `INFERENCE_X_DEFAULT_MODEL` | `qwen2.5-0.5b` | Model to load when LOADED_MODELS is unset; also accepts a registered model `family` name, resolved to its best-fitting variant at startup (e.g. `INFERENCE_X_DEFAULT_MODEL=qwen2.5-7b`) |
-| `INFERENCE_X_LOADED_MODELS` | (default model) | Comma-separated list of models to load at startup |
+| `INFERENCE_X_DEFAULT_MODEL` | `qwen2.5-0.5b` | Model this process loads; also accepts a registered model `family` name, resolved to its best-fitting variant at startup (e.g. `INFERENCE_X_DEFAULT_MODEL=qwen2.5-7b`) |
+| `INFERENCE_X_LOADED_MODELS` | (default model) | Same idea as `INFERENCE_X_DEFAULT_MODEL`; a value resolving to more than one distinct model is rejected — each process serves exactly one model, run one process per model instead |
 | `INFERENCE_X_CONFIG_DIR` | `config` | Path to config directory |
 | `INFERENCE_X_METRICS_FILE` | (unset) | If set, enables NDJSON metrics export to this path |
 | `INFERENCE_X_STREAM_TIMEOUT_S` | `120` | Per-token SSE timeout in seconds (0 = disabled) |

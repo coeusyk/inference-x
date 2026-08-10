@@ -249,6 +249,7 @@ class InferenceXApp(App[None]):
         super().__init__()
         self.base_url = base_url.rstrip("/")
         self.compare = compare
+        self.base_urls: dict[str, str] = {}
         self.healthy = False
         self.in_flight = False
 
@@ -310,13 +311,15 @@ class InferenceXApp(App[None]):
         painted = asyncio.Event()
         loading.call_after_refresh(painted.set)
         await painted.wait()
-        ok = await ensure_models_loaded(
+        result = await ensure_models_loaded(
             self.base_url,
             models_to_load,
             on_status=loading.set_message,
             on_log=loading.append_log,
         )
-        if ok:
+        ok = bool(result)
+        if result:
+            self.base_urls = result
             self.pop_screen()
         else:
             try:
@@ -343,22 +346,17 @@ class InferenceXApp(App[None]):
     async def _refresh_server_state(self) -> None:
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
-                health = await client.get(f"{self.base_url}/health")
-                self.healthy = (
-                    health.status_code == 200
-                    and health.json().get("status") == "healthy"
-                )
-                models_resp = await client.get(f"{self.base_url}/v1/models")
-                if models_resp.status_code == 200:
-                    ids = [
-                        item["id"]
-                        for item in models_resp.json().get("data", [])
-                        if isinstance(item, dict) and isinstance(item.get("id"), str)
-                    ]
-                    if self.compare and ids:
-                        missing = [m for m in self.compare if m not in ids]
-                        if missing:
-                            self.healthy = False
+                healthy = True
+                for model in self.compare or (None,):
+                    url = self.base_urls.get(model, self.base_url) if model else self.base_url
+                    health = await client.get(f"{url}/health")
+                    payload = health.json() if health.status_code == 200 else {}
+                    if health.status_code != 200 or payload.get("status") != "healthy":
+                        healthy = False
+                        continue
+                    if model and model not in (payload.get("loaded_models") or []):
+                        healthy = False
+                self.healthy = healthy
         except (httpx.HTTPError, ValueError):
             self.healthy = False
 
@@ -434,6 +432,7 @@ class InferenceXApp(App[None]):
         panel: ResponsePanel,
     ) -> None:
         panel.start()
+        base_url = self.base_urls.get(model, self.base_url)
         payload = {
             "model": model,
             "messages": [{"role": "user", "content": prompt}],
@@ -445,7 +444,7 @@ class InferenceXApp(App[None]):
         async with httpx.AsyncClient(timeout=timeout) as client:
             async with client.stream(
                 "POST",
-                f"{self.base_url}/v1/chat/completions",
+                f"{base_url}/v1/chat/completions",
                 json=payload,
             ) as response:
                 response.raise_for_status()

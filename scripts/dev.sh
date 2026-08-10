@@ -70,9 +70,11 @@ Examples:
   ./scripts/dev.sh smoke          # terminal 2
   make benchmark MODEL=qwen2.5-0.5b # terminal 2 (after serve)
 
-Set INFERENCE_X_DEFAULT_MODEL to pick a single model from config/models.yaml.
-Set INFERENCE_X_LOADED_MODELS (comma-separated) to load multiple models at once.
-  Example: INFERENCE_X_LOADED_MODELS=qwen2.5-0.5b,tinyllama-chat ./scripts/dev.sh serve
+Set INFERENCE_X_DEFAULT_MODEL to pick a model from config/models.yaml. Each
+server process serves exactly one model — for two models at once, run this
+in one terminal and a second process on another port in another, e.g.
+  INFERENCE_X_DEFAULT_MODEL=tinyllama-chat uv run uvicorn inference_x.api.main:app --port 8001
+(see playground/README.md, or just run `make playground` for compare mode).
 EOF
     ;;
 esac
