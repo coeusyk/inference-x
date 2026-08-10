@@ -139,6 +139,32 @@ async def test_ensure_models_loaded_starts_one_process_per_model(monkeypatch):
     ]
 
 
+@pytest.mark.asyncio
+async def test_start_playground_server_sets_loaded_models_to_single_model(
+    monkeypatch, tmp_path
+):
+    """INFERENCE_X_LOADED_MODELS must be forced, not popped — a stale
+    multi-model value in .env would otherwise survive since settings.py's
+    load_dotenv(override=False) refills anything merely absent from env."""
+    monkeypatch.setenv("INFERENCE_X_LOADED_MODELS", "qwen2.5-0.5b,tinyllama-chat")
+    captured: dict = {}
+
+    async def fake_exec(*args, **kwargs):
+        captured["env"] = kwargs["env"]
+
+        class _Proc:
+            pass
+
+        return _Proc()
+
+    monkeypatch.setattr(sc.asyncio, "create_subprocess_exec", fake_exec)
+
+    await sc.start_playground_server("tinyllama-chat", log_path=tmp_path / "log.log")
+
+    assert captured["env"]["INFERENCE_X_LOADED_MODELS"] == "tinyllama-chat"
+    assert captured["env"]["INFERENCE_X_DEFAULT_MODEL"] == "tinyllama-chat"
+
+
 @pytest.fixture(autouse=True)
 def _reset_playground_server_flag():
     sc._reset_playground_server_state()

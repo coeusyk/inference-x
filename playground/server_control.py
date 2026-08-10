@@ -104,7 +104,7 @@ async def start_playground_server(
     log_path.parent.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
     env["INFERENCE_X_DEFAULT_MODEL"] = model
-    env.pop("INFERENCE_X_LOADED_MODELS", None)
+    env["INFERENCE_X_LOADED_MODELS"] = model
     env.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
     env.setdefault("VLLM_USE_FLASHINFER_SAMPLER", "0")
 

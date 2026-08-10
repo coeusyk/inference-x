@@ -661,3 +661,29 @@ code — not the experimental script §6 ran.
   playground-compare` do not hardcode a default pair — a user picking a tight
   pair like `qwen2.5-0.5b`+`qwen2.5-1.5b` on an 8 GiB card will see this same
   clear rejection, not a crash or a stale-probe-confused failure.
+- **`ensure_models_loaded()` itself — the orchestration function this change
+  rewrote most heavily — was exercised end-to-end against real subprocesses**,
+  not just through its unit tests' mocked boundaries. This run surfaced one
+  real bug in the first cut of `start_playground_server`: it called
+  `env.pop("INFERENCE_X_LOADED_MODELS", None)` to clear the var for the
+  spawned process, but `core/settings.py`'s `load_dotenv(..., override=False)`
+  re-populates any var *absent* from the subprocess's environment from
+  `.env` — so a `.env` with a multi-model `INFERENCE_X_LOADED_MODELS` (the
+  exact line `.env.example` shipped until this change) would have been
+  silently refilled inside every spawned process and rejected by the new
+  `_build_engine_pool` check. Fixed by setting
+  `env["INFERENCE_X_LOADED_MODELS"] = model` instead of popping it, so the
+  single-model value always wins over `override=False`'s dotenv fill-in
+  regardless of what `.env` contains. A regression test
+  (`test_start_playground_server_sets_loaded_models_to_single_model`) seeds a
+  multi-model `INFERENCE_X_LOADED_MODELS` via `monkeypatch.setenv` and asserts
+  the subprocess `env` kwarg is forced to the single requested model. With the
+  fix in place, `ensure_models_loaded("http://127.0.0.1:8000",
+  ["qwen2.5-0.5b", "tinyllama-chat"])` was run directly (not through the TUI)
+  against this repo's real `.env` (which sets `INFERENCE_X_DEFAULT_MODEL` but
+  not `INFERENCE_X_LOADED_MODELS`): both processes started on ports 8000/8001,
+  both reached "Engine ready," `GET /health`'s `loaded_models` on each process
+  showed exactly its own model, and the returned `{model: base_url}` mapping
+  (the same dict `playground/app.py` assigns directly to `self.base_urls`) was
+  correct. `stop_playground_server()` released both processes' VRAM back to
+  the pre-run baseline (7576/8188 MiB free before and after).
