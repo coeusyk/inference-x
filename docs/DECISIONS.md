@@ -1905,3 +1905,269 @@ Use this document to capture non-obvious design decisions as the project evolves
 - Supersession: `pool_size > 1` semantics remain open until a future phase (most likely
   B6) verifies `AsyncLLM` multi-instance behavior explicitly; this DEC does not resolve
   that question and is not superseded by leaving it open.
+
+---
+
+### DEC-059
+- Date: 2026-08-10
+- Status: accepted
+- Title: Split multi-model serving into one process per model; retire in-process
+  `EnginePool` multi-engine construction (B6, `split-multi-model-serving`)
+- Context: Phase B6 (`docs/PHASE-A-EXECUTION-PLAN.md:273`,
+  `docs/REVIEW-2026-08-03-architecture.md` §3.5/§9), left open by DEC-058. `EnginePool`'s
+  `pool_size > 1` path let one process construct multiple `VLLMEngine` instances so the
+  playground TUI's compare mode could load two models into one server — every model
+  sharing that process paid three costs for the whole session, not just while actively
+  compared: `enforce_eager=True` forced on all engines (no CUDA graphs), `max_model_len`
+  silently clamped to 2048, and `utils/vllm_pool_config.py`'s sequential-VRAM-cap
+  heuristics (`_weight_scaled_utilization`, `_apply_sequential_vram_caps`,
+  `_multi_engine_overhead_gib`) sizing every engine's `gpu_memory_utilization` off a
+  formula calibrated by hand against past failures, not first principles.
+- Problem: A live investigation this round (`openspec/changes/split-multi-model-serving/
+  design.md` §6, archived with this change) found a real, unrelated bug shared by both
+  the status-quo pool path and the one-process-per-model alternative:
+  `probe_gpu_memory_gib()` and `_probe_cuda_vram()` both read
+  `torch.cuda.mem_get_info()`, which reports free VRAM as seen by the calling process's
+  own CUDA context — stale and inaccurate across sibling processes and sequential engine
+  loads. The narrow original question (does dropping CUDA graphs cost more VRAM than it
+  saves) could not be cleanly isolated because of this probe bug; but the broader Option
+  A mechanism (independent single-model processes, CUDA graphs on) was positively,
+  separately demonstrated: two independent processes for a real model pair
+  (qwen2.5-0.5b + tinyllama-chat) loaded successfully with real headroom on an 8 GiB
+  card (design.md §6 finding 5).
+- Decision: Option A — one model per OS process, no in-process multi-engine path.
+  1. **`EnginePool` (`engines/pool.py`) is unchanged.** It was already a generic,
+     pool-size-agnostic `{name: engine}` dict dispatcher with no `pool_size`-specific
+     logic of its own — the multi-engine coupling lived entirely in
+     `api/deps.py`'s `_build_engine_pool` and `VLLMEngine`'s constructor, not in the
+     pool class itself.
+  2. **`_build_engine_pool` rejects, rather than silently loads, more than one distinct
+     model.** `INFERENCE_X_LOADED_MODELS` resolving to >1 distinct model now raises
+     `ValueError` naming the one-process-per-model pattern, instead of constructing a
+     second in-process engine.
+  3. **`VLLMEngine`'s constructor drops `pool_size`/`pool_models`/`pool_configs`/
+     `engine_index`/`session_free_vram_gib`.** `enforce_eager` forcing, the `max_model_len`
+     2048 clamp, and the B2-era Prometheus metrics-registry-collision warning
+     (`expose-native-engine-metrics`'s deferred-to-B6 item) are deleted outright —
+     dead code once no process can hold >1 engine, not merely unreachable.
+  4. **`utils/vllm_pool_config.py`'s multi-engine heuristics are deleted, not kept
+     dormant:** `_weight_scaled_utilization`, `_apply_sequential_vram_caps`,
+     `_multi_engine_overhead_gib`. `scale_model_config_for_pool` becomes
+     `scale_model_config` (single-model only); `validate_pool_fits` becomes
+     `validate_model_fits`, delegating to the same `_single_engine_utilization` sizing
+     check `scale_model_config` itself uses — one basis for both the preflight and the
+     actual sizing, not two that could disagree.
+  5. **`probe_gpu_memory_gib()` is fixed, not preserved-but-unused.** It now queries
+     `nvidia-smi` first (device-wide view, accurate across sibling processes), falling
+     back to `torch.cuda.mem_get_info()` only when `nvidia-smi` itself is unavailable
+     (no GPU, no driver — e.g. CI), logging a warning on that fallback since it
+     reintroduces the exact staleness this fix exists to close.
+     `engines/vllm_engine.py`'s `_probe_cuda_vram()` now delegates to it instead of
+     duplicating the same buggy read at a second call site.
+  6. **Multi-model serving moves to orchestration, not engine construction.**
+     `playground/server_control.py`'s `ensure_models_loaded()` now starts one
+     independent process per requested model on consecutive ports (the first model
+     keeps the caller's own base URL and port unchanged) instead of one process with
+     `INFERENCE_X_LOADED_MODELS` set to a comma list. `playground/app.py`'s compare UI
+     routes each model's requests to its own process's base URL.
+     `playground/client.py`'s dual-base-url `--compare` mode already implemented this
+     pattern and required zero changes.
+- Alternatives considered:
+  - **Keep the multi-engine pool path, just fix the probe.** Rejected: would leave
+    `enforce_eager`, the 2048 clamp, and the hand-calibrated sequential-cap heuristics
+    in place for no remaining reason — the roadmap's own naming of this phase
+    ("split multi-model into two processes") was never about the probe alone.
+  - **Fail loudly on `pool_size > 1` without removing the code path.** Rejected: DEC-058
+    left this open rather than deciding it; leaving dead, unreachable multi-engine
+    machinery in place after committing to Option A would carry its maintenance cost
+    with no corresponding benefit.
+- Consequences:
+  - Positive: `enforce_eager`, the `max_model_len` 2048 clamp, and ~150 lines of
+    hand-calibrated sequential-VRAM heuristics are deleted, not dormant. The free-VRAM
+    probe is now accurate across sibling processes for every caller (engine
+    construction, `GET /v1/metrics`), not just newly-correct for B6's own use.
+  - Negative: multi-model serving now always costs one full process (and one full model
+    load) per model, even for very small models that would have shared cheaply in one
+    process; the playground TUI's compare-mode startup is correspondingly slower
+    (two independent model loads instead of one process loading two).
+  - Neutral: 1.15 (mid-flight crash isolation between sibling engine-core processes) and
+    1.18 (root cause of the probe's staleness on this platform) remain open follow-up
+    questions (design.md §11 items 2, 6) — informational only, not blocking this
+    decision or its implementation.
+- Compatibility: `BaseEngine`, `ChatService`, `TaskRouter`, and every route handler
+  required zero code changes — Engine Boundary (DEC-047) was already expressed entirely
+  in single-engine terms. `playground/client.py` required zero changes.
+  `INFERENCE_X_LOADED_MODELS`'s comma-separated parsing in `core/settings.py` is
+  unchanged; only `_build_engine_pool`'s handling of a >1-model result changed, from
+  silent construction to a clear rejection.
+- Supersession: closes the `pool_size > 1` question DEC-058 explicitly left open.
+
+### DEC-060
+- Date: 2026-08-10
+- Status: accepted
+- Title: Replace Gate 1's instant sequence-concurrency reject with a bounded
+  per-model semaphore wait (B4, `rescope-admission-control`)
+- Context: Phase B4 (`docs/PHASE-A-EXECUTION-PLAN.md:269`,
+  `docs/REVIEW-2026-08-03-architecture.md` §9). `AdmissionController`'s Gate 1
+  (`_seq_tracker`, a `_PerModelCounter`) was added by DEC-040 to turn vLLM's
+  silent internal queueing past `max_num_seqs` into an explicit, client-visible
+  429 — instant rejection, no wait, whenever `in_flight == max_num_seqs` for a
+  model.
+- Problem: Gate 1's instant reject fires even when vLLM's own scheduler would
+  have queued and served the request within a short wait — a false 429 for a
+  request that was never actually unschedulable. A live experiment against
+  the installed vLLM 0.22.1 confirmed this structurally and empirically: 48
+  requests fired simultaneously at 4x `max_num_seqs=4` against `opt-125m` all
+  completed successfully with zero rejections and zero errors (worst-case
+  submit-to-completion 1.127s); source tracing of `Scheduler.add_request()`
+  and `EngineCore.add_request()` found no model-size-, KV-, or
+  `max_num_seqs`-dependent rejection branch anywhere in the intake path —
+  vLLM unconditionally enqueues. Gate 1's instant reject was strictly more
+  conservative than the engine it fronts.
+- Decision: Option C — a bounded per-model `asyncio.BoundedSemaphore` replaces
+  `_seq_tracker`'s counter-plus-instant-reject with counter-plus-bounded-wait.
+  1. **`AdmissionController.admit()` becomes `async def`** — its first `await`.
+     The semaphore is acquired *first*, before Gates 2/3, preserving today's
+     gate order and error precedence and the fail-cheap-before-computing-
+     prompt-tokens property.
+  2. **`asyncio.wait_for(sem.acquire(), timeout=admission_wait_s)`** — on
+     timeout, raises `EngineSaturatedError` (429 + `Retry-After`), the exact
+     response shape Gate 1 already gives clients today. No new error type, no
+     new HTTP mapping.
+  3. **New setting `admission_wait_s`** (`INFERENCE_X_ADMISSION_WAIT_S`,
+     default `5.0`), mirroring `stream_timeout_s`'s existing pattern — a
+     provisional default with ~4x headroom over the 1.13s worst case observed
+     against `opt-125m`, explicitly not validated for larger/slower models.
+  4. **A `try`/`except BaseException` wraps Gates 2/3 and the final commit**,
+     releasing the just-acquired permit before re-raising on any exception —
+     the one termination path (of eight traced) that is not safe for free
+     under the semaphore, unlike the counter it replaces. `release()` stays
+     synchronous.
+  5. **`asyncio.BoundedSemaphore`, not plain `Semaphore`**: identical
+     `acquire()`/FIFO-waiter behavior, but raises `ValueError` on any
+     over-release instead of silently inflating the ceiling, in case a future
+     change ever adds an `await` inside Gates 2/3 and breaks the blanket-release
+     invariant this design depends on.
+  6. **Gate 3 (KV-pool pressure) is unchanged and out of scope** — a separate
+     `_PerModelCounter` on a different unit (tokens, not permits), with its own
+     unresolved question about false 429s left untraced, deliberately not
+     folded into this change.
+- Alternatives considered:
+  - **Option A — narrow Gate 1, dispatch straight to vLLM's own queue.**
+    Rejected: breaks the "engine is never invoked for a rejected request"
+    invariant DEC-040 established; the existing fallback (`VLLMEngine.generate()`'s
+    300s timeout) maps to a generic HTTP 500 with no `Retry-After`, a worse
+    failure mode than today's typed 429 unless the timeout/error-mapping is
+    also revised — a second, undesigned decision this change did not want to
+    bundle in.
+  - **Option B — poll/re-check admission state against live scheduler state.**
+    Rejected: reimplements a second, hand-rolled scheduler inside `routing/`,
+    with its own undesigned timeout and cancellation handling, for no
+    correctness benefit over a stdlib semaphore.
+- Consequences:
+  - Positive: false 429s are eliminated for the exact class of contention this
+    investigation measured — legitimate short-lived saturation that vLLM
+    itself would have served. Exactly-once permit release is proven for all 8
+    traced termination paths, not merely assumed. `EngineSaturatedError`'s
+    429 + `Retry-After` contract, and Gate 2/Gate 3's behavior, are unchanged.
+  - Negative: a bare semaphore bounds *permits*, not *waiters* — nothing caps
+    how many requests can simultaneously queue behind `sem.acquire()` during a
+    sudden burst. Deliberately not solved here; explicitly named as B5's
+    territory (priority ordering, starvation prevention, bounded queue depth).
+  - Neutral: `admission_wait_s`'s default (5.0s) is evidence-informed but
+    calibrated only against `opt-125m`, a small fast model — validating it
+    against a larger/slower model is a named, non-blocking follow-up
+    (`tasks.md` 4.3a), not a condition of this decision.
+- Compatibility: `429` + `Retry-After` remains the response shape for genuine,
+  sustained saturation, unchanged from today. `ContextTooLongError` → 400
+  (Gate 2) is entirely unaffected. `GET /metrics` and `GET /v1/metrics` are
+  unaffected. `AdmissionController.admit()` gaining `async` is an internal
+  interface change (two call sites in `ChatService` add `await`), not an
+  HTTP-facing contract change.
+- Supersession: refines DEC-040's Gate 1 mechanism (instant reject → bounded
+  wait, then reject) without reversing DEC-040's explicit-signal goal, which
+  this decision explicitly preserves.
+
+### DEC-061
+- Date: 2026-08-10
+- Status: accepted
+- Title: Priority-differentiated admission wait and a bounded batch-waiter
+  cap for `priority: batch` requests (B5, `add-batch-priority-queueing`)
+- Context: Phase B5 (`docs/PHASE-A-EXECUTION-PLAN.md:271`,
+  `docs/REVIEW-2026-08-03-architecture.md` §9), filed as "Varex blocker #2" —
+  Varex (the downstream SPRT prompt-evaluation consumer) runs batches of up to
+  ~200 trials and tolerates a long wait for a slot far better than a hard-fail
+  429 mid-run. DEC-060 (B4) replaced Gate 1's instant reject with a bounded
+  semaphore wait, but uniformly for both `interactive` and `batch` priorities
+  — B4's own design record named this gap and assigned it to B5: no priority
+  ordering, no starvation prevention, no bounded waiter count (a bare
+  semaphore bounds permits, not the number of coroutines queued behind
+  `acquire()`).
+- Decision: Option 1 — FIFO with a priority-differentiated wait bound and a
+  bounded per-model batch-waiter cap, reusing B4's semaphore verbatim.
+  1. **`interactive` keeps `admission_wait_s` (~5s) unchanged** — zero new
+     gates, settings, or latency for this priority; Gate 1's `interactive`
+     branch is untouched code.
+  2. **`batch` waits on the same per-model `asyncio.BoundedSemaphore`, same
+     FIFO order, bounded by a new, larger `batch_admission_wait_s`**
+     (`INFERENCE_X_BATCH_ADMISSION_WAIT_S`, default `30`).
+  3. **A new per-model batch-waiter cap** (`_PerModelCounter`, the same
+     primitive already used for KV-token and sequence tracking) bounds how
+     many `batch` requests may be queued at once. A `batch` request arriving
+     when the cap is already reached is rejected immediately
+     (`EngineSaturatedError`, 429 + `Retry-After`) **before ever calling
+     `sem.acquire()`**, so it cannot affect semaphore lifecycle. Cap formula:
+     `INFERENCE_X_MAX_QUEUED_BATCH_MULTIPLIER` (default `8`) ×
+     `effective_max_num_seqs(routed_model)` — 32/64/128 on the 6gb/12gb/24gb
+     tiers.
+  4. **Gates 2 and 3, and `release()`, are untouched.** B4's 8-path
+     cancellation-safety analysis is reused unmodified, not re-derived — this
+     change only varies the `timeout` value `wait_for` receives, per priority.
+- Alternatives considered:
+  - **Option 2 — priority-preemptive dual queue** (an interactive waiter
+    always preferred over a batch waiter regardless of arrival order).
+    Rejected: requires replacing `asyncio.BoundedSemaphore` with a custom
+    wait primitive (stdlib's semaphore has no priority-aware wakeup) plus an
+    age-based promotion rule to bound batch starvation — all 8 of B4's
+    cancellation-safety paths would need re-proving from scratch for a new
+    primitive, for a gap the live experiment (below) found small at a
+    moderate flood.
+  - **Option 3 — reserved capacity split** (`R` permits of each model's
+    `max_num_seqs` reserved exclusively for `interactive`). Rejected:
+    permanently discards throughput when interactive is idle, `R` has no
+    empirical basis, and it still needs the same batch-waiter cap layered on
+    top to be bounded — no net simplicity gain over Option 1.
+- Empirical basis (live experiment, `opt-125m`, 6gb tier, `max_num_seqs=4`,
+  same model B4's own experiment used for direct comparability): a 4x-ceiling
+  burst (16 concurrent requests) had a 1.569s worst-case total latency (~0.39s
+  per drain wave) — informing `batch_admission_wait_s=30`. A FIFO-fairness
+  test (8 `batch` requests, then 1 `interactive` request 50ms later — a
+  2x-ceiling flood) found the interactive request completed in 1.078s, within
+  the batch cohort's own spread — no measurable starvation at this scale. A
+  cancellation/no-leak test found no leaked permit after a client disconnect
+  while queued. None of this was tested at Varex's full ~200-request scale;
+  that remains an explicit, non-blocking follow-up (`tasks.md` 1.11a, 1.13a).
+- Consequences:
+  - Positive: `batch` requests under load now wait instead of hard-failing,
+    directly unblocking the Varex use case this change was filed for.
+    `interactive` behavior is unchanged by construction — every existing
+    `interactive` test and code path is untouched.
+  - Negative: an interactive request arriving just behind a batch flood can
+    still wait up to `admission_wait_s` before its own 429 — Option 1 does not
+    eliminate this, only Options 2/3 would have, at a correctness-risk cost
+    this decision judged not worth it at the evidence available. Named as this
+    change's own explicit follow-up, not solved speculatively here.
+  - Neutral: `batch_admission_wait_s=30` and the `8×` waiter-cap multiplier are
+    evidence-informed provisional defaults, sanity-checked against 9-16
+    concurrent requests in the live experiment but not measured at the
+    32-128-request range the cap formula actually produces, nor at Varex's
+    ~200-request scale. Both are config-overridable, not hardcoded.
+- Compatibility: No public HTTP contract change — `priority: batch` already
+  existed on `ChatCompletionRequest`; this change only alters how long a
+  `batch` request may wait before its existing 429 shape fires, and adds a
+  new (also-429) rejection path for an already-full batch queue.
+  `EnginePool`, `pool_size`/replica semantics, and `utils/vllm_pool_config.py`
+  are unaffected — reserved for B6.
+- Supersession: extends DEC-060's semaphore mechanism with a
+  priority-differentiated timeout and a bounded waiter cap; does not modify
+  or reopen DEC-060's Gate 1 design.

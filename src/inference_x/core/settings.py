@@ -45,9 +45,10 @@ class AppSettings:
         )
         self.config_dir: str = os.environ.get("INFERENCE_X_CONFIG_DIR", "config")
 
-        # Comma-separated list of models to load at startup.
-        # Falls back to default_model when not set.
-        # Example: INFERENCE_X_LOADED_MODELS=qwen2.5-0.5b,tinyllama-chat
+        # Comma-separated list of models to load at startup. Falls back to
+        # default_model when not set. Resolving to more than one distinct
+        # model is rejected at engine-pool build time (api/deps.py) — each
+        # process serves exactly one model (docs/DECISIONS.md DEC-059).
         _raw = os.environ.get("INFERENCE_X_LOADED_MODELS", "")
         self.loaded_models: list[str] = (
             [m.strip() for m in _raw.split(",") if m.strip()]
@@ -60,6 +61,39 @@ class AppSettings:
         # with an error SSE event.  Set to 0 to disable.
         self.stream_timeout_s: float = float(
             os.environ.get("INFERENCE_X_STREAM_TIMEOUT_S", "120")
+        )
+
+        # Maximum seconds AdmissionController.admit() waits for a sequence-
+        # concurrency slot to free before rejecting with 429 (rescope-
+        # admission-control, Option C). Provisional default: ~4x headroom over
+        # the 1.13s worst-case observed in this investigation's live burst
+        # test (opt-125m, 4x over max_num_seqs=4) — not validated against
+        # larger/slower models; see openspec/changes/rescope-admission-control
+        # /design.md "Acquisition, rejection, and timeout (429) contract" and
+        # tasks.md 4.3a for the recommended larger-model follow-up.
+        self.admission_wait_s: float = float(
+            os.environ.get("INFERENCE_X_ADMISSION_WAIT_S", "5")
+        )
+
+        # Maximum seconds AdmissionController.admit() waits for a sequence-
+        # concurrency slot for a priority: batch request (add-batch-priority
+        # -queueing, B5). Same mechanism as admission_wait_s above, just a
+        # longer bound — batch requests are expected to tolerate a longer
+        # wait than interactive ones. Provisional default from a targeted
+        # live-load experiment at a 4x-max_num_seqs burst (opt-125m, ~0.39s/
+        # wave observed); not validated at much larger batch scales — see
+        # openspec/changes/add-batch-priority-queueing/design.md §2.6/§4.
+        self.batch_admission_wait_s: float = float(
+            os.environ.get("INFERENCE_X_BATCH_ADMISSION_WAIT_S", "30")
+        )
+
+        # Multiplier on a model's resolved max_num_seqs bounding how many
+        # priority: batch requests may be queued (waiting on the sequence-
+        # concurrency semaphore) at once. A batch request arriving when that
+        # many are already queued is rejected immediately instead of
+        # queueing. Provisional default; see design.md §3.
+        self.batch_waiter_multiplier: int = int(
+            os.environ.get("INFERENCE_X_MAX_QUEUED_BATCH_MULTIPLIER", "8")
         )
 
     def get_model_config(self, model_name: str | None = None) -> dict[str, Any]:

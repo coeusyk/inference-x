@@ -132,7 +132,7 @@ def test_build_engine_pool_resolves_family_env_var(monkeypatch, tmp_path):
     _RecordingVLLMEngine.captured_configs = []
     monkeypatch.setattr(deps_module, "VLLMEngine", _RecordingVLLMEngine)
     monkeypatch.setattr(deps_module, "_resolve_vram_tier_for_pool", lambda config_dir: _tier())
-    monkeypatch.setattr(deps_module, "validate_pool_fits", lambda *a, **kw: None)
+    monkeypatch.setattr(deps_module, "validate_model_fits", lambda *a, **kw: None)
     monkeypatch.setattr(deps_module, "probe_gpu_memory_gib", lambda: (4.0, 8.0))
     monkeypatch.setattr(
         "inference_x.routing.variant_selector.estimate_weight_gib",

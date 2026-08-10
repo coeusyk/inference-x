@@ -73,7 +73,7 @@ class ChatService:
             RuntimeError: engine inference failure.
         """
         routed_model, engine = self._resolve_engine(request)
-        admitted = self._admission.admit(routed_model, request, engine)
+        admitted = await self._admission.admit(routed_model, request, engine)
         effective_request = request.model_copy(
             update={"max_tokens": admitted.effective_max_tokens}
         )
@@ -136,7 +136,7 @@ class ChatService:
         is covered by the same, single release call site.
         """
         routed_model, engine = self._resolve_engine(request)
-        admitted = self._admission.admit(routed_model, request, engine)
+        admitted = await self._admission.admit(routed_model, request, engine)
         gen: AsyncGenerator[ChatStreamChunk, None] | None = None
         try:
             effective_request = request.model_copy(
@@ -233,8 +233,7 @@ class ChatService:
             raise ValueError(
                 f"Routed to model '{routed_model}' but loaded model is "
                 f"'{loaded_str}'. "
-                f"Restart with INFERENCE_X_LOADED_MODELS={routed_model} "
-                f"(or add it to the existing list)."
+                f"Restart this process with INFERENCE_X_DEFAULT_MODEL={routed_model}."
             )
 
         return routed_model, self._pool.get(routed_model)

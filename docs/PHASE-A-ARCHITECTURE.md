@@ -302,9 +302,14 @@ sequenced after Phase A and explicitly not gated by Engine Boundary hygiene:
   race-class history); expose vLLM's native Prometheus stats (**B2 —
   complete**); per-request queue/prefill/decode timing in the response
   body (**B3 — complete**);
-  re-scope admission to what the scheduler cannot already do (B4); batch
-  queueing instead of `429` for `priority: batch` (B5); split multi-model
-  serving into separate processes (B6).
+  re-scope admission to what the scheduler cannot already do (**B4 —
+  complete**, replaces Gate 1's instant sequence-concurrency reject with a
+  bounded per-model semaphore wait; DEC-060); batch queueing instead of
+  `429` for `priority: batch` (**B5 — complete**, priority-differentiated
+  wait bound plus a bounded batch-waiter cap on top of B4's semaphore;
+  DEC-061); split multi-model serving into separate processes (**B6 —
+  complete**, deletes `enforce_eager` coupling, the `max_model_len` 2048
+  clamp, and the multi-engine sequential-VRAM heuristics; DEC-059).
 - **Phase C** (the differentiator): a signed run manifest and `X-Run-Id`
   (C1); `batch.co_batched_request_ids` (C2); `deterministic: true` wiring
   `VLLM_BATCH_INVARIANT=1`, refusing on unsupported hardware (C3); an

@@ -29,7 +29,7 @@ def _init_engine(scaled_config: dict) -> dict:
     with patch("inference_x.engines.vllm_engine._VLLM_AVAILABLE", True):
         with patch("inference_x.engines.vllm_engine._load_vllm"):
             with patch(
-                "inference_x.engines.vllm_engine.scale_model_config_for_pool",
+                "inference_x.engines.vllm_engine.scale_model_config",
                 return_value=scaled_config,
             ):
                 with patch("inference_x.engines.vllm_engine.preflight_hf_access"):

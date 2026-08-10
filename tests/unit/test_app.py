@@ -158,7 +158,7 @@ async def test_ctrl_c_quits_even_with_failed_loading_screen_on_top(monkeypatch):
     async def fake_ensure_models_loaded(base_url, models, *, on_status=None, on_log=None, load_timeout_s=600):
         if on_log:
             on_log("X Application startup failed")
-        return False
+        return None
 
     import log_feed
 

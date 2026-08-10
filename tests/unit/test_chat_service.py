@@ -1,12 +1,17 @@
 """Unit tests for ChatService (Phase 4: multi-model engine pool)."""
 import asyncio
 import json
+from dataclasses import dataclass
 
 import pytest
 
 from inference_x.engines.base import BaseEngine
 from inference_x.engines.pool import EnginePool
-from inference_x.routing.admission import AdmissionController, AdmissionResult
+from inference_x.routing.admission import (
+    AdmissionController,
+    AdmissionResult,
+    EngineSaturatedError,
+)
 from inference_x.routing.task_router import TaskRouter
 from inference_x.schemas.chat import (
     ChatCompletionChoice,
@@ -50,6 +55,12 @@ def _make_service(
     return ChatService(engine_pool=pool, registry=registry, router=router)
 
 
+@dataclass
+class _ReservationTestTier:
+    max_model_len_cap: int = 4096
+    max_num_seqs: int = 4
+
+
 class _CountingAdmission:
     """Wraps a real AdmissionController, recording admit()/release() calls.
 
@@ -66,8 +77,8 @@ class _CountingAdmission:
         self.admit_results: list[AdmissionResult] = []
         self.release_calls: list[tuple[str, int]] = []
 
-    def admit(self, *args, **kwargs):
-        result = self.inner.admit(*args, **kwargs)
+    async def admit(self, *args, **kwargs):
+        result = await self.inner.admit(*args, **kwargs)
         self.admit_results.append(result)
         return result
 
@@ -596,7 +607,14 @@ class TestReservationLifecycle:
     def _service(self, engine: BaseEngine) -> tuple[ChatService, _CountingAdmission]:
         registry = _make_registry("test")
         router = TaskRouter(registry, "test")
-        admission = _CountingAdmission(AdmissionController(registry))
+        # tier=_ReservationTestTier so the sequence-concurrency semaphore is
+        # actually exercised by these lifecycle tests (Option C — without a
+        # tier the gate is skipped entirely and there is nothing to assert
+        # about permit release). max_num_seqs=4 gives headroom for the two
+        # deliberately-concurrent streams below.
+        admission = _CountingAdmission(
+            AdmissionController(registry, tier=_ReservationTestTier())
+        )
         pool = EnginePool({"test": engine})
         svc = ChatService(
             engine_pool=pool, registry=registry, router=router, admission=admission
@@ -606,7 +624,11 @@ class TestReservationLifecycle:
     def _assert_released_exactly_once_and_clear(self, admission: _CountingAdmission) -> None:
         assert len(admission.release_calls) == 1
         assert admission.inner._tracker.current("test") == 0
-        assert admission.inner._seq_tracker.current("test") == 0
+        sem = admission.inner._semaphores.get("test")
+        assert sem is not None
+        assert sem._value == _ReservationTestTier().max_num_seqs, (
+            "sequence-concurrency permit was not returned to the semaphore"
+        )
 
     @pytest.mark.asyncio
     async def test_normal_completion_releases_exactly_once(self):
@@ -765,3 +787,94 @@ class TestReservationLifecycle:
             ("test", reserved_small),
             ("test", reserved_large),
         ]
+
+
+class TestBoundedAdmissionSharedByBothPaths:
+    """rescope-admission-control Option C: complete() and stream_response()
+
+    call the identical AdmissionController.admit() — there is one bounded-wait
+    gate, not two. This saturates a single-slot model and proves both entry
+    points wait, then time out into the same EngineSaturatedError (which
+    api/errors.py maps to 429 + Retry-After), rather than one path silently
+    bypassing the gate.
+    """
+
+    async def test_non_streaming_and_streaming_both_time_out_through_the_same_gate(self):
+        registry = _make_registry("test")
+        router = TaskRouter(registry, "test")
+        admission = AdmissionController(
+            registry,
+            tier=_ReservationTestTier(max_num_seqs=1),
+            admission_wait_s=0.05,
+        )
+        pool = EnginePool({"test": _StubEngine()})
+        svc = ChatService(engine_pool=pool, registry=registry, router=router, admission=admission)
+
+        # Hold the model's only sequence-concurrency slot for the duration.
+        holder = await admission.admit(
+            "test",
+            ChatCompletionRequest(model="test", messages=[ChatMessage(role="user", content="x")]),
+            pool.get("test"),
+        )
+        try:
+            with pytest.raises(EngineSaturatedError, match="concurrent-sequence limit"):
+                await svc.complete(
+                    ChatCompletionRequest(model="test", messages=[ChatMessage(role="user", content="hi")])
+                )
+
+            agen = svc.stream_response(
+                ChatCompletionRequest(
+                    model="test",
+                    messages=[ChatMessage(role="user", content="hi")],
+                    stream=True,
+                )
+            )
+            with pytest.raises(EngineSaturatedError, match="concurrent-sequence limit"):
+                await agen.__anext__()
+        finally:
+            admission.release("test", holder.reserved_tokens)
+
+    async def test_batch_priority_non_streaming_and_streaming_both_time_out_through_the_same_gate(self):
+        """B5 variant: batch priority uses batch_admission_wait_s instead of
+        admission_wait_s, but is still the identical admit() call for both
+        complete() and stream_response() — no separate batch-only code path
+        in ChatService itself."""
+        registry = _make_registry("test")
+        router = TaskRouter(registry, "test")
+        admission = AdmissionController(
+            registry,
+            tier=_ReservationTestTier(max_num_seqs=1),
+            batch_admission_wait_s=0.05,
+        )
+        pool = EnginePool({"test": _StubEngine()})
+        svc = ChatService(engine_pool=pool, registry=registry, router=router, admission=admission)
+
+        holder = await admission.admit(
+            "test",
+            ChatCompletionRequest(model="test", messages=[ChatMessage(role="user", content="x")]),
+            pool.get("test"),
+        )
+        try:
+            with pytest.raises(EngineSaturatedError, match="concurrent-sequence limit"):
+                await svc.complete(
+                    ChatCompletionRequest(
+                        model="test",
+                        messages=[ChatMessage(role="user", content="hi")],
+                        priority="batch",
+                    )
+                )
+            assert admission._batch_waiters.current("test") == 0
+
+            agen = svc.stream_response(
+                ChatCompletionRequest(
+                    model="test",
+                    messages=[ChatMessage(role="user", content="hi")],
+                    stream=True,
+                    priority="batch",
+                )
+            )
+            with pytest.raises(EngineSaturatedError, match="concurrent-sequence limit"):
+                await agen.__anext__()
+            assert admission._batch_waiters.current("test") == 0
+        finally:
+            admission.release("test", holder.reserved_tokens)

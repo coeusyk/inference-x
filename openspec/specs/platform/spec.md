@@ -43,12 +43,45 @@ actually be applied at engine construction time rather than left inert.
 - AND `block_size`, `kv_cache_dtype`, and `enable_prefix_caching` from the resolved
   tier are passed to the underlying inference engine
 
-#### Scenario: Sequence-concurrency ceiling is enforced pre-dispatch
+#### Scenario: Sequence-concurrency ceiling is enforced with a priority-differentiated bounded wait
 - WHEN the number of in-flight requests against a model is at or above its
   resolved `max_num_seqs`
-- THEN a new request for that model is rejected with HTTP 429 and a
-  `Retry-After` header, regardless of request priority
-- AND the engine itself is never invoked for the rejected request
+- THEN a new `interactive`-priority request waits, up to a short, bounded,
+  configurable deadline, for an in-flight request to complete and free a slot
+- AND a new `batch`-priority request waits, up to a separate and
+  substantially longer bounded, configurable deadline, for a slot to free
+- AND if a slot frees within the request's applicable deadline, the request
+  is admitted and proceeds exactly as it would have if the ceiling had never
+  been hit
+- AND if no slot frees before the applicable deadline elapses, the request
+  is rejected with HTTP 429 and a `Retry-After` header
+- AND the engine itself is never invoked for a request that is ultimately
+  rejected after its wait elapses
+
+#### Scenario: Batch-priority queue depth is bounded
+- WHEN a `batch`-priority request arrives for a model whose count of
+  currently-waiting `batch`-priority requests is already at that model's
+  configured queue-depth capacity
+- THEN the new request is rejected immediately with HTTP 429 and a
+  `Retry-After` header, without waiting and without ever counting toward or
+  affecting the sequence-concurrency wait
+- AND `interactive`-priority requests are never subject to this capacity
+  check
+
+#### Scenario: Serving an additional model does not degrade any already-loaded model
+- WHEN the system is already serving one model and is asked to also serve
+  one or more additional models
+- THEN each model is served by its own independent server process — a
+  server process is never configured to serve more than one model
+- AND no already-loaded model's context-length ceiling, decode
+  performance, or GPU-memory budget is reduced below what that same model
+  would get if it were the only model being served
+- AND no model's admission-control behavior (B4's bounded wait, B5's
+  priority-differentiated wait and batch-waiter cap) changes because
+  another model is also being served
+- AND observability signals (health, native metrics) for one model remain
+  attributable to that model alone, without collision against another
+  model's signals
 
 #### Scenario: Knob resolution is unavailable
 - WHEN no VRAM tier can be resolved for the current hardware
@@ -877,4 +910,26 @@ response paths can report different timing for the same request.
   once as a streaming request
 - **THEN** both report the same `EngineTiming` values, because both derive
   from the same underlying function
+
+### Requirement: Admission control stays independent of observability surfaces
+The system SHALL make every admission decision (context length, KV-pool
+pressure, or sequence concurrency) using only state InferenceX tracks directly
+or reads from the engine's synchronous interface, and SHALL NOT read from or
+depend on `GET /metrics` or `GET /v1/metrics` to decide whether to admit,
+clamp, or reject a request.
+
+#### Scenario: Metrics scraping never influences admission
+- **WHEN** any admission decision is made for any gate
+- **THEN** the decision does not query, scrape, or otherwise read the
+  Prometheus registry or the `/v1/metrics` in-memory store
+- **AND** `GET /metrics` and `GET /v1/metrics` continue to report
+  observability data only, unaffected by admission-control behavior
+
+#### Scenario: Observability endpoints remain unaffected by this change
+- **WHEN** this change (in any future implementation phase) is applied
+- **THEN** `GET /metrics` (vLLM-native Prometheus registry) and
+  `GET /v1/metrics` (HTTP-boundary aggregates) continue to report exactly the
+  same data they reported before this change
+- **AND** neither endpoint gains a new dependency on `AdmissionController` or
+  vice versa
 

@@ -297,7 +297,7 @@ class TestChatCompletionsEndpoint:
             assert strict.json()["error"]["type"] == "invalid_request_error"
         app.dependency_overrides.clear()
 
-    def test_kv_saturation_returns_429_with_retry_after(self):
+    async def test_kv_saturation_returns_429_with_retry_after(self):
         """A batch-tier request is rejected (not silently truncated) when an
         in-flight reservation has already consumed the KV safety budget."""
         engine = _AdmissionAwareEngine(prompt_tokens=5, kv_capacity_tokens=20)
@@ -307,7 +307,7 @@ class TestChatCompletionsEndpoint:
         svc = ChatService(engine_pool=pool, registry=registry, router=router)
         # Simulate an in-flight request holding most of the KV budget
         # (safety margin 0.9 * capacity 20 = 18 tokens) without releasing it.
-        svc._admission.admit(
+        await svc._admission.admit(
             _TEST_MODEL,
             ChatCompletionRequest(
                 model=_TEST_MODEL,
@@ -329,10 +329,12 @@ class TestChatCompletionsEndpoint:
             assert body["error"]["type"] == "rate_limit_error"
         app.dependency_overrides.clear()
 
-    def test_sequence_concurrency_saturation_returns_429(self):
+    async def test_sequence_concurrency_saturation_returns_429(self):
         """An interactive-priority request is also rejected (no clamp path exists
-        for a sequence slot) when the resolved max_num_seqs ceiling is already
-        full (add-engine-knob-surfacing)."""
+        for a sequence slot) when the resolved max_num_seqs ceiling stays full
+        past the (deliberately tiny, for test speed) admission wait
+        (add-engine-knob-surfacing; bounded-wait semantics per
+        rescope-admission-control Option C)."""
         from dataclasses import dataclass
 
         from inference_x.routing.admission import AdmissionController
@@ -347,11 +349,13 @@ class TestChatCompletionsEndpoint:
         router = TaskRouter(registry, _TEST_MODEL)
         pool = EnginePool({_TEST_MODEL: engine})
         admission = AdmissionController(
-            registry, tier=_FakeTier(max_model_len_cap=4096, max_num_seqs=1)
+            registry,
+            tier=_FakeTier(max_model_len_cap=4096, max_num_seqs=1),
+            admission_wait_s=0.05,
         )
         svc = ChatService(engine_pool=pool, registry=registry, router=router, admission=admission)
         # Simulate one in-flight request already holding the model's only sequence slot.
-        admission.admit(
+        await admission.admit(
             _TEST_MODEL,
             ChatCompletionRequest(
                 model=_TEST_MODEL, messages=[ChatMessage(role="user", content="x")]

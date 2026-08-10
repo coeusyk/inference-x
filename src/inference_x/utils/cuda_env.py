@@ -84,7 +84,7 @@ def ensure_cuda_home() -> str | None:
     return str(venv_cuda)
 
 
-def ensure_vllm_runtime_env(*, pool_size: int = 1) -> str | None:
+def ensure_vllm_runtime_env() -> str | None:
     """Apply WSL2-friendly defaults before vLLM engine initialization."""
     ensure_vllm_process_env()
     apply_vllm_platform_patch()
@@ -100,13 +100,6 @@ def ensure_vllm_runtime_env(*, pool_size: int = 1) -> str | None:
         os.environ["VLLM_USE_FLASHINFER_SAMPLER"] = "0"
         logger.info(
             "WSL detected: disabled FlashInfer sampler (VLLM_USE_FLASHINFER_SAMPLER=0)"
-        )
-
-    if pool_size > 1 and "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS" not in os.environ:
-        os.environ["VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS"] = "0"
-        logger.info(
-            "Multi-model pool: disabled CUDA graph memory profiler "
-            "(VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0)"
         )
 
     return cuda_home
