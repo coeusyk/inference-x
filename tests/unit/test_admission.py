@@ -335,6 +335,7 @@ class TestSequenceConcurrencyGate:
             _registry(),
             tier=_FakeTier(max_model_len_cap=4096, max_num_seqs=2),
             admission_wait_s=_FAST_WAIT_S,
+            batch_admission_wait_s=_FAST_WAIT_S,
         )
         await controller.admit("m", _req(max_tokens=10, priority="batch"), _FakeEngine(prompt_tokens=1))
         await controller.admit("m", _req(max_tokens=10, priority="batch"), _FakeEngine(prompt_tokens=1))
@@ -556,3 +557,295 @@ class TestBoundedWaitAndCancellation:
         # permits would now be held (filler + leaked) and this would time out.
         probe_engine = _FakeEngine(prompt_tokens=5, kv_capacity_tokens=30)
         await controller.admit("m", _req(max_tokens=1, priority="batch"), probe_engine)
+
+
+class TestBatchPriorityQueueing:
+    """B5 (add-batch-priority-queueing): batch waits longer than interactive on
+    the same per-model semaphore, and is subject to a bounded waiter cap
+    interactive is not. See design.md "Cancellation and lifecycle correctness"
+    for the path numbering referenced below.
+    """
+
+    async def test_batch_waits_then_succeeds_once_a_slot_frees(self):
+        """Batch uses batch_admission_wait_s, not admission_wait_s, and is
+        admitted once the holder releases — same mechanism as interactive's
+        TestBoundedWaitAndCancellation case, batch-priority variant."""
+        controller = AdmissionController(
+            _registry(),
+            tier=_FakeTier(max_model_len_cap=4096, max_num_seqs=1),
+            admission_wait_s=0.01,  # deliberately too short for interactive to survive
+            batch_admission_wait_s=1.0,
+        )
+        holder = await controller.admit("m", _req(max_tokens=10), _FakeEngine(prompt_tokens=1))
+
+        waiter = asyncio.ensure_future(
+            controller.admit(
+                "m", _req(max_tokens=10, priority="batch"), _FakeEngine(prompt_tokens=1)
+            )
+        )
+        await asyncio.sleep(0.05)
+        assert not waiter.done(), "batch waiter should still be blocked on the held slot"
+
+        controller.release("m", holder.reserved_tokens)
+        result = await asyncio.wait_for(waiter, timeout=1.0)
+        assert result.effective_max_tokens == 10
+
+    async def test_batch_timeout_raises_engine_saturated_with_retry_after(self):
+        controller = AdmissionController(
+            _registry(),
+            tier=_FakeTier(max_model_len_cap=4096, max_num_seqs=1),
+            batch_admission_wait_s=_FAST_WAIT_S,
+        )
+        await controller.admit("m", _req(max_tokens=10, priority="batch"), _FakeEngine(prompt_tokens=1))
+        # Never released -> the second batch admission must time out.
+        with pytest.raises(EngineSaturatedError, match="concurrent-sequence limit") as exc_info:
+            await controller.admit(
+                "m", _req(max_tokens=10, priority="batch"), _FakeEngine(prompt_tokens=1)
+            )
+        assert exc_info.value.retry_after_s == 1.0
+
+    async def test_interactive_keeps_its_own_short_wait_bound_unaffected_by_batch_default(self):
+        """Interactive must not be slowed down by batch_admission_wait_s existing
+        at all — it keeps using admission_wait_s exactly as B4 shipped it."""
+        controller = AdmissionController(
+            _registry(),
+            tier=_FakeTier(max_model_len_cap=4096, max_num_seqs=1),
+            admission_wait_s=_FAST_WAIT_S,
+            batch_admission_wait_s=30.0,  # would hang the test if interactive used this
+        )
+        await controller.admit("m", _req(max_tokens=10, priority="interactive"), _FakeEngine(prompt_tokens=1))
+        with pytest.raises(EngineSaturatedError, match="concurrent-sequence limit"):
+            await controller.admit(
+                "m", _req(max_tokens=10, priority="interactive"), _FakeEngine(prompt_tokens=1)
+            )
+
+    async def test_batch_waiter_cap_overflow_rejects_immediately_without_acquiring_semaphore(self):
+        """A batch request arriving when the waiter cap is already full must be
+        rejected before ever touching the semaphore — not even attempt a wait."""
+        controller = AdmissionController(
+            _registry(),
+            tier=_FakeTier(max_model_len_cap=4096, max_num_seqs=1),
+            batch_admission_wait_s=5.0,  # long enough that a real wait would make this test hang
+            batch_waiter_multiplier=1,  # cap = 1 * max_num_seqs(1) = 1
+        )
+        # Hold the only permit so subsequent batch admissions must queue.
+        await controller.admit("m", _req(max_tokens=10, priority="batch"), _FakeEngine(prompt_tokens=1))
+
+        # First waiter fills the cap (cap=1): it starts waiting on the semaphore.
+        first_waiter = asyncio.ensure_future(
+            controller.admit(
+                "m", _req(max_tokens=10, priority="batch"), _FakeEngine(prompt_tokens=1)
+            )
+        )
+        await asyncio.sleep(0.05)
+        assert not first_waiter.done()
+
+        # Second waiter arrives while the cap is already full -> immediate 429,
+        # not a 5-second wait. If this test hangs for ~5s, the cap check is
+        # missing or is running after sem.acquire() instead of before it.
+        with pytest.raises(EngineSaturatedError, match="batch queue is full"):
+            await asyncio.wait_for(
+                controller.admit(
+                    "m", _req(max_tokens=10, priority="batch"), _FakeEngine(prompt_tokens=1)
+                ),
+                timeout=1.0,
+            )
+
+        first_waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first_waiter
+
+    async def test_batch_waiter_count_decremented_after_successful_admission(self):
+        controller = AdmissionController(
+            _registry(),
+            tier=_FakeTier(max_model_len_cap=4096, max_num_seqs=5),
+            batch_admission_wait_s=1.0,
+        )
+        for _ in range(3):
+            await controller.admit(
+                "m", _req(max_tokens=10, priority="batch"), _FakeEngine(prompt_tokens=1)
+            )
+        assert controller._batch_waiters.current("m") == 0
+
+    async def test_batch_waiter_count_decremented_after_timeout(self):
+        controller = AdmissionController(
+            _registry(),
+            tier=_FakeTier(max_model_len_cap=4096, max_num_seqs=1),
+            batch_admission_wait_s=_FAST_WAIT_S,
+        )
+        await controller.admit("m", _req(max_tokens=10, priority="batch"), _FakeEngine(prompt_tokens=1))
+        with pytest.raises(EngineSaturatedError):
+            await controller.admit(
+                "m", _req(max_tokens=10, priority="batch"), _FakeEngine(prompt_tokens=1)
+            )
+        assert controller._batch_waiters.current("m") == 0
+
+    async def test_batch_waiter_count_decremented_after_cancellation(self):
+        controller = AdmissionController(
+            _registry(),
+            tier=_FakeTier(max_model_len_cap=4096, max_num_seqs=1),
+            batch_admission_wait_s=5.0,
+        )
+        holder = await controller.admit(
+            "m", _req(max_tokens=10, priority="batch"), _FakeEngine(prompt_tokens=1)
+        )
+
+        waiter = asyncio.ensure_future(
+            controller.admit(
+                "m", _req(max_tokens=10, priority="batch"), _FakeEngine(prompt_tokens=1)
+            )
+        )
+        await asyncio.sleep(0.05)
+        assert controller._batch_waiters.current("m") == 1
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+
+        assert controller._batch_waiters.current("m") == 0
+        # And no semaphore permit leaked either: releasing the original holder
+        # must free exactly one slot for a fresh admission.
+        controller.release("m", holder.reserved_tokens)
+        await controller.admit("m", _req(max_tokens=10, priority="batch"), _FakeEngine(prompt_tokens=1))
+
+    async def test_no_waiter_count_leak_after_gate2_rejection(self):
+        """A batch request that acquires its semaphore permit then fails Gate 2
+        (context) must not leave a stale batch-waiter count behind — the
+        counter is decremented at the wait site itself, before Gate 2/3 ever
+        run, so this documents that ordering holds under a real Gate 2 failure."""
+        controller = AdmissionController(
+            _registry(max_model_len=4),
+            tier=_FakeTier(max_model_len_cap=4096, max_num_seqs=1),
+            batch_admission_wait_s=1.0,
+        )
+        with pytest.raises(ContextTooLongError):
+            await controller.admit(
+                "m", _req(priority="batch"), _FakeEngine(prompt_tokens=10)
+            )
+        assert controller._batch_waiters.current("m") == 0
+        # And the semaphore permit wasn't leaked either (existing B4 invariant).
+        await controller.admit(
+            "m", _req(max_tokens=1, priority="batch"), _FakeEngine(prompt_tokens=1)
+        )
+
+    async def test_no_waiter_count_leak_after_gate3_rejection(self):
+        controller = AdmissionController(
+            _registry(),
+            tier=_FakeTier(max_model_len_cap=4096, max_num_seqs=2),
+            batch_admission_wait_s=1.0,
+        )
+        filler_engine = _FakeEngine(prompt_tokens=5, kv_capacity_tokens=30)
+        await controller.admit("m", _req(max_tokens=15, priority="batch"), filler_engine)
+
+        failing_engine = _FakeEngine(prompt_tokens=5, kv_capacity_tokens=30)
+        with pytest.raises(EngineSaturatedError, match="KV pool"):
+            await controller.admit(
+                "m", _req(max_tokens=20, priority="batch"), failing_engine
+            )
+        assert controller._batch_waiters.current("m") == 0
+
+    async def test_multiple_models_have_independent_batch_waiter_state(self):
+        registry = ModelRegistry(
+            [ModelEntry(name="a", model_path="test/a"), ModelEntry(name="b", model_path="test/b")]
+        )
+        controller = AdmissionController(
+            registry,
+            tier=_FakeTier(max_model_len_cap=4096, max_num_seqs=1),
+            batch_admission_wait_s=5.0,
+        )
+        await controller.admit("a", _req(model="a", max_tokens=10, priority="batch"), _FakeEngine(prompt_tokens=1))
+        await controller.admit("b", _req(model="b", max_tokens=10, priority="batch"), _FakeEngine(prompt_tokens=1))
+
+        waiter_a = asyncio.ensure_future(
+            controller.admit(
+                "a", _req(model="a", max_tokens=10, priority="batch"), _FakeEngine(prompt_tokens=1)
+            )
+        )
+        await asyncio.sleep(0.05)
+        assert controller._batch_waiters.current("a") == 1
+        assert controller._batch_waiters.current("b") == 0
+
+        waiter_a.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter_a
+
+    async def test_fifo_order_preserved_not_priority_preemption(self):
+        """Option 1 is FIFO on the shared semaphore, not a priority-preemptive
+        queue: batch requests already waiting are not skipped over by a later-
+        arriving interactive request. This documents the approved tradeoff
+        rather than inventing preemption."""
+        controller = AdmissionController(
+            _registry(),
+            tier=_FakeTier(max_model_len_cap=4096, max_num_seqs=1),
+            admission_wait_s=2.0,
+            batch_admission_wait_s=2.0,
+        )
+        holder = await controller.admit("m", _req(max_tokens=10), _FakeEngine(prompt_tokens=1))
+
+        batch_waiter = asyncio.ensure_future(
+            controller.admit(
+                "m", _req(max_tokens=10, priority="batch"), _FakeEngine(prompt_tokens=1)
+            )
+        )
+        await asyncio.sleep(0.05)
+        interactive_waiter = asyncio.ensure_future(
+            controller.admit(
+                "m", _req(max_tokens=10, priority="interactive"), _FakeEngine(prompt_tokens=1)
+            )
+        )
+        await asyncio.sleep(0.05)
+        assert not batch_waiter.done() and not interactive_waiter.done()
+
+        # Free exactly one slot: CPython's asyncio.Semaphore wakes waiters in
+        # FIFO (arrival) order, so the batch waiter -- which arrived first --
+        # must be the one admitted, not the later-arriving interactive one.
+        controller.release("m", holder.reserved_tokens)
+        done, pending = await asyncio.wait(
+            {batch_waiter, interactive_waiter}, timeout=1.0, return_when=asyncio.FIRST_COMPLETED
+        )
+        assert batch_waiter in done
+        assert interactive_waiter in pending
+
+        # Clean up the still-pending interactive waiter and the batch holder.
+        result = await batch_waiter
+        controller.release("m", result.reserved_tokens)
+        interactive_result = await interactive_waiter
+        controller.release("m", interactive_result.reserved_tokens)
+
+    async def test_batch_waiter_cap_boundary_exact_capacity_admits_the_last_one(self):
+        """cap = multiplier * max_num_seqs = 2 * 1 = 2: exactly 2 concurrent
+        batch waiters must be accepted (queued), a 3rd must be rejected
+        immediately -- verifying the '>=' boundary, not an off-by-one '>'."""
+        controller = AdmissionController(
+            _registry(),
+            tier=_FakeTier(max_model_len_cap=4096, max_num_seqs=1),
+            batch_admission_wait_s=5.0,
+            batch_waiter_multiplier=2,
+        )
+        await controller.admit("m", _req(max_tokens=10, priority="batch"), _FakeEngine(prompt_tokens=1))
+
+        waiters = [
+            asyncio.ensure_future(
+                controller.admit(
+                    "m", _req(max_tokens=10, priority="batch"), _FakeEngine(prompt_tokens=1)
+                )
+            )
+            for _ in range(2)
+        ]
+        await asyncio.sleep(0.05)
+        assert controller._batch_waiters.current("m") == 2
+        assert not any(w.done() for w in waiters)
+
+        with pytest.raises(EngineSaturatedError, match="batch queue is full"):
+            await asyncio.wait_for(
+                controller.admit(
+                    "m", _req(max_tokens=10, priority="batch"), _FakeEngine(prompt_tokens=1)
+                ),
+                timeout=0.5,
+            )
+
+        for w in waiters:
+            w.cancel()
+        for w in waiters:
+            with pytest.raises(asyncio.CancelledError):
+                await w
+
