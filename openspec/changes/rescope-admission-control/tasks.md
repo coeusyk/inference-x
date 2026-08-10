@@ -219,7 +219,25 @@ archived yet.
 - [ ] 4.3 Live smoke test: burst requests against a real model at the
       resolved `max_num_seqs` ceiling, confirm Option C's behavior matches
       the design. **Not run this pass** — this implementation pass used unit
-      tests only, no live vLLM/GPU session.
+      tests only, no live vLLM/GPU session. **Judgment call, closure pass:
+      not treated as a blocker for archival.** Distinct from, but informed
+      by, the investigation-phase live evidence in `design.md` (48-request
+      4x-ceiling burst, zero rejections; 90-request sustained-arrival run,
+      no starvation signature; a fourth-attempt cancellation-while-queued
+      success) — that evidence exercised a hand-built harness reproducing
+      Option C's design, not the literal shipped `admit()`, so it does not
+      by itself close this item. The judgment for treating it as non-blocking
+      instead rests on: (a) the implementation is a direct, narrow
+      translation of that already-proven design onto stdlib
+      `asyncio.BoundedSemaphore`/`asyncio.wait_for`, with no new logic of its
+      own; (b) 4.1's unit suite includes 15 `test_admission.py` cases plus 2
+      route-level 400/429 integration tests exercising the actual shipped
+      `admit()`/timeout/`EngineSaturatedError` path directly, not a
+      hand-built stand-in; (c) this repository's B6 closure pass separately
+      live-verified real concurrent `/v1/chat/completions` traffic through
+      this exact admission-gated path without incident, though not as a
+      dedicated max_num_seqs-ceiling burst. Recorded as a genuine, open
+      evidence gap — same tier as 4.3a, not silently resolved.
 - [ ] 4.3a Live smoke test against a larger/slower model than `opt-125m`
       (recommended follow-up, not a blocker — see `design.md` →
       "Acquisition, rejection, and timeout semantics") to inform the
@@ -227,14 +245,16 @@ archived yet.
       structural finding (1.13a) does not by itself justify a specific
       wait-time number for larger models. **Not run this pass.**
 
-## 5. Documentation (not started)
+## 5. Documentation
 
-- [ ] 5.1 New `docs/DECISIONS.md` entry recording which option was chosen and
+- [x] 5.1 New `docs/DECISIONS.md` entry recording which option was chosen and
       why (mirrors DEC-040's own precedent of documenting this exact tradeoff)
-- [ ] 5.2 `docs/PHASE-A-ARCHITECTURE.md` §10 updated to mark B4 complete
+      — DEC-060.
+- [x] 5.2 `docs/PHASE-A-ARCHITECTURE.md` §10 updated to mark B4 complete.
 
-## 6. Final review (not started)
+## 6. Final review
 
-- [ ] 6.1 `openspec validate rescope-admission-control --strict` passes with
-      the implementation-phase spec delta included
-- [ ] 6.2 Archive via `openspec archive rescope-admission-control --yes`
+- [x] 6.1 `openspec validate rescope-admission-control --strict` passes with
+      the implementation-phase spec delta included — "Change
+      'rescope-admission-control' is valid".
+- [x] 6.2 Archive via `openspec archive rescope-admission-control --yes`
