@@ -1905,3 +1905,99 @@ Use this document to capture non-obvious design decisions as the project evolves
 - Supersession: `pool_size > 1` semantics remain open until a future phase (most likely
   B6) verifies `AsyncLLM` multi-instance behavior explicitly; this DEC does not resolve
   that question and is not superseded by leaving it open.
+
+---
+
+### DEC-059
+- Date: 2026-08-10
+- Status: accepted
+- Title: Split multi-model serving into one process per model; retire in-process
+  `EnginePool` multi-engine construction (B6, `split-multi-model-serving`)
+- Context: Phase B6 (`docs/PHASE-A-EXECUTION-PLAN.md:273`,
+  `docs/REVIEW-2026-08-03-architecture.md` §3.5/§9), left open by DEC-058. `EnginePool`'s
+  `pool_size > 1` path let one process construct multiple `VLLMEngine` instances so the
+  playground TUI's compare mode could load two models into one server — every model
+  sharing that process paid three costs for the whole session, not just while actively
+  compared: `enforce_eager=True` forced on all engines (no CUDA graphs), `max_model_len`
+  silently clamped to 2048, and `utils/vllm_pool_config.py`'s sequential-VRAM-cap
+  heuristics (`_weight_scaled_utilization`, `_apply_sequential_vram_caps`,
+  `_multi_engine_overhead_gib`) sizing every engine's `gpu_memory_utilization` off a
+  formula calibrated by hand against past failures, not first principles.
+- Problem: A live investigation this round (`openspec/changes/split-multi-model-serving/
+  design.md` §6, archived with this change) found a real, unrelated bug shared by both
+  the status-quo pool path and the one-process-per-model alternative:
+  `probe_gpu_memory_gib()` and `_probe_cuda_vram()` both read
+  `torch.cuda.mem_get_info()`, which reports free VRAM as seen by the calling process's
+  own CUDA context — stale and inaccurate across sibling processes and sequential engine
+  loads. The narrow original question (does dropping CUDA graphs cost more VRAM than it
+  saves) could not be cleanly isolated because of this probe bug; but the broader Option
+  A mechanism (independent single-model processes, CUDA graphs on) was positively,
+  separately demonstrated: two independent processes for a real model pair
+  (qwen2.5-0.5b + tinyllama-chat) loaded successfully with real headroom on an 8 GiB
+  card (design.md §6 finding 5).
+- Decision: Option A — one model per OS process, no in-process multi-engine path.
+  1. **`EnginePool` (`engines/pool.py`) is unchanged.** It was already a generic,
+     pool-size-agnostic `{name: engine}` dict dispatcher with no `pool_size`-specific
+     logic of its own — the multi-engine coupling lived entirely in
+     `api/deps.py`'s `_build_engine_pool` and `VLLMEngine`'s constructor, not in the
+     pool class itself.
+  2. **`_build_engine_pool` rejects, rather than silently loads, more than one distinct
+     model.** `INFERENCE_X_LOADED_MODELS` resolving to >1 distinct model now raises
+     `ValueError` naming the one-process-per-model pattern, instead of constructing a
+     second in-process engine.
+  3. **`VLLMEngine`'s constructor drops `pool_size`/`pool_models`/`pool_configs`/
+     `engine_index`/`session_free_vram_gib`.** `enforce_eager` forcing, the `max_model_len`
+     2048 clamp, and the B2-era Prometheus metrics-registry-collision warning
+     (`expose-native-engine-metrics`'s deferred-to-B6 item) are deleted outright —
+     dead code once no process can hold >1 engine, not merely unreachable.
+  4. **`utils/vllm_pool_config.py`'s multi-engine heuristics are deleted, not kept
+     dormant:** `_weight_scaled_utilization`, `_apply_sequential_vram_caps`,
+     `_multi_engine_overhead_gib`. `scale_model_config_for_pool` becomes
+     `scale_model_config` (single-model only); `validate_pool_fits` becomes
+     `validate_model_fits`, delegating to the same `_single_engine_utilization` sizing
+     check `scale_model_config` itself uses — one basis for both the preflight and the
+     actual sizing, not two that could disagree.
+  5. **`probe_gpu_memory_gib()` is fixed, not preserved-but-unused.** It now queries
+     `nvidia-smi` first (device-wide view, accurate across sibling processes), falling
+     back to `torch.cuda.mem_get_info()` only when `nvidia-smi` itself is unavailable
+     (no GPU, no driver — e.g. CI), logging a warning on that fallback since it
+     reintroduces the exact staleness this fix exists to close.
+     `engines/vllm_engine.py`'s `_probe_cuda_vram()` now delegates to it instead of
+     duplicating the same buggy read at a second call site.
+  6. **Multi-model serving moves to orchestration, not engine construction.**
+     `playground/server_control.py`'s `ensure_models_loaded()` now starts one
+     independent process per requested model on consecutive ports (the first model
+     keeps the caller's own base URL and port unchanged) instead of one process with
+     `INFERENCE_X_LOADED_MODELS` set to a comma list. `playground/app.py`'s compare UI
+     routes each model's requests to its own process's base URL.
+     `playground/client.py`'s dual-base-url `--compare` mode already implemented this
+     pattern and required zero changes.
+- Alternatives considered:
+  - **Keep the multi-engine pool path, just fix the probe.** Rejected: would leave
+    `enforce_eager`, the 2048 clamp, and the hand-calibrated sequential-cap heuristics
+    in place for no remaining reason — the roadmap's own naming of this phase
+    ("split multi-model into two processes") was never about the probe alone.
+  - **Fail loudly on `pool_size > 1` without removing the code path.** Rejected: DEC-058
+    left this open rather than deciding it; leaving dead, unreachable multi-engine
+    machinery in place after committing to Option A would carry its maintenance cost
+    with no corresponding benefit.
+- Consequences:
+  - Positive: `enforce_eager`, the `max_model_len` 2048 clamp, and ~150 lines of
+    hand-calibrated sequential-VRAM heuristics are deleted, not dormant. The free-VRAM
+    probe is now accurate across sibling processes for every caller (engine
+    construction, `GET /v1/metrics`), not just newly-correct for B6's own use.
+  - Negative: multi-model serving now always costs one full process (and one full model
+    load) per model, even for very small models that would have shared cheaply in one
+    process; the playground TUI's compare-mode startup is correspondingly slower
+    (two independent model loads instead of one process loading two).
+  - Neutral: 1.15 (mid-flight crash isolation between sibling engine-core processes) and
+    1.18 (root cause of the probe's staleness on this platform) remain open follow-up
+    questions (design.md §11 items 2, 6) — informational only, not blocking this
+    decision or its implementation.
+- Compatibility: `BaseEngine`, `ChatService`, `TaskRouter`, and every route handler
+  required zero code changes — Engine Boundary (DEC-047) was already expressed entirely
+  in single-engine terms. `playground/client.py` required zero changes.
+  `INFERENCE_X_LOADED_MODELS`'s comma-separated parsing in `core/settings.py` is
+  unchanged; only `_build_engine_pool`'s handling of a >1-model result changed, from
+  silent construction to a clear rejection.
+- Supersession: closes the `pool_size > 1` question DEC-058 explicitly left open.

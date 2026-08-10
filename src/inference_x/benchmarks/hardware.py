@@ -138,7 +138,7 @@ def suggest_gpu_memory_utilization(
     Compute gpu_memory_utilization as (free_vram - buffer) / total_vram.
 
     For multi-model sessions, callers should pass ``model_count=1`` and re-sample
-    ``free_gib`` at each engine load (see ``scale_model_config_for_pool``).
+    ``free_gib`` at each engine load (see ``scale_model_config``).
     The ``model_count > 1`` branch evenly splits the budget for legacy callers only::
 
         ((free - buffer) / model_count) / total

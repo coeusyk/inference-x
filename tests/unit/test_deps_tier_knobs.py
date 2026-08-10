@@ -77,7 +77,7 @@ def test_build_engine_pool_applies_tier_knobs(monkeypatch, tmp_path):
     monkeypatch.setattr(
         deps_module, "_resolve_vram_tier_for_pool", lambda config_dir: _tier()
     )
-    monkeypatch.setattr(deps_module, "validate_pool_fits", lambda *a, **kw: None)
+    monkeypatch.setattr(deps_module, "validate_model_fits", lambda *a, **kw: None)
     monkeypatch.setattr(deps_module, "probe_gpu_memory_gib", lambda: (4.0, 8.0))
 
     from inference_x.api.deps import _build_engine_pool
@@ -104,7 +104,7 @@ def test_build_engine_pool_falls_back_when_tier_unresolvable(monkeypatch, tmp_pa
     _RecordingVLLMEngine.captured_configs = []
     monkeypatch.setattr(deps_module, "VLLMEngine", _RecordingVLLMEngine)
     monkeypatch.setattr(deps_module, "_resolve_vram_tier_for_pool", lambda config_dir: None)
-    monkeypatch.setattr(deps_module, "validate_pool_fits", lambda *a, **kw: None)
+    monkeypatch.setattr(deps_module, "validate_model_fits", lambda *a, **kw: None)
     monkeypatch.setattr(deps_module, "probe_gpu_memory_gib", lambda: (4.0, 8.0))
 
     from inference_x.api.deps import _build_engine_pool
@@ -118,6 +118,35 @@ def test_build_engine_pool_falls_back_when_tier_unresolvable(monkeypatch, tmp_pa
     assert config["max_num_batched_tokens"] is None
     assert "block_size" not in config
     assert "kv_cache_dtype" not in config
+
+
+def test_build_engine_pool_rejects_more_than_one_distinct_model(monkeypatch, tmp_path):
+    """B6: each server process serves exactly one model — INFERENCE_X_LOADED_MODELS
+    resolving to more than one distinct model is a configuration error, not a
+    silent second in-process engine (docs/DECISIONS.md DEC-059)."""
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "models.yaml").write_text(
+        "models:\n"
+        "  - name: alpha\n"
+        "    engine: vllm\n"
+        "    model_path: org/alpha\n"
+        "  - name: beta\n"
+        "    engine: vllm\n"
+        "    model_path: org/beta\n"
+    )
+    monkeypatch.setenv("INFERENCE_X_CONFIG_DIR", str(config_dir))
+    monkeypatch.setenv("INFERENCE_X_LOADED_MODELS", "alpha,beta")
+    get_settings.cache_clear()
+
+    monkeypatch.setattr(deps_module, "VLLMEngine", _RecordingVLLMEngine)
+    monkeypatch.setattr(deps_module, "_resolve_vram_tier_for_pool", lambda config_dir: None)
+    monkeypatch.setattr(deps_module, "probe_gpu_memory_gib", lambda: (4.0, 8.0))
+
+    from inference_x.api.deps import _build_engine_pool
+
+    with pytest.raises(ValueError, match="exactly one model"):
+        _build_engine_pool(str(config_dir), ("alpha", "beta"))
 
 
 def test_resolve_vram_tier_for_pool_fails_open_on_error(monkeypatch, tmp_path):

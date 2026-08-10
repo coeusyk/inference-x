@@ -47,7 +47,7 @@ async def test_ensure_models_loaded_skips_restart_when_already_loaded(monkeypatc
     async def fake_stop():
         calls["restart"] += 1
 
-    async def fake_start(_models):
+    async def fake_start(_model, **_kwargs):
         calls["restart"] += 1
 
     monkeypatch.setattr(sc, "fetch_loaded_models", fake_fetch)
@@ -57,8 +57,8 @@ async def test_ensure_models_loaded_skips_restart_when_already_loaded(monkeypatc
     monkeypatch.setattr(sc, "stop_playground_server", fake_stop)
     monkeypatch.setattr(sc, "start_playground_server", fake_start)
 
-    ok = await sc.ensure_models_loaded("http://test", ["tinyllama-chat"])
-    assert ok is True
+    result = await sc.ensure_models_loaded("http://test", ["tinyllama-chat"])
+    assert result == {"tinyllama-chat": "http://test"}
     assert calls["restart"] == 0
     assert calls["wait"] == 1
     assert sc.playground_started_server() is False
@@ -66,7 +66,7 @@ async def test_ensure_models_loaded_skips_restart_when_already_loaded(monkeypatc
 
 @pytest.mark.asyncio
 async def test_ensure_models_loaded_restarts_when_model_missing(monkeypatch):
-    calls = {"start": []}
+    calls = {"start": [], "stop": 0}
 
     async def fake_fetch(_base_url: str):
         return ["qwen2.5-0.5b"]
@@ -75,10 +75,10 @@ async def test_ensure_models_loaded_restarts_when_model_missing(monkeypatch):
         return True
 
     async def fake_stop():
-        return None
+        calls["stop"] += 1
 
-    async def fake_start(models):
-        calls["start"].append(list(models))
+    async def fake_start(model, **kwargs):
+        calls["start"].append((model, kwargs.get("port")))
 
     async def fake_health(*_a, **_k):
         return True
@@ -91,10 +91,78 @@ async def test_ensure_models_loaded_restarts_when_model_missing(monkeypatch):
     monkeypatch.setattr(sc, "start_playground_server", fake_start)
     monkeypatch.setattr(sc, "wait_for_health", fake_health)
 
-    ok = await sc.ensure_models_loaded("http://test", ["tinyllama-chat"])
-    assert ok is True
-    assert calls["start"] == [["tinyllama-chat"]]
+    result = await sc.ensure_models_loaded("http://test", ["tinyllama-chat"])
+    assert result == {"tinyllama-chat": "http://test"}
+    assert calls["start"] == [("tinyllama-chat", 8000)]
+    assert calls["stop"] == 1
     assert sc.playground_started_server() is True
+
+
+@pytest.mark.asyncio
+async def test_ensure_models_loaded_starts_one_process_per_model(monkeypatch):
+    """B6: compare mode launches N independent single-model processes on N ports."""
+    calls = {"start": []}
+
+    async def fake_fetch(_base_url: str):
+        return []
+
+    async def fake_wait(*_args, **_kwargs):
+        return True
+
+    async def fake_stop():
+        return None
+
+    async def fake_start(model, **kwargs):
+        calls["start"].append((model, kwargs.get("port")))
+
+    async def fake_health(*_a, **_k):
+        return True
+
+    monkeypatch.setattr(sc, "fetch_loaded_models", fake_fetch)
+    import streaming
+
+    monkeypatch.setattr(streaming, "wait_for_model", fake_wait)
+    monkeypatch.setattr(sc, "stop_playground_server", fake_stop)
+    monkeypatch.setattr(sc, "start_playground_server", fake_start)
+    monkeypatch.setattr(sc, "wait_for_health", fake_health)
+
+    result = await sc.ensure_models_loaded(
+        "http://localhost:8000", ["qwen2.5-0.5b", "tinyllama-chat"]
+    )
+    assert result == {
+        "qwen2.5-0.5b": "http://localhost:8000",
+        "tinyllama-chat": "http://localhost:8001",
+    }
+    assert calls["start"] == [
+        ("qwen2.5-0.5b", 8000),
+        ("tinyllama-chat", 8001),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_start_playground_server_sets_loaded_models_to_single_model(
+    monkeypatch, tmp_path
+):
+    """INFERENCE_X_LOADED_MODELS must be forced, not popped — a stale
+    multi-model value in .env would otherwise survive since settings.py's
+    load_dotenv(override=False) refills anything merely absent from env."""
+    monkeypatch.setenv("INFERENCE_X_LOADED_MODELS", "qwen2.5-0.5b,tinyllama-chat")
+    captured: dict = {}
+
+    async def fake_exec(*args, **kwargs):
+        captured["env"] = kwargs["env"]
+
+        class _Proc:
+            pass
+
+        return _Proc()
+
+    monkeypatch.setattr(sc.asyncio, "create_subprocess_exec", fake_exec)
+
+    await sc.start_playground_server("tinyllama-chat", log_path=tmp_path / "log.log")
+
+    assert captured["env"]["INFERENCE_X_LOADED_MODELS"] == "tinyllama-chat"
+    assert captured["env"]["INFERENCE_X_DEFAULT_MODEL"] == "tinyllama-chat"
 
 
 @pytest.fixture(autouse=True)

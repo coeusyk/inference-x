@@ -233,8 +233,7 @@ class ChatService:
             raise ValueError(
                 f"Routed to model '{routed_model}' but loaded model is "
                 f"'{loaded_str}'. "
-                f"Restart with INFERENCE_X_LOADED_MODELS={routed_model} "
-                f"(or add it to the existing list)."
+                f"Restart this process with INFERENCE_X_DEFAULT_MODEL={routed_model}."
             )
 
         return routed_model, self._pool.get(routed_model)

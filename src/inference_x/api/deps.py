@@ -21,7 +21,7 @@ from inference_x.services.model_service import ModelRegistry
 from inference_x.utils.vllm_pool_config import (
     apply_tier_knobs,
     probe_gpu_memory_gib,
-    validate_pool_fits,
+    validate_model_fits,
 )
 from inference_x.utils.vram_tiers import VramTier
 
@@ -82,40 +82,40 @@ def _resolve_loaded_model_names(
 
 @lru_cache(maxsize=1)
 def _build_engine_pool(config_dir: str, loaded_models: tuple[str, ...]) -> EnginePool:
-    """Build an EnginePool loading one VLLMEngine per model in *loaded_models*.
+    """Build an EnginePool with exactly one VLLMEngine for the configured model.
 
-    Each requested name is first resolved to a concrete model — either
-    directly (already a registered name) or via family-based variant
-    selection (see _resolve_loaded_model_names).
+    B6 (Option A, docs/DECISIONS.md DEC-059): each server process serves
+    exactly one model. Multi-model serving is achieved by running one
+    process per model (see playground/server_control.py), not by loading
+    multiple engines into one process — INFERENCE_X_LOADED_MODELS resolving
+    to more than one distinct model is rejected here as a configuration
+    error rather than silently loading a second engine into this process.
     """
     registry = _build_registry(config_dir)
-    session_free_gib, session_total_gib = probe_gpu_memory_gib()
-    total_vram = session_total_gib if session_total_gib is not None else 8.0
-    available_vram = session_free_gib if session_free_gib is not None else total_vram
+    free_gib, total_gib = probe_gpu_memory_gib()
+    total_vram = total_gib if total_gib is not None else 8.0
+    available_vram = free_gib if free_gib is not None else total_vram
     tier = _resolve_vram_tier_for_pool(config_dir)
     resolved_models = _resolve_loaded_model_names(registry, loaded_models, tier, available_vram)
 
-    pool_size = len(resolved_models)
-    pool_configs = [
-        apply_tier_knobs(registry.get(m).model_dump(), tier) for m in resolved_models
-    ]
-    validate_pool_fits(pool_configs, total_vram_gib=total_vram)
-    engines: dict = {}
-    for idx, model_name in enumerate(resolved_models):
-        free_gib, total_gib = probe_gpu_memory_gib()
-        model_config = pool_configs[idx]
-        logger.info("Loading engine for model=%s (pool_size=%d)", model_name, pool_size)
-        engines[model_name] = VLLMEngine(
-            model_config,
-            pool_size=pool_size,
-            pool_models=list(resolved_models),
-            pool_configs=pool_configs,
-            engine_index=idx,
-            free_vram_gib=free_gib,
-            total_vram_gib=total_gib,
-            session_free_vram_gib=session_free_gib,
+    distinct_models = list(dict.fromkeys(resolved_models))
+    if not distinct_models:
+        return EnginePool({})
+    if len(distinct_models) > 1:
+        raise ValueError(
+            f"INFERENCE_X_LOADED_MODELS resolved to {len(distinct_models)} models "
+            f"({', '.join(distinct_models)}), but each server process serves "
+            "exactly one model (docs/DECISIONS.md DEC-059). Run one process per "
+            "model instead — see playground/server_control.py for the pattern "
+            "InferenceX's own TUI compare mode uses."
         )
-    return EnginePool(engines)
+
+    model_name = distinct_models[0]
+    model_config = apply_tier_knobs(registry.get(model_name).model_dump(), tier)
+    validate_model_fits(model_config, total_vram_gib=total_vram, free_vram_gib=free_gib)
+    logger.info("Loading engine for model=%s", model_name)
+    engine = VLLMEngine(model_config, free_vram_gib=free_gib, total_vram_gib=total_gib)
+    return EnginePool({model_name: engine})
 
 
 def _resolve_default_model(
