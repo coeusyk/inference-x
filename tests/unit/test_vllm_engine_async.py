@@ -354,6 +354,25 @@ async def test_engine_timing_absent_when_metrics_missing():
     assert resp.timing is None
 
 
+async def test_completion_timeout_raises_runtime_error(monkeypatch):
+    """rescope-admission-control design.md flagged _COMPLETION_TIMEOUT_S as
+    having zero existing test coverage (grep across tests/ found nothing);
+    this closes that gap. A hanging engine must be cut off at the timeout
+    and surfaced as a RuntimeError (mapped to HTTP 500 by api/errors), not
+    left to hang indefinitely."""
+    monkeypatch.setattr(vllm_engine_module, "_COMPLETION_TIMEOUT_S", 0.05)
+
+    class _HangingAsyncLLM(_FakeAsyncLLM):
+        async def generate(self, prompt, sampling_params, request_id):
+            await asyncio.sleep(10)
+            yield  # pragma: no cover - never reached, timeout fires first
+
+    engine = _make_engine(_HangingAsyncLLM())
+
+    with pytest.raises(RuntimeError, match="timed out after 0.05s"):
+        await engine.generate(_req())
+
+
 async def test_engine_timing_absent_when_a_field_is_missing():
     """A partially populated metrics object degrades to `timing=None`
     entirely — never a partial EngineTiming (design.md Decision 5)."""
