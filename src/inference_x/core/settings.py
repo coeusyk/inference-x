@@ -62,6 +62,18 @@ class AppSettings:
             os.environ.get("INFERENCE_X_STREAM_TIMEOUT_S", "120")
         )
 
+        # Maximum seconds AdmissionController.admit() waits for a sequence-
+        # concurrency slot to free before rejecting with 429 (rescope-
+        # admission-control, Option C). Provisional default: ~4x headroom over
+        # the 1.13s worst-case observed in this investigation's live burst
+        # test (opt-125m, 4x over max_num_seqs=4) — not validated against
+        # larger/slower models; see openspec/changes/rescope-admission-control
+        # /design.md "Acquisition, rejection, and timeout (429) contract" and
+        # tasks.md 4.3a for the recommended larger-model follow-up.
+        self.admission_wait_s: float = float(
+            os.environ.get("INFERENCE_X_ADMISSION_WAIT_S", "5")
+        )
+
     def get_model_config(self, model_name: str | None = None) -> dict[str, Any]:
         """Return the config block for *model_name* from models.yaml.
 

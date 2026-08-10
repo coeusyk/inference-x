@@ -12,9 +12,13 @@ Three independent gates, each keyed on real numbers where they're available:
    model must stay at or below the resolved max_num_seqs (tier ceiling ∩ any
    per-model ModelEntry.max_num_seqs override — see
    utils/vllm_pool_config.apply_tier_knobs for the same composition applied at
-   engine-construction time). Unlike the two gates below, there is no clamp
-   path: a request either gets a sequence slot or it doesn't, so both
-   'interactive' and 'batch' priority get EngineSaturatedError when saturated.
+   engine-construction time). Enforced by a per-model asyncio.BoundedSemaphore:
+   a request waits up to admission_wait_s for a slot to free rather than being
+   rejected instantly, since vLLM's own scheduler queues (rather than rejects)
+   past this ceiling too (see openspec/changes/rescope-admission-control).
+   Unlike the two gates below, there is no clamp path: a request either gets a
+   sequence slot within the wait or it doesn't, so both 'interactive' and
+   'batch' priority get EngineSaturatedError when the wait elapses.
 
 2. Context length: prompt_tokens + requested_output_tokens must fit the
    model's context window (min of ModelEntry.max_model_len, the resolved VRAM
@@ -44,6 +48,7 @@ because that would turn fail-open into fail-closed (DEC-047 §4).
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import threading
 from dataclasses import dataclass
@@ -59,6 +64,7 @@ _DEFAULT_CONTEXT_CAP = 4096  # matches the old ChatService._GLOBAL_MAX_TOKENS de
 _DEFAULT_KV_SAFETY_MARGIN = 0.9  # leave headroom below the real KV pool size
 _MIN_CLAMPED_OUTPUT_TOKENS = 16  # below this a "clamp" is really a rejection in disguise
 _CHARS_PER_TOKEN_FALLBACK = 4  # used only when the engine has no tokenizer to ask
+_DEFAULT_ADMISSION_WAIT_S = 5.0  # fallback only; production value comes from settings
 
 
 class ContextTooLongError(ValueError):
@@ -183,12 +189,14 @@ class AdmissionController:
         *,
         tier: Any | None = None,
         kv_safety_margin: float = _DEFAULT_KV_SAFETY_MARGIN,
+        admission_wait_s: float = _DEFAULT_ADMISSION_WAIT_S,
     ) -> None:
         self._registry = registry
         self._tier = tier
         self._kv_safety_margin = kv_safety_margin
+        self._admission_wait_s = admission_wait_s
         self._tracker = _PerModelCounter()
-        self._seq_tracker = _PerModelCounter()
+        self._semaphores: dict[str, asyncio.BoundedSemaphore] = {}
 
     def _context_ceiling(self, routed_model: str) -> int:
         """Highest token count (prompt + output) this model's context window allows."""
@@ -212,7 +220,23 @@ class AdmissionController:
                 ceiling = min(ceiling, entry_cap)
         return ceiling
 
-    def admit(
+    def _get_semaphore(self, routed_model: str, max_num_seqs: int) -> asyncio.BoundedSemaphore:
+        """Lazily create *routed_model*'s sequence-concurrency semaphore.
+
+        Sized once, at first use, from the tier-resolved max_num_seqs — safe
+        because that ceiling is a per-instance constant (no dynamic model
+        load/unload exists today, see design.md "Semaphore ownership and
+        keying"). No `await` happens between the lookup and the insert, so
+        this is race-free under the single-process, no-`--workers` deployment
+        this codebase runs (see design.md "Concurrency / race analysis").
+        """
+        sem = self._semaphores.get(routed_model)
+        if sem is None:
+            sem = asyncio.BoundedSemaphore(max_num_seqs)
+            self._semaphores[routed_model] = sem
+        return sem
+
+    async def admit(
         self,
         routed_model: str,
         request: ChatCompletionRequest,
@@ -226,20 +250,29 @@ class AdmissionController:
         with that same reserved_tokens value once the request completes (success
         or failure), typically from a try/finally around engine dispatch.
 
+        This method is a coroutine because the sequence-concurrency gate may
+        wait (bounded by admission_wait_s) for a slot to free rather than
+        rejecting instantly — vLLM's own scheduler queues past this ceiling
+        too, so an instant reject was a false 429 in cases where a slot was
+        about to free. Gates 2/3 remain fully synchronous; the only
+        suspension point in this method is the sequence-concurrency wait.
+
         Raises:
             ContextTooLongError: prompt alone exceeds the context ceiling, or
                 requested_output can't be clamped to a usable size (batch tier,
                 or interactive with essentially no room left).
             EngineSaturatedError: KV pool is saturated and the request is
                 batch-tier (429; caller should retry later), or the model's
-                sequence-concurrency ceiling is already full (429 for either
-                priority — there is no clamp path for a sequence slot).
+                sequence-concurrency ceiling stayed full for longer than
+                admission_wait_s (429 for either priority — there is no clamp
+                path for a sequence slot).
             StrictModeViolationError: request.strict is set and this method would
                 otherwise have clamped a parameter (400).
         """
         warnings: list[ResponseWarning] = []
 
         effective_max_num_seqs = self._effective_max_num_seqs(routed_model)
+        sem: asyncio.BoundedSemaphore | None = None
         if effective_max_num_seqs is None:
             _warn(
                 warnings,
@@ -251,108 +284,127 @@ class AdmissionController:
                 ),
             )
         else:
-            in_flight = self._seq_tracker.current(routed_model)
-            if in_flight >= effective_max_num_seqs:
+            sem = self._get_semaphore(routed_model, effective_max_num_seqs)
+            try:
+                await asyncio.wait_for(sem.acquire(), timeout=self._admission_wait_s)
+            except TimeoutError:
                 raise EngineSaturatedError(
-                    f"Model '{routed_model}' is at its concurrent-sequence limit "
-                    f"({in_flight}/{effective_max_num_seqs} in flight); retry shortly.",
+                    f"Model '{routed_model}' is at its concurrent-sequence limit; "
+                    f"no slot freed within {self._admission_wait_s}s; retry shortly.",
                     retry_after_s=1.0,
                 )
 
-        requested_output = request.max_output_tokens or request.max_tokens or 512
-        context_ceiling = self._context_ceiling(routed_model)
-        if request.max_context_tokens is not None:
-            context_ceiling = min(context_ceiling, request.max_context_tokens)
+        # Gates 2/3 + final commit are wrapped so a rejection here releases the
+        # sequence-concurrency permit acquired above (lifecycle path 7 — see
+        # design.md "Semaphore lifecycle analysis"). Safe as a blanket release
+        # only because Gates 2/3 contain no `await` below — if that ever
+        # changes, this must become an explicit `acquired` flag guard instead.
+        try:
+            requested_output = request.max_output_tokens or request.max_tokens or 512
+            context_ceiling = self._context_ceiling(routed_model)
+            if request.max_context_tokens is not None:
+                context_ceiling = min(context_ceiling, request.max_context_tokens)
 
-        prompt_tokens = _prompt_tokens(engine, request, warnings)
-        if prompt_tokens > context_ceiling:
-            raise ContextTooLongError(
-                f"Prompt is {prompt_tokens} tokens, which exceeds the "
-                f"{context_ceiling}-token context limit for model '{routed_model}'."
-            )
-
-        effective_output = requested_output
-        if prompt_tokens + effective_output > context_ceiling:
-            room = context_ceiling - prompt_tokens
-            if request.priority == "batch" or room < _MIN_CLAMPED_OUTPUT_TOKENS:
+            prompt_tokens = _prompt_tokens(engine, request, warnings)
+            if prompt_tokens > context_ceiling:
                 raise ContextTooLongError(
-                    f"Prompt ({prompt_tokens} tokens) + requested output "
-                    f"({effective_output} tokens) exceeds the {context_ceiling}-token "
-                    f"context limit for model '{routed_model}'."
+                    f"Prompt is {prompt_tokens} tokens, which exceeds the "
+                    f"{context_ceiling}-token context limit for model '{routed_model}'."
                 )
-            # DEC-052: one predicate, two outcomes. The condition that raises under
-            # strict is textually the condition that warns by default — there is no
-            # second `if` for the two to drift apart on.
-            if request.strict:
-                raise StrictModeViolationError(
-                    f"strict: requested output ({effective_output} tokens) does not fit "
-                    f"the {context_ceiling}-token context limit for model "
-                    f"'{routed_model}' with a {prompt_tokens}-token prompt; "
-                    f"the server would have clamped it to {room}."
-                )
-            _warn(
-                warnings,
-                type="substituted",
-                code="max_tokens_clamped_to_context",
-                field_name="max_tokens",
-                message=(
-                    f"Requested {effective_output} output tokens; clamped to {room} to "
-                    f"fit the {context_ceiling}-token context limit."
-                ),
-            )
-            effective_output = room
 
-        capacity = getattr(engine, "kv_capacity_tokens", None)
-        if capacity is None:
-            _warn(
-                warnings,
-                type="degraded",
-                code="kv_gate_skipped",
-                message=(
-                    "Engine reported no KV capacity; the KV-pressure gate did not "
-                    "run for this request."
-                ),
-            )
-        else:
-            budget = capacity * self._kv_safety_margin
-            reserved_now = self._tracker.current(routed_model)
-            available = budget - reserved_now - prompt_tokens
-            if available < effective_output:
-                if request.priority == "batch" or available < _MIN_CLAMPED_OUTPUT_TOKENS:
-                    raise EngineSaturatedError(
-                        f"Model '{routed_model}' KV pool is at capacity "
-                        f"({reserved_now}/{int(budget)} tokens reserved); retry shortly.",
-                        retry_after_s=1.0,
+            effective_output = requested_output
+            if prompt_tokens + effective_output > context_ceiling:
+                room = context_ceiling - prompt_tokens
+                if request.priority == "batch" or room < _MIN_CLAMPED_OUTPUT_TOKENS:
+                    raise ContextTooLongError(
+                        f"Prompt ({prompt_tokens} tokens) + requested output "
+                        f"({effective_output} tokens) exceeds the {context_ceiling}-token "
+                        f"context limit for model '{routed_model}'."
                     )
-                clamped = max(_MIN_CLAMPED_OUTPUT_TOKENS, int(available))
+                # DEC-052: one predicate, two outcomes. The condition that raises under
+                # strict is textually the condition that warns by default — there is no
+                # second `if` for the two to drift apart on.
                 if request.strict:
                     raise StrictModeViolationError(
-                        f"strict: model '{routed_model}' has {int(available)} tokens of "
-                        f"KV budget available for {effective_output} requested output "
-                        f"tokens; the server would have clamped it to {clamped}."
+                        f"strict: requested output ({effective_output} tokens) does not fit "
+                        f"the {context_ceiling}-token context limit for model "
+                        f"'{routed_model}' with a {prompt_tokens}-token prompt; "
+                        f"the server would have clamped it to {room}."
                     )
                 _warn(
                     warnings,
                     type="substituted",
-                    code="max_tokens_clamped_to_kv_budget",
+                    code="max_tokens_clamped_to_context",
                     field_name="max_tokens",
                     message=(
-                        f"Requested {effective_output} output tokens; clamped to "
-                        f"{clamped} to fit the available KV budget."
+                        f"Requested {effective_output} output tokens; clamped to {room} to "
+                        f"fit the {context_ceiling}-token context limit."
                     ),
                 )
-                effective_output = clamped
+                effective_output = room
 
-        reserved_tokens = prompt_tokens + effective_output
-        self._tracker.add(routed_model, reserved_tokens)
-        self._seq_tracker.add(routed_model, 1)
-        return AdmissionResult(
-            effective_max_tokens=effective_output,
-            reserved_tokens=reserved_tokens,
-            warnings=tuple(warnings),
-        )
+            capacity = getattr(engine, "kv_capacity_tokens", None)
+            if capacity is None:
+                _warn(
+                    warnings,
+                    type="degraded",
+                    code="kv_gate_skipped",
+                    message=(
+                        "Engine reported no KV capacity; the KV-pressure gate did not "
+                        "run for this request."
+                    ),
+                )
+            else:
+                budget = capacity * self._kv_safety_margin
+                reserved_now = self._tracker.current(routed_model)
+                available = budget - reserved_now - prompt_tokens
+                if available < effective_output:
+                    if request.priority == "batch" or available < _MIN_CLAMPED_OUTPUT_TOKENS:
+                        raise EngineSaturatedError(
+                            f"Model '{routed_model}' KV pool is at capacity "
+                            f"({reserved_now}/{int(budget)} tokens reserved); retry shortly.",
+                            retry_after_s=1.0,
+                        )
+                    clamped = max(_MIN_CLAMPED_OUTPUT_TOKENS, int(available))
+                    if request.strict:
+                        raise StrictModeViolationError(
+                            f"strict: model '{routed_model}' has {int(available)} tokens of "
+                            f"KV budget available for {effective_output} requested output "
+                            f"tokens; the server would have clamped it to {clamped}."
+                        )
+                    _warn(
+                        warnings,
+                        type="substituted",
+                        code="max_tokens_clamped_to_kv_budget",
+                        field_name="max_tokens",
+                        message=(
+                            f"Requested {effective_output} output tokens; clamped to "
+                            f"{clamped} to fit the available KV budget."
+                        ),
+                    )
+                    effective_output = clamped
+
+            reserved_tokens = prompt_tokens + effective_output
+            self._tracker.add(routed_model, reserved_tokens)
+            return AdmissionResult(
+                effective_max_tokens=effective_output,
+                reserved_tokens=reserved_tokens,
+                warnings=tuple(warnings),
+            )
+        except BaseException:
+            if sem is not None:
+                sem.release()
+            raise
 
     def release(self, routed_model: str, reserved_tokens: int) -> None:
-        """Release a reservation made by admit() once the request has completed."""
+        """Release a reservation made by admit() once the request has completed.
+
+        Releases the sequence-concurrency permit only if one was acquired for
+        this model (i.e. a semaphore exists for it — absent only when the
+        sequence gate is skipped entirely because no VRAM tier is resolved,
+        see _effective_max_num_seqs).
+        """
         self._tracker.add(routed_model, -reserved_tokens)
-        self._seq_tracker.add(routed_model, -1)
+        sem = self._semaphores.get(routed_model)
+        if sem is not None:
+            sem.release()
