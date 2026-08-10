@@ -214,13 +214,12 @@ implementation pass was not asked to update `docs/DECISIONS.md` or
       unmodified — untouched by this change (they exercise interactive
       priority only). `ruff check .` and `mypy src/` both clean.
 
-## 6. Documentation / archive (not started)
+## 6. Documentation / archive
 
-- [ ] 6.1 New `docs/DECISIONS.md` entry recording the chosen mechanism and
-      why (mirrors DEC-040 and the still-pending `rescope-admission-control`
-      task 5.1 precedent).
-- [ ] 6.2 `docs/PHASE-A-ARCHITECTURE.md` §10 updated to mark B5 complete.
+- [x] 6.1 New `docs/DECISIONS.md` entry recording the chosen mechanism and
+      why (mirrors DEC-040 and the `rescope-admission-control` DEC-060
+      precedent) — DEC-061.
+- [x] 6.2 `docs/PHASE-A-ARCHITECTURE.md` §10 updated to mark B5 complete.
 - [ ] 6.3 Archive this change (`openspec archive add-batch-priority-queueing`)
       only after `rescope-admission-control` (B4) has itself been archived
-      or a deliberate decision is made to archive out of order — not
-      performed by this task.
+      — B4 archived first in this closure pass; this step follows.

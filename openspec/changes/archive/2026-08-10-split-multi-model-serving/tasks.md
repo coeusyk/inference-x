@@ -228,8 +228,7 @@ and 1.17 are already resolved and require no further decision.
       is a dated, point-in-time reverse-engineering snapshot ("as of commit
       `90350d9`"), not a maintained living reference; no prior change (B1-B5)
       updated it either.
-- [ ] 6.4 Archive this change only after `rescope-admission-control` (B4)
-      and `add-batch-priority-queueing` (B5) have themselves been archived,
-      or a deliberate decision is made to archive out of order. Not done as
-      part of this implementation round — this change is merge-ready but
-      not archived.
+- [x] 6.4 Archive this change only after `rescope-admission-control` (B4)
+      and `add-batch-priority-queueing` (B5) have themselves been archived.
+      Both archived in this Phase-B closure pass, in that order; this
+      change follows.
