@@ -2171,3 +2171,87 @@ Use this document to capture non-obvious design decisions as the project evolves
 - Supersession: extends DEC-060's semaphore mechanism with a
   priority-differentiated timeout and a bounded waiter cap; does not modify
   or reopen DEC-060's Gate 1 design.
+
+### DEC-062
+- Date: 2026-08-11
+- Status: accepted
+- Title: Content-addressed run identity and manifest; supersedes the stale
+  OS-3 seed-echo prohibition (C1, `add-run-manifest`)
+- Context: Phase C's thesis (`docs/REVIEW-2026-08-03-architecture.md` §8.1,
+  §8.3) is that a third party, given only the output artifact, can tell what
+  computation produced a result, decide whether two results are comparable,
+  and know whether they can be reproduced. C1 is the keystone Phase C change
+  the rest of the phase (C2 batch composition, C3 determinism, C5 Varex
+  embedding) writes into. Two implementation-report-flagged issues were
+  resolved as contract gaps, not implementation bugs, and required this
+  amendment before implementation matched the approved design: whether
+  `hardware` exclusion from the `run_id` preimage was intentional, and
+  whether hashing a warning's free-text `message` was unnecessarily
+  unstable. Separately, `specs/platform/spec.md`'s OS-3 seed requirement
+  (`MUST NOT echo the effective seed`) was already stale in-tree, silently
+  contradicted by OS-4/DEC-053's shipped `resolved` block, which echoes the
+  requested seed as a first-class field.
+- Decision:
+  1. **`run_id` is a content hash, not a signature** — `sha256:` + hex digest
+     over a canonical JSON preimage, reusing `benchmarks/suite_identity.py`'s
+     canonicalization discipline (DEC-054/055). Cryptographic signing is a
+     Phase E candidate, not built here.
+  2. **The preimage is `{engine, model, runtime, sampling, request,
+     warnings}`**, where `warnings` is projected onto each warning's stable
+     identity fields (`type`, `code`, `field`) only — `message` is excluded.
+     `timing`, `batch`, and `hardware` are excluded entirely.
+  3. **`hardware` is deliberately excluded from `run_id` identity, not an
+     oversight.** `run_id` denotes *configuration identity* (engine, model,
+     runtime, sampling, request shape, degradation), not
+     *execution-environment identity*. Cross-hardware comparison of the same
+     configuration is a primary use case this platform exists to serve;
+     folding `hardware` into `run_id` would make a matching `run_id` only
+     ever occur on identical machines. `hardware` still travels on the
+     manifest as provenance — the field a consumer reads to judge whether a
+     cross-hardware comparison is reproducible-grade or only
+     configuration-comparable. This preserves §8.3's comparability /
+     reproducibility distinction rather than weakening it.
+  4. **A warning's free-text `message` is excluded from the preimage;
+     `type`/`code`/`field` are included.** `ResponseWarning`'s own contract
+     (OS-4/DEC-053) already states `message` is "the only field free to
+     change without a spec change" — hashing it would let an operator's
+     wording edit silently break comparability for every historical
+     occurrence of that degradation.
+  5. **Seed-echo amendment (supersedes stale OS-3 text).** The platform MAY
+     echo the client-*requested* seed as provenance, in both the resolved
+     block and the run manifest's `sampling.seed`. It MUST NOT echo or
+     fabricate a backend-derived *effective* seed the client did not supply,
+     and documentation MUST NOT claim end-to-end determinism or that runs
+     are reproducible from the seed alone. This replaces OS-3's blanket "MUST
+     NOT echo the effective seed" clause and its "No response echo" scenario
+     — both already contradicted in-tree by OS-4's shipped `resolved` block.
+  6. **`batch.co_batched_request_ids` is reserved but unpopulated.** The
+     manifest schema defines the field; C1 does not populate it from engine
+     internals (C2, deferred until C5 evidence justifies the vLLM-internals
+     coupling).
+- Consequences:
+  - Positive: results become addressable — two manifests with equal
+    `run_id`s denote the same recorded configuration, mechanically. The
+    manifest carries honest provenance (never-fabricate rule: an
+    undeterminable value is omitted or `null`) without overclaiming
+    reproducibility.
+  - Negative: none identified — additive change, no consumer migration.
+  - Neutral / open (change-owner follow-up, not resolved here):
+    - **D6** — whether `batch` (including a future populated
+      `co_batched_request_ids`) enters the `run_id` preimage once C2 lands;
+      folding it in would shift `run_id`'s meaning from configuration
+      identity to per-execution identity.
+    - **D7** — the `platform` requirement *Substitutions are visible in the
+      response* → scenario *Client can reconstruct what ran* still reads
+      "…including the effective seed." That phrasing was intentionally left
+      unedited by this change (C1 modifies only *Optional request seed
+      reaches the sampler*) and should be reconciled to "requested seed" in
+      a future change rather than silently drifting.
+- Compatibility: Additive and backward-compatible. `X-Run-Id` is a new
+  header on non-streaming `POST /v1/chat/completions` responses only;
+  existing response fields and streaming behavior are unchanged.
+- Supersession: Supersedes OS-3's `MUST NOT echo the effective seed` clause
+  and its "No response echo" scenario in `specs/platform/spec.md`, both
+  merged into the live spec via this change's `MODIFIED Requirements` delta
+  on archive. Does not modify or reopen DEC-053's `resolved`-block or
+  `ResponseWarning` contracts.

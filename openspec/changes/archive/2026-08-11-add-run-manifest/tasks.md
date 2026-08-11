@@ -41,5 +41,5 @@
 ## 5. Validation & docs
 - [x] 5.1 `openspec validate add-run-manifest --strict` passes.
 - [x] 5.2 Unit suite, `ruff`, `mypy` green (mockable tests only; no GPU path in this change).
-- [ ] 5.3 On archive: record a DEC superseding the stale OS-3 seed-echo clause; note the D6/D7
-      `[OPEN]`s for the change owner.
+- [x] 5.3 On archive: record a DEC superseding the stale OS-3 seed-echo clause; note the D6/D7
+      `[OPEN]`s for the change owner. (DEC-062, `docs/DECISIONS.md`)
