@@ -3,14 +3,21 @@
 ### Requirement: Deterministic mode wires batch-invariant execution on supported GPUs
 The platform SHALL accept a first-class `deterministic` boolean on chat-completion requests
 (default false) and a process startup setting that enables deterministic mode for the process.
-When deterministic mode is active and the GPU compute capability is SM ≥ 8.0, the platform SHALL
-enable vLLM batch-invariant mode (`VLLM_BATCH_INVARIANT`) before serving, run a small
-application-level warmup, and record `runtime.batch_invariant: true` on the run manifest.
-`deterministic` SHALL NOT be an alias of `strict` (DEC-052).
+When the process is started with deterministic mode enabled and the GPU compute capability is
+SM ≥ 8.0, the platform SHALL enable vLLM batch-invariant mode (`VLLM_BATCH_INVARIANT`) before
+engine construction, run a small application-level warmup, and record
+`runtime.batch_invariant: true` on the run manifest for requests served by that engine.
+`deterministic` SHALL NOT be an alias of `strict` (DEC-052). A per-request `deterministic: true`
+SHALL be honored only when the process was already started with deterministic mode enabled — the
+platform SHALL NOT attempt to activate batch-invariant mode against an already-constructed engine,
+because vLLM may have captured CUDA graphs at construction time that would keep replaying
+non-invariant kernels regardless of a later activation, silently invalidating the guarantee this
+requirement exists to provide.
 
-#### Scenario: Deterministic request on supported hardware enables batch-invariant mode
-- **WHEN** a client sends `deterministic: true` on a host with SM ≥ 8.0
-- **THEN** the platform enables vLLM batch-invariant mode for that serving path
+#### Scenario: Deterministic request on a process started with determinism enabled
+- **WHEN** a client sends `deterministic: true` on a process started with deterministic mode
+  enabled (SM ≥ 8.0 at boot)
+- **THEN** the platform serves the request under vLLM batch-invariant mode
 - **AND** the run manifest's `runtime.batch_invariant` is true
 - **AND** `strict` is unchanged in meaning
 
@@ -19,6 +26,12 @@ application-level warmup, and record `runtime.batch_invariant: true` on the run 
   CUDA GPU
 - **THEN** startup fails before serving traffic
 - **AND** the process does not silently run without batch-invariant mode
+
+#### Scenario: Per-request deterministic flag refuses when the process was not started deterministic
+- **WHEN** a client sends `deterministic: true` on a process that was not started with
+  deterministic mode enabled
+- **THEN** the platform responds with HTTP 400 and a stable error code
+- **AND** it does not execute the request under a configuration it cannot back up with the manifest
 
 #### Scenario: Per-request deterministic flag refuses on unsupported hardware
 - **WHEN** a client sends `deterministic: true` on a host with SM &lt; 8.0 or no CUDA GPU

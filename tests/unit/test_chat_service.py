@@ -1051,3 +1051,61 @@ class TestRunManifest:
         svc = _make_service()
         resp = await svc.complete(self._req())
         assert resp.run_id is not None
+
+
+class TestDeterministicRefusal:
+    """`deterministic: true` refuses per-request unless the process was
+    started with determinism enabled — the engine already exists by request
+    time, and CUDA graphs it may have captured wouldn't pick up a
+    batch-invariant override installed this late (utils/determinism.py)."""
+
+    def _req(self, **overrides) -> ChatCompletionRequest:
+        payload = {
+            "model": "test",
+            "messages": [ChatMessage(role="user", content="hello")],
+        }
+        payload.update(overrides)
+        return ChatCompletionRequest(**payload)
+
+    @pytest.mark.asyncio
+    async def test_complete_refuses_when_process_not_started_deterministic(self):
+        from inference_x.utils.determinism import DeterminismUnsupportedError
+
+        svc = _make_service()
+        with pytest.raises(DeterminismUnsupportedError):
+            await svc.complete(self._req(deterministic=True))
+
+    @pytest.mark.asyncio
+    async def test_stream_response_refuses_when_process_not_started_deterministic(self):
+        from inference_x.utils.determinism import DeterminismUnsupportedError
+
+        svc = _make_service()
+        with pytest.raises(DeterminismUnsupportedError):
+            async for _ in svc.stream_response(self._req(deterministic=True)):
+                pass
+
+    @pytest.mark.asyncio
+    async def test_complete_allows_deterministic_when_process_started_with_it(
+        self, monkeypatch
+    ):
+        class _Settings:
+            deterministic = True
+
+        monkeypatch.setattr(
+            "inference_x.services.chat_service.get_settings", lambda: _Settings()
+        )
+        svc = _make_service()
+        resp = await svc.complete(self._req(deterministic=True))
+        assert resp.run_id is not None
+
+    def test_non_deterministic_request_never_touches_settings(self, monkeypatch):
+        """The env-check must short-circuit on request.deterministic — a
+        non-deterministic request must not pay for a settings lookup."""
+
+        def _boom():
+            raise AssertionError("get_settings() should not be called")
+
+        monkeypatch.setattr(
+            "inference_x.services.chat_service.get_settings", _boom
+        )
+        ChatService._enforce_deterministic(self._req(deterministic=False))

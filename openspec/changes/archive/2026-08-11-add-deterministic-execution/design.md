@@ -68,6 +68,21 @@ identity beyond what vLLM's batch-invariant mode provides, and no cross-machine 
 `INFERENCE_X_RUN_GPU_TESTS=1` + CUDA skip guard. Pass: exactly 1 unique completion text over N
 trials (default N=5) with fixed seed + `deterministic: true`.
 
+### D7 — Per-request `deterministic: true` refuses unless startup already activated it (post-merge correction)
+Adversarial review of the merged implementation (2026-08-11) found that the original per-request
+path called `ensure_deterministic_mode()` directly against the already-running engine. vLLM may
+capture CUDA graphs during `AsyncLLM.from_engine_args(...)` (default `enforce_eager=False`); a
+graph captured before the batch-invariant dispatcher override is installed keeps replaying the
+original kernels no matter what the env var says afterward, so a late per-request activation could
+report `runtime.batch_invariant: true` on a run that didn't actually get invariant kernels for
+graph-covered shapes — the exact "silently run non-deterministically" failure D4 exists to prevent,
+just on the per-request path instead of the SM-unsupported path D4 originally named. Corrected to
+D4's own principle: per-request `deterministic: true` now refuses (400,
+`code: "deterministic_unsupported"`) unless the process was started with deterministic mode enabled
+(`INFERENCE_X_DETERMINISTIC=1`). `ensure_deterministic_mode()` is now only ever invoked at startup
+(before engine construction, per D2) and no longer swallows a genuine `init_batch_invariance()`
+failure — both call sites now fail closed rather than reporting success the manifest can't back up.
+
 ## Risks / Trade-offs
 
 - **[Risk] App-level warmup may be insufficient vs a future vLLM-native warmup.** → Mitigation: D3

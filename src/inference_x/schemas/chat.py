@@ -74,9 +74,11 @@ class ChatCompletionRequest(BaseModel):
     )
     deterministic: bool = Field(
         default=False,
-        description="When true, enable vLLM batch-invariant mode on SM ≥ 8.0 "
-        "(Phase C C3). Unsupported hardware returns 400 rather than running "
-        "non-deterministically. Distinct from strict (DEC-052).",
+        description="When true, serve under vLLM batch-invariant mode "
+        "(Phase C C3) — but only if the process was already started with "
+        "determinism enabled (INFERENCE_X_DETERMINISTIC=1, requires SM ≥ "
+        "8.0). Otherwise returns 400 rather than running non-deterministically "
+        "or activating it too late to matter. Distinct from strict (DEC-052).",
     )
 
 
