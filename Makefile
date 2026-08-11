@@ -17,6 +17,10 @@ help:
 	@echo "  make benchmark-all           Benchmark qwen2.5-0.5b + tinyllama-chat"
 	@echo "  make advise                  Print ranked model advisor report"
 	@echo ""
+	@echo "Diagnostics (server must be running)"
+	@echo "  make plan                    Print per-model VRAM sizing plan (GET /v1/plan)"
+	@echo "  make doctor                  Print environment + model-fit readiness (GET /v1/doctor)"
+	@echo ""
 	@echo "Development"
 	@echo "  ./scripts/dev.sh sync        Install/sync dependencies (uv sync)"
 	@echo "  ./scripts/dev.sh serve       Start API server only"
@@ -33,6 +37,7 @@ help:
 	@echo ""
 	@echo "API endpoints: POST /v1/chat/completions  GET /health  GET /v1/models"
 	@echo "               GET /v1/benchmark/results  GET /v1/benchmark/advise"
+	@echo "               GET /v1/plan  GET /v1/doctor"
 
 # Start server + Claude-style chat CLI (server starts after model selection in TUI)
 .PHONY: chat
@@ -78,6 +83,16 @@ benchmark-all:
 .PHONY: advise
 advise:
 	uv run python scripts/advise.py
+
+# Print per-model VRAM sizing plan (GET /v1/plan)
+.PHONY: plan
+plan:
+	uv run python scripts/plan.py
+
+# Print environment + model-fit readiness (GET /v1/doctor)
+.PHONY: doctor
+doctor:
+	uv run python scripts/doctor.py
 
 # Compute the benchmark suite_version digest (add --write to update the file)
 .PHONY: suite-version

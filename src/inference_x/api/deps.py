@@ -190,6 +190,14 @@ def get_registry(
     return _build_registry(settings.config_dir)
 
 
+def get_vram_tier(
+    settings: Annotated[AppSettings, Depends(get_settings)],
+) -> VramTier | None:
+    """VRAM tier for read-only reporting routes (`plan`/`doctor`) — same fail-open
+    resolution engine construction uses (`_resolve_vram_tier_for_pool`)."""
+    return _resolve_vram_tier_for_pool(settings.config_dir)
+
+
 def get_chat_service(
     settings: Annotated[AppSettings, Depends(get_settings)],
 ) -> ChatService:
