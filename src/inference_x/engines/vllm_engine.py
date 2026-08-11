@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 import re
@@ -490,6 +491,78 @@ class VLLMEngine(BaseEngine):
         failed — see _log_kv_cache_stats).
         """
         return getattr(self, "_kv_capacity_tokens", None)
+
+    @property
+    def chat_template_sha256(self) -> str | None:
+        """Content hash of this model's tokenizer chat template, or None.
+
+        Manifest provenance (Phase C, C1 — add-run-manifest). Not part of
+        `BaseEngine`'s declared contract: like `kv_capacity_tokens`, this is
+        backend-specific (a future non-HF-tokenizer backend may have no
+        equivalent concept), so callers discover it with `getattr` rather
+        than DEC-047 §3 naming it durable.
+        """
+        try:
+            tok = self._llm.get_tokenizer()
+            template = getattr(tok, "chat_template", None)
+            if not isinstance(template, str) or not template:
+                return None
+            return hashlib.sha256(template.encode("utf-8")).hexdigest()
+        except Exception:
+            return None
+
+    @property
+    def runtime_snapshot(self) -> dict[str, Any]:
+        """Best-effort vLLM runtime config fields for the run manifest.
+
+        Manifest provenance (Phase C, C1 — add-run-manifest). Mirrors
+        `_log_kv_cache_stats`'s defensive `getattr`-chain introspection of
+        `AsyncLLM.vllm_config` (verified against vLLM 0.22.1's `VllmConfig`
+        dataclass): any field that cannot be read is None, never guessed.
+        Not part of `BaseEngine`'s declared contract — discovered via
+        `getattr`, same as `kv_capacity_tokens`.
+        """
+        snapshot: dict[str, Any] = {
+            "attention_backend": None,
+            "cuda_graphs": None,
+            "enforce_eager": None,
+            "kv_cache_dtype": None,
+            "block_size": None,
+            "max_model_len": None,
+            "prefix_caching": None,
+            "prefix_cache_hash_algo": None,
+            "dtype": None,
+        }
+        try:
+            vllm_config = getattr(self._llm, "vllm_config", None)
+            cache_config = getattr(vllm_config, "cache_config", None)
+            model_config = getattr(vllm_config, "model_config", None)
+            attention_config = getattr(vllm_config, "attention_config", None)
+
+            snapshot["kv_cache_dtype"] = getattr(cache_config, "cache_dtype", None)
+            snapshot["block_size"] = getattr(cache_config, "block_size", None)
+            snapshot["prefix_caching"] = getattr(
+                cache_config, "enable_prefix_caching", None
+            )
+            snapshot["prefix_cache_hash_algo"] = getattr(
+                cache_config, "prefix_caching_hash_algo", None
+            )
+
+            snapshot["max_model_len"] = getattr(model_config, "max_model_len", None)
+            enforce_eager = getattr(model_config, "enforce_eager", None)
+            snapshot["enforce_eager"] = enforce_eager
+            if isinstance(enforce_eager, bool):
+                snapshot["cuda_graphs"] = not enforce_eager
+            dtype = getattr(model_config, "dtype", None)
+            snapshot["dtype"] = str(dtype) if dtype is not None else None
+
+            backend = getattr(attention_config, "backend", None)
+            snapshot["attention_backend"] = str(backend) if backend is not None else None
+        except Exception as exc:
+            logger.debug(
+                "runtime_snapshot unavailable for %s: %s", self._model_name, exc
+            )
+        return snapshot
 
     def _detect_chat_support(self) -> bool:
         try:
