@@ -3,9 +3,17 @@ from __future__ import annotations
 
 import os
 import subprocess
-from typing import Optional
+from typing import Optional, TypedDict
 
 from inference_x.benchmarks.schemas import HardwareProfile
+from inference_x.utils.vllm_platform_patch import _is_wsl
+
+
+class ExtendedHardwareFields(TypedDict):
+    driver: Optional[str]
+    cuda: Optional[str]
+    cpu: Optional[str]
+    wsl2: Optional[bool]
 
 
 def _cpu_cores() -> int:
@@ -89,6 +97,56 @@ def _cpu_only_profile() -> HardwareProfile:
         ram_total_gb=round(_ram_total_gb(), 2),
         has_gpu=False,
     )
+
+
+def _driver_version() -> Optional[str]:
+    """Best-effort NVIDIA driver version string, or None (never fabricated)."""
+    try:
+        import pynvml  # nvidia-ml-py provides this module
+        pynvml.nvmlInit()
+        raw = pynvml.nvmlSystemGetDriverVersion()
+        pynvml.nvmlShutdown()
+        return raw if isinstance(raw, str) else raw.decode("utf-8", errors="replace")
+    except Exception:
+        return None
+
+
+def _cuda_version() -> Optional[str]:
+    """Best-effort CUDA runtime version actually in use (torch's build), or None."""
+    try:
+        import torch
+        return torch.version.cuda
+    except Exception:
+        return None
+
+
+def _cpu_name() -> Optional[str]:
+    """Best-effort CPU model name from /proc/cpuinfo (WSL2/Linux-first, DEC-platform), or None."""
+    try:
+        with open("/proc/cpuinfo", encoding="utf-8") as f:
+            for line in f:
+                if line.lower().startswith("model name"):
+                    return line.split(":", 1)[1].strip()
+    except OSError:
+        pass
+    return None
+
+
+def extended_hardware_fields() -> ExtendedHardwareFields:
+    """Best-effort driver/CUDA/CPU-name/WSL2 fields for the run manifest (Phase C, C1).
+
+    Extends, rather than modifies, `HardwareProfile` / `profile_hardware()`:
+    those are the benchmark subsystem's own established shape with its own
+    consumers (advisor scoring, storage — DEC-054/055/056/057); this function
+    is manifest-specific and additive. Every field is best-effort and may be
+    None — never fabricated (add-run-manifest design.md D4).
+    """
+    return {
+        "driver": _driver_version(),
+        "cuda": _cuda_version(),
+        "cpu": _cpu_name(),
+        "wsl2": _is_wsl(),
+    }
 
 
 def profile_hardware() -> HardwareProfile:

@@ -164,6 +164,151 @@ class EngineTiming(BaseModel):
     inference_time_ms: float
 
 
+class ManifestEngine(BaseModel):
+    """`engine` block of the run manifest (Phase C, C1 — add-run-manifest, §8.3).
+
+    Identifies the InferenceX software itself, not the model. `version` and
+    `backend_version` come from installed package metadata; `git_sha` from
+    the checkout or `INFERENCE_X_GIT_SHA`. Any field the platform cannot
+    determine is `None` — never fabricated.
+    """
+
+    name: str = "inference-x"
+    version: Optional[str] = None
+    git_sha: Optional[str] = None
+    backend: str = "vllm"
+    backend_version: Optional[str] = None
+
+
+class ManifestModel(BaseModel):
+    """`model` block of the run manifest.
+
+    `hf_revision` and `weights_sha256` are always `None` in this capability
+    — their completeness/degradation policy is explicitly open
+    (add-run-manifest design.md D4) — present in the schema, never
+    fabricated, deferred rather than guessed.
+    """
+
+    registry_name: str
+    hf_repo: Optional[str] = None
+    hf_revision: Optional[str] = None
+    weights_sha256: Optional[str] = None
+    quantization: Optional[str] = None
+    dtype: Optional[str] = None
+
+
+class ManifestRuntime(BaseModel):
+    """`runtime` block of the run manifest.
+
+    `batch_invariant` reports whatever `VLLM_BATCH_INVARIANT` is set to
+    right now — honestly, not as a fixed `False` — because C3's
+    `deterministic: true` request/startup wiring is out of scope for this
+    capability but an operator may already have set the env var directly.
+    `speculative` is always `None`: no speculative-decoding feature exists
+    yet (Phase D3).
+    """
+
+    attention_backend: Optional[str] = None
+    cuda_graphs: Optional[bool] = None
+    enforce_eager: Optional[bool] = None
+    kv_cache_dtype: Optional[str] = None
+    block_size: Optional[int] = None
+    max_model_len: Optional[int] = None
+    kv_capacity_tokens: Optional[int] = None
+    prefix_caching: Optional[bool] = None
+    prefix_cache_hash_algo: Optional[str] = None
+    batch_invariant: bool = False
+    speculative: Optional[str] = None
+
+
+class ManifestSampling(BaseModel):
+    """`sampling` block of the run manifest.
+
+    `seed` is the requested seed only (the same value `ResolvedRequest.seed`
+    carries) — never a backend-derived effective seed (the seed-echo
+    amendment; see the MODIFIED "Optional request seed reaches the sampler"
+    requirement). `max_tokens` is what the client asked for;
+    `resolved_max_tokens` is what admission actually used.
+    """
+
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
+    seed: Optional[int] = None
+    max_tokens: Optional[int] = None
+    resolved_max_tokens: Optional[int] = None
+
+
+class ManifestRequestInfo(BaseModel):
+    """`request` block of the run manifest.
+
+    `prompt_sha256` hashes the structured messages, not an engine-rendered
+    prompt string (see `utils/ids.py::compute_prompt_sha256`) — this never
+    crosses the Engine Boundary. `prompt_tokens` is read from the response's
+    own engine-accounted `usage.prompt_tokens` (DEC-050), never recomputed.
+    """
+
+    prompt_sha256: Optional[str] = None
+    prompt_tokens: Optional[int] = None
+    chat_template_sha256: Optional[str] = None
+
+
+class ManifestBatch(BaseModel):
+    """`batch` block of the run manifest.
+
+    `co_batched_request_ids` is reserved but never populated in this
+    capability (C2 is deferred until C5 establishes the value justifies the
+    vLLM-internals coupling needed to extract it) — always an empty list,
+    never fabricated composition data.
+    """
+
+    cold_start: Optional[bool] = None
+    prefix_cache_hit_tokens: Optional[int] = None
+    co_batched_request_ids: list[str] = Field(default_factory=list)
+    max_batch_size_observed: Optional[int] = None
+
+
+class ManifestHardware(BaseModel):
+    """`hardware` block of the run manifest: a request-time snapshot (§8.2)."""
+
+    gpu: Optional[str] = None
+    vram_total_gib: Optional[float] = None
+    driver: Optional[str] = None
+    cuda: Optional[str] = None
+    cpu: Optional[str] = None
+    ram_gib: Optional[float] = None
+    wsl2: Optional[bool] = None
+
+
+class RunManifest(BaseModel):
+    """The run manifest (Phase C, C1 — add-run-manifest, §8.3).
+
+    `run_id` is a content hash of the `engine`/`model`/`runtime`/`sampling`/
+    `request` blocks plus each warning's `type`/`code`/`field` (add-run-
+    manifest design.md D2) — `timing`, `batch`, and `hardware` are excluded
+    entirely (speed/observational, and execution-environment rather than
+    configuration identity, respectively), and a warning's free-text
+    `message` never participates. Content-addressing only: no cryptographic
+    signature is produced.
+
+    Assembled by `ChatService`, never by an engine (DEC-047 — same rule as
+    `resolved`/`warnings`), from signals the platform already produces.
+    Asserts comparability (equal `run_id` implies the same recorded
+    configuration), not reproducibility.
+    """
+
+    manifest_version: int = 1
+    run_id: str
+    engine: ManifestEngine
+    model: ManifestModel
+    runtime: ManifestRuntime
+    sampling: ManifestSampling
+    request: ManifestRequestInfo
+    timing: Optional[EngineTiming] = None
+    batch: ManifestBatch = Field(default_factory=ManifestBatch)
+    hardware: ManifestHardware
+    warnings: list[ResponseWarning] = Field(default_factory=list)
+
+
 class ChatStreamChunk(BaseModel):
     """One event on the engine streaming channel (DEC-049).
 
@@ -210,4 +355,14 @@ class ChatCompletionResponse(BaseModel):
         default_factory=list,
         description="Every substitution the server made and every check it could "
         "not perform (OS-4). Empty, never absent, when nothing was substituted.",
+    )
+    run_id: Optional[str] = Field(
+        default=None,
+        description="Content-addressed identity of this request's run manifest "
+        "(Phase C, C1). Also carried on the X-Run-Id response header for "
+        "non-streaming requests. Attached by ChatService, never by an engine "
+        "(DEC-047). Two run_ids are equal iff their manifests agree on "
+        "engine/model/runtime/sampling/request and each warning's "
+        "type/code/field (not hardware, and not a warning's free-text "
+        "message) — a comparability guarantee, not a reproducibility one.",
     )

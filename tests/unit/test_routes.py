@@ -227,6 +227,19 @@ class TestChatCompletionsEndpoint:
         assert lines[0].startswith("data: {")
         assert lines[-1] == "data: [DONE]"
 
+    def test_non_streaming_response_carries_x_run_id_header(self, client):
+        """Phase C, C1 (add-run-manifest): non-streaming only (design.md D3)."""
+        resp = client.post("/v1/chat/completions", json=self._payload)
+        assert resp.status_code == 200
+        assert resp.headers["X-Run-Id"] == resp.json()["run_id"]
+        assert resp.headers["X-Run-Id"].startswith("sha256:")
+
+    def test_streaming_response_carries_no_x_run_id_header(self, client):
+        payload = dict(self._payload)
+        payload["stream"] = True
+        resp = client.post("/v1/chat/completions", json=payload)
+        assert "X-Run-Id" not in resp.headers
+
     def test_engine_failure_returns_structured_500(self, client):
         class _FailingEngine(BaseEngine):
             async def generate(self, request: ChatCompletionRequest) -> ChatCompletionResponse:

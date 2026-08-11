@@ -22,10 +22,12 @@ from inference_x.schemas.chat import (
     ChatMessage,
     ChatStreamChunk,
     EngineTiming,
+    ResponseWarning,
 )
 from inference_x.schemas.model import ModelEntry
-from inference_x.services.chat_service import ChatService
+from inference_x.services.chat_service import ChatService, _build_manifest, _resolved
 from inference_x.services.model_service import ModelRegistry
+from inference_x.utils.ids import compute_run_id
 
 
 # ---------------------------------------------------------------------------
@@ -878,3 +880,174 @@ class TestBoundedAdmissionSharedByBothPaths:
             assert admission._batch_waiters.current("test") == 0
         finally:
             admission.release("test", holder.reserved_tokens)
+
+
+class TestRunManifest:
+    """Phase C, C1 (add-run-manifest): content-addressed run_id + X-Run-Id.
+
+    _StubEngine deliberately has none of the optional introspection hooks
+    (count_prompt_tokens, kv_capacity_tokens, chat_template_sha256,
+    runtime_snapshot) — these tests double as the "degrades to None, never
+    raises" guarantee for engines that don't implement them.
+    """
+
+    def _req(self, **overrides) -> ChatCompletionRequest:
+        payload = {
+            "model": "test",
+            "messages": [ChatMessage(role="user", content="hello")],
+        }
+        payload.update(overrides)
+        return ChatCompletionRequest(**payload)
+
+    @pytest.mark.asyncio
+    async def test_complete_attaches_a_content_addressed_run_id(self):
+        svc = _make_service()
+        resp = await svc.complete(self._req())
+        assert resp.run_id is not None
+        assert resp.run_id.startswith("sha256:")
+
+    @pytest.mark.asyncio
+    async def test_run_id_is_stable_across_identical_requests(self):
+        """Also proves auto-generated fields (response id, created) are not
+        in the preimage — those differ on every call, but run_id doesn't."""
+        svc = _make_service()
+        resp1 = await svc.complete(self._req())
+        resp2 = await svc.complete(self._req())
+        assert resp1.id != resp2.id
+        assert resp1.run_id == resp2.run_id
+
+    @pytest.mark.asyncio
+    async def test_run_id_unaffected_by_timing_only_difference(self):
+        """timing is speed/observational and excluded from the preimage
+        (design.md D2) — two runs differing only in EngineTiming values must
+        still be comparable."""
+
+        class _TimingVariantEngine(BaseEngine):
+            def __init__(self) -> None:
+                self._calls = 0
+
+            async def generate(self, request: ChatCompletionRequest) -> ChatCompletionResponse:
+                self._calls += 1
+                return ChatCompletionResponse(
+                    model=request.model,
+                    choices=[
+                        ChatCompletionChoice(
+                            index=0,
+                            message=ChatCompletionMessage(content="ok"),
+                            finish_reason="stop",
+                        )
+                    ],
+                    usage=ChatCompletionUsage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+                    timing=EngineTiming(
+                        queue_time_ms=float(self._calls),
+                        prefill_time_ms=float(self._calls),
+                        decode_time_ms=float(self._calls),
+                        inference_time_ms=float(self._calls),
+                    ),
+                )
+
+            async def generate_stream(self, request: ChatCompletionRequest):
+                yield ChatStreamChunk(content="ok")
+
+            def is_healthy(self) -> bool:
+                return True
+
+        svc = _make_service(engine=_TimingVariantEngine())
+        resp1 = await svc.complete(self._req())
+        resp2 = await svc.complete(self._req())
+        assert resp1.timing != resp2.timing
+        assert resp1.run_id == resp2.run_id
+
+    @pytest.mark.asyncio
+    async def test_run_id_changes_when_seed_differs(self):
+        svc = _make_service()
+        resp1 = await svc.complete(self._req(seed=1))
+        resp2 = await svc.complete(self._req(seed=2))
+        assert resp1.run_id != resp2.run_id
+
+    @pytest.mark.asyncio
+    async def test_run_id_changes_when_warnings_differ(self):
+        """A degraded run is not comparable to a clean one (design.md D2)."""
+        svc = _make_service()
+        resp_clean = await svc.complete(self._req())
+        resp_clamped = await svc.complete(
+            self._req(max_tokens=4000, max_context_tokens=200)
+        )
+        assert resp_clamped.warnings
+        assert resp_clean.run_id != resp_clamped.run_id
+
+    @pytest.mark.asyncio
+    async def test_run_id_is_recomputable_from_the_manifest_content(self):
+        """"run_id is a content hash, not a signature" (ADDED requirement
+        scenario): it must be reproducible by re-hashing the manifest's own
+        engine/model/runtime/sampling/request/warnings blocks, not merely
+        stable/non-random (that's covered by the identical-requests test)."""
+        registry = _make_registry("test")
+        engine = _StubEngine()
+        req = self._req(seed=7)
+        resolved = _resolved(req)
+        response = await engine.generate(req)
+        response = response.model_copy(update={"resolved": resolved, "warnings": []})
+
+        manifest = _build_manifest(
+            routed_model="test",
+            registry=registry,
+            engine=engine,
+            original_request=req,
+            resolved=resolved,
+            warnings=[],
+            response=response,
+        )
+
+        preimage = {
+            "engine": manifest.engine.model_dump(),
+            "model": manifest.model.model_dump(),
+            "runtime": manifest.runtime.model_dump(),
+            "sampling": manifest.sampling.model_dump(),
+            "request": manifest.request.model_dump(),
+            "warnings": [
+                {"type": w.type, "code": w.code, "field": w.field}
+                for w in manifest.warnings
+            ],
+        }
+        assert compute_run_id(preimage) == manifest.run_id
+
+    @pytest.mark.asyncio
+    async def test_run_id_unaffected_by_warning_message_text(self):
+        """design.md D2: a warning's free-text `message` is exempt from the
+        preimage — ResponseWarning's own OS-4/DEC-053 contract already
+        permits `message` to change without a spec change, so hashing it
+        would silently break comparability on a prose edit alone."""
+        registry = _make_registry("test")
+        engine = _StubEngine()
+        req = self._req()
+        resolved = _resolved(req)
+        response = await engine.generate(req)
+        response = response.model_copy(update={"resolved": resolved, "warnings": []})
+
+        def _manifest_for(message: str):
+            warnings = [
+                ResponseWarning(type="degraded", code="c", message=message)
+            ]
+            return _build_manifest(
+                routed_model="test",
+                registry=registry,
+                engine=engine,
+                original_request=req,
+                resolved=resolved,
+                warnings=warnings,
+                response=response,
+            )
+
+        assert _manifest_for("original wording").run_id == _manifest_for(
+            "reworded for clarity"
+        ).run_id
+
+    @pytest.mark.asyncio
+    async def test_run_id_ignores_engines_without_introspection_hooks(self):
+        """_StubEngine has no count_prompt_tokens/kv_capacity_tokens/
+        chat_template_sha256/runtime_snapshot — manifest assembly must not
+        raise, and must simply omit the corresponding provenance."""
+        svc = _make_service()
+        resp = await svc.complete(self._req())
+        assert resp.run_id is not None

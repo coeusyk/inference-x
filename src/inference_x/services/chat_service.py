@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import uuid
 from collections.abc import AsyncGenerator
 
+from inference_x.benchmarks.hardware import extended_hardware_fields, profile_hardware
 from inference_x.core.settings import get_settings
 from inference_x.engines.base import BaseEngine
 from inference_x.engines.pool import EnginePool
@@ -14,11 +16,55 @@ from inference_x.schemas.chat import (
     ChatCompletionRequest,
     ChatCompletionResponse,
     ChatStreamChunk,
+    ManifestBatch,
+    ManifestEngine,
+    ManifestHardware,
+    ManifestModel,
+    ManifestRequestInfo,
+    ManifestRuntime,
+    ManifestSampling,
     ResolvedRequest,
+    ResponseWarning,
+    RunManifest,
 )
 from inference_x.services.model_service import ModelRegistry
+from inference_x.utils.ids import (
+    compute_prompt_sha256,
+    compute_run_id,
+    is_hf_hub_repo_id,
+    package_version,
+    resolve_git_sha,
+)
 
 _RESOLVED_FIELDS = tuple(ResolvedRequest.model_fields)
+
+_UNSET = object()
+_manifest_hardware_cache: object = _UNSET
+
+
+def _manifest_hardware_snapshot() -> ManifestHardware:
+    """Cached for the process lifetime — hardware identity doesn't change
+    between requests, and re-probing it per request (NVML init/shutdown,
+    a /proc/cpuinfo scan) would add avoidable overhead to the very request
+    path this platform exists to measure. Mirrors the `resolve_git_sha`
+    caching pattern in `utils/ids.py`."""
+    global _manifest_hardware_cache
+    if _manifest_hardware_cache is not _UNSET:
+        assert isinstance(_manifest_hardware_cache, ManifestHardware)
+        return _manifest_hardware_cache
+    hw_profile = profile_hardware()
+    hw_extra = extended_hardware_fields()
+    snapshot = ManifestHardware(
+        gpu=hw_profile.gpu_name,
+        vram_total_gib=hw_profile.vram_total_gb if hw_profile.has_gpu else None,
+        driver=hw_extra.get("driver"),
+        cuda=hw_extra.get("cuda"),
+        cpu=hw_extra.get("cpu"),
+        ram_gib=hw_profile.ram_total_gb,
+        wsl2=hw_extra.get("wsl2"),
+    )
+    _manifest_hardware_cache = snapshot
+    return snapshot
 
 
 def _resolved(effective_request: ChatCompletionRequest) -> ResolvedRequest:
@@ -34,6 +80,124 @@ def _resolved(effective_request: ChatCompletionRequest) -> ResolvedRequest:
     """
     return ResolvedRequest(
         **{name: getattr(effective_request, name) for name in _RESOLVED_FIELDS}
+    )
+
+
+def _batch_invariant_enabled() -> bool:
+    """Whether VLLM_BATCH_INVARIANT is currently set — reported honestly.
+
+    C3's ``deterministic: true`` request/startup wiring is out of scope for
+    this capability, but an operator may already have set the env var
+    directly; the manifest reports reality rather than a fixed False.
+    """
+    return os.environ.get("VLLM_BATCH_INVARIANT", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
+def _build_manifest(
+    *,
+    routed_model: str,
+    registry: ModelRegistry,
+    engine: BaseEngine,
+    original_request: ChatCompletionRequest,
+    resolved: ResolvedRequest,
+    warnings: list[ResponseWarning],
+    response: ChatCompletionResponse,
+) -> RunManifest:
+    """Assemble the run manifest from signals the platform already produces.
+
+    Phase C, C1 (add-run-manifest). Derives from *resolved*, *warnings*, and
+    *response.timing/usage* — never recomputes token counts, timings, or
+    warnings (design.md §"Goals"). Every provenance field the platform
+    cannot determine is omitted/None, never fabricated (design.md D4).
+
+    ``run_id``'s preimage is ``{engine, model, runtime, sampling, request,
+    warnings}`` (design.md D2), where ``warnings`` is projected onto each
+    warning's ``type``/``code``/``field`` only — never ``message``, which
+    ``ResponseWarning``'s own contract (OS-4/DEC-053) permits to change
+    without a spec change. ``timing``, ``batch``, and ``hardware`` are
+    excluded from the hash entirely: ``timing``/``batch`` as
+    speed/observational, ``hardware`` because ``run_id`` denotes
+    configuration identity, not execution-environment identity (design.md
+    D2) — ``hardware`` still rides the manifest as provenance.
+    """
+    model_entry = registry.get(routed_model)
+    model_path = getattr(engine, "model_path", model_entry.model_path)
+
+    manifest_engine = ManifestEngine(
+        version=package_version("inferencex"),
+        git_sha=resolve_git_sha(),
+        backend_version=package_version("vllm"),
+    )
+
+    runtime_raw = getattr(engine, "runtime_snapshot", None)
+    runtime_raw = runtime_raw if isinstance(runtime_raw, dict) else {}
+
+    manifest_model = ManifestModel(
+        registry_name=routed_model,
+        hf_repo=model_path if is_hf_hub_repo_id(model_path) else None,
+        quantization=model_entry.quantization,
+        dtype=runtime_raw.get("dtype"),
+    )
+
+    manifest_runtime = ManifestRuntime(
+        attention_backend=runtime_raw.get("attention_backend"),
+        cuda_graphs=runtime_raw.get("cuda_graphs"),
+        enforce_eager=runtime_raw.get("enforce_eager"),
+        kv_cache_dtype=runtime_raw.get("kv_cache_dtype"),
+        block_size=runtime_raw.get("block_size"),
+        max_model_len=runtime_raw.get("max_model_len"),
+        kv_capacity_tokens=getattr(engine, "kv_capacity_tokens", None),
+        prefix_caching=runtime_raw.get("prefix_caching"),
+        prefix_cache_hash_algo=runtime_raw.get("prefix_cache_hash_algo"),
+        batch_invariant=_batch_invariant_enabled(),
+    )
+
+    manifest_sampling = ManifestSampling(
+        temperature=resolved.temperature,
+        top_p=resolved.top_p,
+        seed=resolved.seed,
+        max_tokens=original_request.max_tokens,
+        resolved_max_tokens=resolved.max_tokens,
+    )
+
+    manifest_request = ManifestRequestInfo(
+        prompt_sha256=compute_prompt_sha256(original_request.messages),
+        prompt_tokens=response.usage.prompt_tokens,
+        chat_template_sha256=getattr(engine, "chat_template_sha256", None),
+    )
+
+    manifest_hardware = _manifest_hardware_snapshot()
+
+    preimage = {
+        "engine": manifest_engine.model_dump(),
+        "model": manifest_model.model_dump(),
+        "runtime": manifest_runtime.model_dump(),
+        "sampling": manifest_sampling.model_dump(),
+        "request": manifest_request.model_dump(),
+        # Stable identity fields only (design.md D2) — `message` is free text
+        # that ResponseWarning's own contract (OS-4/DEC-053) already permits
+        # to change without a spec change, so it must not affect run_id.
+        "warnings": [
+            {"type": w.type, "code": w.code, "field": w.field} for w in warnings
+        ],
+    }
+    run_id = compute_run_id(preimage)
+
+    return RunManifest(
+        run_id=run_id,
+        engine=manifest_engine,
+        model=manifest_model,
+        runtime=manifest_runtime,
+        sampling=manifest_sampling,
+        request=manifest_request,
+        timing=response.timing,
+        batch=ManifestBatch(),
+        hardware=manifest_hardware,
+        warnings=list(warnings),
     )
 
 
@@ -83,12 +247,24 @@ class ChatService:
             self._admission.release(routed_model, admitted.reserved_tokens)
         # Attached here, never by the engine: the Engine Boundary does not learn
         # about admission (DEC-047).
-        return response.model_copy(
-            update={
-                "resolved": _resolved(effective_request),
-                "warnings": list(admitted.warnings),
-            }
+        resolved = _resolved(effective_request)
+        warnings = list(admitted.warnings)
+        response = response.model_copy(
+            update={"resolved": resolved, "warnings": warnings}
         )
+        # Phase C, C1 (add-run-manifest): manifest assembly needs the fully
+        # resolved response (usage.prompt_tokens, timing), so it runs after
+        # the update above rather than before it.
+        manifest = _build_manifest(
+            routed_model=routed_model,
+            registry=self._registry,
+            engine=engine,
+            original_request=request,
+            resolved=resolved,
+            warnings=warnings,
+            response=response,
+        )
+        return response.model_copy(update={"run_id": manifest.run_id})
 
     async def stream_response(
         self, request: ChatCompletionRequest

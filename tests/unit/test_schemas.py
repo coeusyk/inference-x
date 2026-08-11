@@ -15,8 +15,16 @@ from inference_x.schemas.chat import (
     ChatCompletionResponse,
     ChatCompletionUsage,
     ChatMessage,
+    ManifestBatch,
+    ManifestEngine,
+    ManifestHardware,
+    ManifestModel,
+    ManifestRequestInfo,
+    ManifestRuntime,
+    ManifestSampling,
     ResolvedRequest,
     ResponseWarning,
+    RunManifest,
 )
 from inference_x.schemas.model import ModelEntry
 from inference_x.services.chat_service import ChatService
@@ -283,6 +291,9 @@ class TestChatCompletionResponse:
         assert "choices" in data
         assert "usage" in data
 
+    def test_run_id_defaults_to_none(self):
+        assert self._make_response().run_id is None
+
 
 class TestEffectiveRequestSurfaces:
     """OS-4: `resolved`, `warnings` and `strict` — the wire shape of substitution."""
@@ -337,3 +348,50 @@ class TestEffectiveRequestSurfaces:
             assert ResponseWarning(type=ok, code="c", message="m").type == ok
         with pytest.raises(ValidationError):
             ResponseWarning(type="informational", code="c", message="m")
+
+
+class TestRunManifest:
+    """Phase C, C1 (add-run-manifest) manifest block shapes/defaults."""
+
+    def _manifest(self, **overrides) -> RunManifest:
+        payload = {
+            "run_id": "sha256:" + "a" * 64,
+            "engine": ManifestEngine(),
+            "model": ManifestModel(registry_name="test"),
+            "runtime": ManifestRuntime(),
+            "sampling": ManifestSampling(),
+            "request": ManifestRequestInfo(),
+            "hardware": ManifestHardware(),
+        }
+        payload.update(overrides)
+        return RunManifest(**payload)
+
+    def test_manifest_version_defaults_to_1(self):
+        assert self._manifest().manifest_version == 1
+
+    def test_batch_defaults_to_empty_co_batched_request_ids(self):
+        manifest = self._manifest()
+        assert manifest.batch.co_batched_request_ids == []
+
+    def test_timing_and_warnings_default_to_absent_or_empty(self):
+        manifest = self._manifest()
+        assert manifest.timing is None
+        assert manifest.warnings == []
+
+    def test_model_hf_revision_and_weights_sha256_default_to_none(self):
+        model = ManifestModel(registry_name="test")
+        assert model.hf_revision is None
+        assert model.weights_sha256 is None
+
+    def test_runtime_batch_invariant_defaults_to_false(self):
+        assert ManifestRuntime().batch_invariant is False
+
+    def test_hardware_fields_default_to_none(self):
+        hw = ManifestHardware()
+        assert hw.gpu is None
+        assert hw.wsl2 is None
+
+    def test_manifest_serializes_to_dict_with_all_blocks(self):
+        data = self._manifest().model_dump()
+        for block in ("engine", "model", "runtime", "sampling", "request", "batch", "hardware"):
+            assert block in data
