@@ -72,6 +72,12 @@ class ChatCompletionRequest(BaseModel):
         "substitution itself, and it never rejects on degraded warnings, which "
         "would turn admission fail-closed (DEC-047 §4).",
     )
+    deterministic: bool = Field(
+        default=False,
+        description="When true, enable vLLM batch-invariant mode on SM ≥ 8.0 "
+        "(Phase C C3). Unsupported hardware returns 400 rather than running "
+        "non-deterministically. Distinct from strict (DEC-052).",
+    )
 
 
 class ResponseWarning(BaseModel):
@@ -103,9 +109,9 @@ class ResolvedRequest(BaseModel):
     Membership follows a derivability rule rather than curation: a field appears
     here **iff** it exists on `ChatCompletionRequest`, minus `messages` (content,
     not a parameter) and minus the transport/policy controls `stream`,
-    `stream_options` and `strict`. `tests/unit/test_schemas.py` enforces the rule,
-    so a field added to the request later forces an explicit decision here rather
-    than silently omitting itself.
+    `stream_options`, `strict`, and `deterministic`. `tests/unit/test_schemas.py`
+    enforces the rule, so a field added to the request later forces an explicit
+    decision here rather than silently omitting itself.
 
     It is a full echo rather than a diff: a diff needs the original to be
     interpretable, and only a self-contained echo can be re-submitted as-is with
@@ -201,11 +207,10 @@ class ManifestRuntime(BaseModel):
     """`runtime` block of the run manifest.
 
     `batch_invariant` reports whatever `VLLM_BATCH_INVARIANT` is set to
-    right now — honestly, not as a fixed `False` — because C3's
-    `deterministic: true` request/startup wiring is out of scope for this
-    capability but an operator may already have set the env var directly.
-    `speculative` is always `None`: no speculative-decoding feature exists
-    yet (Phase D3).
+    right now — honestly. C3 (`deterministic: true` / startup
+    `INFERENCE_X_DETERMINISTIC`) is what sets the env on supported GPUs;
+    operators may also set it directly. `speculative` is always `None`: no
+    speculative-decoding feature exists yet (Phase D3).
     """
 
     attention_backend: Optional[str] = None

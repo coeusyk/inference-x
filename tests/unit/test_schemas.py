@@ -300,7 +300,7 @@ class TestEffectiveRequestSurfaces:
 
     # The two exclusion classes from the derivability rule: message content, and
     # the transport/policy controls. Everything else must appear in `resolved`.
-    _EXCLUDED = {"messages", "stream", "stream_options", "strict"}
+    _EXCLUDED = {"messages", "stream", "stream_options", "strict", "deterministic"}
 
     def test_resolved_field_set_is_derivable_from_the_request(self):
         """The rule is enforced here rather than in review.
@@ -313,9 +313,12 @@ class TestEffectiveRequestSurfaces:
             set(ChatCompletionRequest.model_fields) - self._EXCLUDED
         )
 
-    def test_strict_defaults_to_false_and_is_last(self):
+    def test_deterministic_defaults_to_false_and_is_last(self):
+        assert ChatCompletionRequest.model_fields["deterministic"].default is False
+        assert list(ChatCompletionRequest.model_fields)[-1] == "deterministic"
+
+    def test_strict_defaults_to_false(self):
         assert ChatCompletionRequest.model_fields["strict"].default is False
-        assert list(ChatCompletionRequest.model_fields)[-1] == "strict"
 
     def test_non_boolean_strict_is_rejected(self):
         with pytest.raises(ValidationError):
@@ -323,6 +326,14 @@ class TestEffectiveRequestSurfaces:
                 model="m",
                 messages=[ChatMessage(role="user", content="hi")],
                 strict="yes-please",
+            )
+
+    def test_non_boolean_deterministic_is_rejected(self):
+        with pytest.raises(ValidationError):
+            ChatCompletionRequest(
+                model="m",
+                messages=[ChatMessage(role="user", content="hi")],
+                deterministic="yes-please",
             )
 
     def test_response_defaults_are_additive(self):

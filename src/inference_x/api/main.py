@@ -56,6 +56,7 @@ async def lifespan(app: FastAPI):
     """Eagerly initialize registry, router, and engine before serving requests."""
     try:
         deps.initialize_app()
+        await deps.warm_deterministic_if_configured()
     except Exception as exc:
         logger.critical("Startup initialization failed: %s", exc, exc_info=True)
         raise

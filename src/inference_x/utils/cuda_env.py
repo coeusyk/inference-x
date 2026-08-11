@@ -13,6 +13,42 @@ from inference_x.utils.vllm_platform_patch import apply as apply_vllm_platform_p
 
 logger = logging.getLogger(__name__)
 
+# vLLM batch-invariant mode requires Ampere or newer (SM ≥ 8.0). Below that the
+# platform refuses deterministic mode rather than lying (Phase C C3).
+_MIN_DETERMINISM_SM = (8, 0)
+
+
+def probe_compute_capability() -> tuple[int, int] | None:
+    """Return the CUDA device compute capability ``(major, minor)``, or None.
+
+    None means no usable CUDA device (CPU-only host, driver missing, etc.).
+    """
+    try:
+        import torch
+    except ImportError:
+        return None
+    if not torch.cuda.is_available():
+        return None
+    try:
+        major, minor = torch.cuda.get_device_capability(0)
+    except Exception:
+        return None
+    return int(major), int(minor)
+
+
+def supports_deterministic_batch_invariant(
+    capability: tuple[int, int] | None,
+) -> bool:
+    """True when *capability* meets SM ≥ 8.0 (Ampere+). ``None`` is unsupported."""
+    if capability is None:
+        return False
+    return capability >= _MIN_DETERMINISM_SM
+
+
+def host_supports_deterministic_batch_invariant() -> bool:
+    """Probe this host's CUDA device and apply the SM ≥ 8.0 gate."""
+    return supports_deterministic_batch_invariant(probe_compute_capability())
+
 
 def _find_venv_cuda_home() -> Path | None:
     """Return CUDA toolkit root bundled under site-packages/nvidia/cu*."""

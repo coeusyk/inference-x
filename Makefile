@@ -23,6 +23,7 @@ help:
 	@echo ""
 	@echo "Conformance (real GPU; not part of checks CI)"
 	@echo "  make oracle                  Teacher-forced opt-125m vs transformers (needs GPU)"
+	@echo "  make verify-determinism      N seeded trials → 1 unique sample (needs GPU)"
 	@echo ""
 	@echo "Development"
 	@echo "  ./scripts/dev.sh sync        Install/sync dependencies (uv sync)"
@@ -100,7 +101,12 @@ doctor:
 # Gated real-GPU oracle (C4a). Requires CUDA + model weights; excluded from checks.
 .PHONY: oracle
 oracle:
-	INFERENCE_X_RUN_GPU_TESTS=1 uv run pytest tests/oracle -v
+	INFERENCE_X_RUN_GPU_TESTS=1 uv run pytest tests/oracle/test_opt_teacher_force.py -v
+
+# Gated determinism conformance (C3/C4b). Same GPU opt-in as oracle.
+.PHONY: verify-determinism
+verify-determinism:
+	INFERENCE_X_RUN_GPU_TESTS=1 uv run pytest tests/oracle/test_determinism.py -v
 
 # Compute the benchmark suite_version digest (add --write to update the file)
 .PHONY: suite-version

@@ -69,6 +69,19 @@ Those three commands are exactly what CI runs, so a green local run means a gree
 CI run. Lint and type rules are configured in `pyproject.toml`; the reasoning behind
 the rule selection and the type baseline is DEC-048. Neither command formats code.
 
+Gated real-GPU suites (oracle / determinism) live under `tests/oracle/` and are
+**not** part of `checks`. On a CUDA host:
+
+```bash
+make oracle                 # teacher-forced opt-125m vs transformers
+make verify-determinism     # N seeded trials → 1 unique sample
+# equivalent: INFERENCE_X_RUN_GPU_TESTS=1 uv run pytest tests/oracle/...
+```
+
+`deterministic: true` (and `INFERENCE_X_DETERMINISTIC=1` at startup) enables vLLM
+batch-invariant mode on SM ≥ 8.0 only — a scoped same-hardware / same-vLLM-version
+claim, not end-to-end reproducibility.
+
 For changes that require a GPU, test on WSL2 Ubuntu. That is the supported runtime.
 Non-WSL2 Linux may work but is not the primary target.
 
