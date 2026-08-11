@@ -26,9 +26,11 @@ from inference_x.api.errors import (
 )
 from inference_x.api.routes.benchmark import router as benchmark_router
 from inference_x.api.routes.chat_completions import router as chat_router
+from inference_x.api.routes.doctor import router as doctor_router
 from inference_x.api.routes.health import router as health_router
 from inference_x.api.routes.metrics import router as metrics_router
 from inference_x.api.routes.models import router as models_router
+from inference_x.api.routes.plan import router as plan_router
 from inference_x.observability.middleware import ObservabilityMiddleware
 from inference_x.routing.admission import EngineSaturatedError
 
@@ -80,6 +82,8 @@ app.include_router(chat_router, prefix="/v1")
 app.include_router(models_router, prefix="/v1")
 app.include_router(metrics_router, prefix="/v1")
 app.include_router(benchmark_router, prefix="/v1/benchmark")
+app.include_router(plan_router, prefix="/v1")
+app.include_router(doctor_router, prefix="/v1")
 
 # vLLM's own native Prometheus stat logger, mounted as-is against the default
 # prometheus_client.REGISTRY it already registers into (verified empirically —

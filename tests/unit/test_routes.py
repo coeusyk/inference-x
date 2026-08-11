@@ -7,7 +7,13 @@ import pytest
 from fastapi.testclient import TestClient
 from prometheus_client import REGISTRY, Gauge
 
-from inference_x.api.deps import get_chat_service, get_engine_pool, get_metrics_service, get_registry
+from inference_x.api.deps import (
+    get_chat_service,
+    get_engine_pool,
+    get_metrics_service,
+    get_registry,
+    get_vram_tier,
+)
 from inference_x.api.main import app
 from inference_x.engines.base import BaseEngine
 from inference_x.engines.pool import EnginePool
@@ -575,3 +581,133 @@ class TestNativeMetricsEndpoint:
         assert after.avg_latency_ms == before.avg_latency_ms
         assert after.error_count == before.error_count
         assert len(recorder.storage.all()) == 1
+
+
+# ---------------------------------------------------------------------------
+# Plan endpoint (Phase C, C6 — add-plan-doctor)
+# ---------------------------------------------------------------------------
+
+class TestPlanEndpoint:
+    @pytest.fixture()
+    def plan_client(self):
+        app.dependency_overrides[get_registry] = _make_stub_registry
+        app.dependency_overrides[get_vram_tier] = lambda: None
+        with TestClient(app) as c:
+            yield c
+        app.dependency_overrides.clear()
+
+    def test_returns_200(self, plan_client):
+        resp = plan_client.get("/v1/plan")
+        assert resp.status_code == 200
+
+    def test_no_engine_dependency_overridden(self, plan_client):
+        """Plan must not require get_chat_service/get_engine_pool to be wired at all —
+        confirms it never needs an engine to answer."""
+        assert get_chat_service not in app.dependency_overrides
+        assert get_engine_pool not in app.dependency_overrides
+        resp = plan_client.get("/v1/plan")
+        assert resp.status_code == 200
+
+    def test_one_entry_per_registered_model(self, plan_client):
+        resp = plan_client.get("/v1/plan")
+        models = resp.json()["models"]
+        assert [m["model"] for m in models] == [_TEST_MODEL]
+
+    def test_entry_values_match_direct_pool_config_calls(self, plan_client):
+        from inference_x.utils.vllm_pool_config import (
+            estimate_engine_footprint_gib,
+            estimate_kv_cache_gib,
+            estimate_weight_gib,
+        )
+
+        resp = plan_client.get("/v1/plan")
+        entry = resp.json()["models"][0]
+        assert entry["estimated_weight_gib"] == round(
+            estimate_weight_gib("test/stub", None), 3
+        )
+        assert entry["estimated_kv_cache_gib"] == round(
+            estimate_kv_cache_gib("test/stub", 2048), 3
+        )
+        assert entry["estimated_footprint_gib"] == round(
+            estimate_engine_footprint_gib("test/stub", 2048, None), 3
+        )
+
+    def test_utilization_present_when_model_fits(self, plan_client, monkeypatch):
+        import inference_x.api.routes.plan as plan_module
+
+        monkeypatch.setattr(
+            plan_module, "probe_gpu_memory_gib", lambda: (100.0, 100.0)
+        )
+        resp = plan_client.get("/v1/plan")
+        entry = resp.json()["models"][0]
+        assert entry["gpu_memory_utilization"] is not None
+        assert 0.0 < entry["gpu_memory_utilization"] <= 1.0
+
+    def test_utilization_null_not_fabricated_when_model_does_not_fit(
+        self, plan_client, monkeypatch
+    ):
+        import inference_x.api.routes.plan as plan_module
+
+        monkeypatch.setattr(
+            plan_module, "probe_gpu_memory_gib", lambda: (0.001, 8.0)
+        )
+        resp = plan_client.get("/v1/plan")
+        entry = resp.json()["models"][0]
+        assert entry["gpu_memory_utilization"] is None
+        # Footprint estimates are still reported — they don't depend on free VRAM.
+        assert entry["estimated_weight_gib"] > 0
+
+
+# ---------------------------------------------------------------------------
+# Doctor endpoint (Phase C, C6 — add-plan-doctor)
+# ---------------------------------------------------------------------------
+
+class TestDoctorEndpoint:
+    @pytest.fixture()
+    def doctor_client(self):
+        app.dependency_overrides[get_registry] = _make_stub_registry
+        app.dependency_overrides[get_vram_tier] = lambda: None
+        with TestClient(app) as c:
+            yield c
+        app.dependency_overrides.clear()
+
+    def test_returns_200(self, doctor_client):
+        resp = doctor_client.get("/v1/doctor")
+        assert resp.status_code == 200
+
+    def test_no_engine_dependency_overridden(self, doctor_client):
+        assert get_chat_service not in app.dependency_overrides
+        assert get_engine_pool not in app.dependency_overrides
+        resp = doctor_client.get("/v1/doctor")
+        assert resp.status_code == 200
+
+    def test_reports_hardware_and_one_model_fit_entry(self, doctor_client):
+        resp = doctor_client.get("/v1/doctor")
+        body = resp.json()
+        assert "hardware" in body
+        assert [m["model"] for m in body["models"]] == [_TEST_MODEL]
+
+    def test_model_that_fits_reports_true_without_reason(
+        self, doctor_client, monkeypatch
+    ):
+        import inference_x.api.routes.doctor as doctor_module
+
+        monkeypatch.setattr(
+            doctor_module, "probe_gpu_memory_gib", lambda: (100.0, 100.0)
+        )
+        resp = doctor_client.get("/v1/doctor")
+        entry = resp.json()["models"][0]
+        assert entry["fits"] is True
+        assert entry["reason"] is None
+
+    def test_model_that_does_not_fit_reports_reason(self, doctor_client, monkeypatch):
+        import inference_x.api.routes.doctor as doctor_module
+
+        monkeypatch.setattr(
+            doctor_module, "probe_gpu_memory_gib", lambda: (0.001, 8.0)
+        )
+        resp = doctor_client.get("/v1/doctor")
+        entry = resp.json()["models"][0]
+        assert entry["fits"] is False
+        assert entry["reason"]
+        assert _TEST_MODEL in entry["reason"] or "VRAM" in entry["reason"]
