@@ -21,6 +21,9 @@ help:
 	@echo "  make plan                    Print per-model VRAM sizing plan (GET /v1/plan)"
 	@echo "  make doctor                  Print environment + model-fit readiness (GET /v1/doctor)"
 	@echo ""
+	@echo "Conformance (real GPU; not part of checks CI)"
+	@echo "  make oracle                  Teacher-forced opt-125m vs transformers (needs GPU)"
+	@echo ""
 	@echo "Development"
 	@echo "  ./scripts/dev.sh sync        Install/sync dependencies (uv sync)"
 	@echo "  ./scripts/dev.sh serve       Start API server only"
@@ -93,6 +96,11 @@ plan:
 .PHONY: doctor
 doctor:
 	uv run python scripts/doctor.py
+
+# Gated real-GPU oracle (C4a). Requires CUDA + model weights; excluded from checks.
+.PHONY: oracle
+oracle:
+	INFERENCE_X_RUN_GPU_TESTS=1 uv run pytest tests/oracle -v
 
 # Compute the benchmark suite_version digest (add --write to update the file)
 .PHONY: suite-version
