@@ -279,7 +279,9 @@ class ChatService:
             warnings=warnings,
             response=response,
         )
-        return response.model_copy(update={"run_id": manifest.run_id})
+        return response.model_copy(
+            update={"run_id": manifest.run_id, "manifest": manifest}
+        )
 
     async def stream_response(
         self, request: ChatCompletionRequest

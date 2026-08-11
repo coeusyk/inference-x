@@ -246,6 +246,35 @@ class TestChatCompletionsEndpoint:
         resp = client.post("/v1/chat/completions", json=payload)
         assert "X-Run-Id" not in resp.headers
 
+    def test_non_streaming_response_carries_manifest_matching_run_id(self, client):
+        """Phase C, C5 (integrate-varex-manifest): resolves add-run-manifest design.md D5.
+
+        The manifest rides the body so a client can recompute run_id from it
+        (design.md D2) rather than trusting the string — this is the actual
+        cross-repo integration path, not a serialization round-trip.
+        """
+        from inference_x.utils.ids import compute_run_id
+
+        resp = client.post("/v1/chat/completions", json=self._payload)
+        assert resp.status_code == 200
+        body = resp.json()
+        manifest = body["manifest"]
+        assert manifest is not None
+        assert manifest["run_id"] == body["run_id"] == resp.headers["X-Run-Id"]
+
+        preimage = {
+            "engine": manifest["engine"],
+            "model": manifest["model"],
+            "runtime": manifest["runtime"],
+            "sampling": manifest["sampling"],
+            "request": manifest["request"],
+            "warnings": [
+                {"type": w["type"], "code": w["code"], "field": w["field"]}
+                for w in manifest["warnings"]
+            ],
+        }
+        assert compute_run_id(preimage) == manifest["run_id"]
+
     def test_engine_failure_returns_structured_500(self, client):
         class _FailingEngine(BaseEngine):
             async def generate(self, request: ChatCompletionRequest) -> ChatCompletionResponse:

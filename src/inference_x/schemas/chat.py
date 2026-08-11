@@ -373,3 +373,11 @@ class ChatCompletionResponse(BaseModel):
         "type/code/field (not hardware, and not a warning's free-text "
         "message) — a comparability guarantee, not a reproducibility one.",
     )
+    manifest: Optional[RunManifest] = Field(
+        default=None,
+        description="The full run manifest whose run_id is carried above (Phase C, C5 — "
+        "integrate-varex-manifest, resolving add-run-manifest design.md D5). Non-streaming "
+        "only; null whenever run_id is null. A client can recompute run_id from this "
+        "object's own engine/model/runtime/sampling/request/warnings fields to verify "
+        "comparability mechanically rather than trusting the string.",
+    )
