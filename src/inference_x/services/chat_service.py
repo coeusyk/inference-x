@@ -221,10 +221,25 @@ class ChatService:
 
     @staticmethod
     def _enforce_deterministic(request: ChatCompletionRequest) -> None:
-        if request.deterministic:
-            from inference_x.utils.determinism import ensure_deterministic_mode
+        """Refuse `deterministic: true` unless the process was started with it.
 
-            ensure_deterministic_mode(require=True)
+        Batch-invariant mode must be active before the engine is constructed
+        (vLLM may capture CUDA graphs at construction time, and a graph
+        captured beforehand keeps replaying non-invariant kernels regardless
+        of anything set afterward — see `utils/determinism.py`). By the time
+        a request reaches here the engine already exists, so this cannot
+        safely activate determinism late; it only checks whether startup
+        already did (`INFERENCE_X_DETERMINISTIC=1`) and refuses otherwise
+        rather than reporting a manifest the run didn't earn.
+        """
+        if request.deterministic and not get_settings().deterministic:
+            from inference_x.utils.determinism import DeterminismUnsupportedError
+
+            raise DeterminismUnsupportedError(
+                "deterministic: true requires the process to be started with "
+                "determinism enabled (INFERENCE_X_DETERMINISTIC=1); it cannot "
+                "be activated per-request once the engine is running"
+            )
 
     async def complete(self, request: ChatCompletionRequest) -> ChatCompletionResponse:
         """Route and execute a chat completion request.

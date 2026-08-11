@@ -316,6 +316,29 @@ class TestChatCompletionsEndpoint:
             assert strict.json()["error"]["type"] == "invalid_request_error"
         app.dependency_overrides.clear()
 
+    def test_deterministic_true_refuses_when_process_not_started_deterministic(self):
+        """A process not booted with INFERENCE_X_DETERMINISTIC=1 cannot honor a
+        per-request deterministic: true — its engine may already have CUDA
+        graphs captured without batch-invariant kernels, so activating the
+        env var this late wouldn't actually take effect for those replayed
+        shapes. Refuse with a stable code rather than reporting a manifest
+        the run didn't earn (design.md D4, add-deterministic-execution)."""
+        registry = _make_stub_registry()
+        router = TaskRouter(registry, _TEST_MODEL)
+        pool = EnginePool({_TEST_MODEL: _StubEngine()})
+        svc = ChatService(engine_pool=pool, registry=registry, router=router)
+        app.dependency_overrides[get_chat_service] = lambda: svc
+        with TestClient(app) as c:
+            resp = c.post(
+                "/v1/chat/completions",
+                json={**self._payload, "deterministic": True},
+            )
+            assert resp.status_code == 400
+            body = resp.json()
+            assert body["error"]["code"] == "deterministic_unsupported"
+            assert body["error"]["type"] == "invalid_request_error"
+        app.dependency_overrides.clear()
+
     async def test_kv_saturation_returns_429_with_retry_after(self):
         """A batch-tier request is rejected (not silently truncated) when an
         in-flight reservation has already consumed the KV safety budget."""

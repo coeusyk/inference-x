@@ -3,6 +3,15 @@
 Wires ``VLLM_BATCH_INVARIANT`` on SM ≥ 8.0 and refuses otherwise. Application-
 level warmup replaces the plan's ``VLLM_DETERMINISM_WARMUP_ITERATIONS`` name,
 which does not exist in the pinned vLLM 0.22.1 (design.md D3).
+
+``ensure_deterministic_mode()`` must run before the engine is constructed:
+vLLM may capture CUDA graphs during construction, and a graph captured before
+the batch-invariant dispatcher override is installed keeps replaying the
+original (non-invariant) kernels no matter what the env var says afterward.
+This is why only process startup calls this function for real — a per-request
+call against an already-constructed engine cannot honor the guarantee, so
+``ChatService`` refuses instead of calling it late (see
+``services/chat_service.py::_enforce_deterministic``).
 """
 
 from __future__ import annotations
@@ -23,7 +32,6 @@ logger = logging.getLogger(__name__)
 
 _WARMUP_PROMPT = "ping"
 _DEFAULT_WARMUP_ITERS = 3
-_enabled_in_process = False
 
 
 class DeterminismUnsupportedError(ValueError):
@@ -46,19 +54,21 @@ def batch_invariant_env_enabled() -> bool:
 def ensure_deterministic_mode(*, require: bool = True) -> bool:
     """Enable vLLM batch-invariant mode when the GPU supports it.
 
+    Call this before the engine is constructed (see module docstring) — it is
+    the process-startup activation path; per-request `deterministic: true` is
+    enforced separately by refusing unless startup already activated this.
+
     Parameters
     ----------
     require:
-        When True (per-request / startup demand), raise
-        ``DeterminismUnsupportedError`` if SM < 8.0 or CUDA is absent.
-        When False, return False quietly on unsupported hosts.
+        When True, raise ``DeterminismUnsupportedError`` if SM < 8.0 or CUDA
+        is absent. When False, return False quietly on unsupported hosts.
 
     Returns
     -------
     bool
         True when batch-invariant mode is active after the call.
     """
-    global _enabled_in_process
     cap = probe_compute_capability()
     if not supports_deterministic_batch_invariant(cap):
         if require:
@@ -70,18 +80,14 @@ def ensure_deterministic_mode(*, require: bool = True) -> bool:
         return False
 
     os.environ["VLLM_BATCH_INVARIANT"] = "1"
-    try:
-        from vllm.model_executor.layers.batch_invariant import (  # type: ignore[import-untyped]
-            init_batch_invariance,
-        )
+    from vllm.model_executor.layers.batch_invariant import (  # type: ignore[import-untyped]
+        init_batch_invariance,
+    )
 
-        init_batch_invariance()
-    except Exception as exc:
-        # Env is set; init may already have run at import time. Log and continue
-        # so the manifest still reports the env truthfully.
-        logger.warning("init_batch_invariance() raised (continuing): %s", exc)
+    # Let a genuine init failure propagate rather than reporting success the
+    # manifest can't back up (refuse rather than lie, design.md D4).
+    init_batch_invariance()
 
-    _enabled_in_process = True
     logger.info(
         "Deterministic mode enabled (VLLM_BATCH_INVARIANT=1, capability=SM %s.%s)",
         cap[0] if cap else "?",
