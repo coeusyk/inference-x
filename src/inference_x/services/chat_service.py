@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import uuid
 from collections.abc import AsyncGenerator
 
@@ -84,17 +83,10 @@ def _resolved(effective_request: ChatCompletionRequest) -> ResolvedRequest:
 
 
 def _batch_invariant_enabled() -> bool:
-    """Whether VLLM_BATCH_INVARIANT is currently set — reported honestly.
+    """Whether VLLM_BATCH_INVARIANT is currently set — reported honestly."""
+    from inference_x.utils.determinism import batch_invariant_env_enabled
 
-    C3's ``deterministic: true`` request/startup wiring is out of scope for
-    this capability, but an operator may already have set the env var
-    directly; the manifest reports reality rather than a fixed False.
-    """
-    return os.environ.get("VLLM_BATCH_INVARIANT", "").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-    )
+    return batch_invariant_env_enabled()
 
 
 def _build_manifest(
@@ -227,6 +219,13 @@ class ChatService:
         self._router = router
         self._admission = admission or AdmissionController(registry)
 
+    @staticmethod
+    def _enforce_deterministic(request: ChatCompletionRequest) -> None:
+        if request.deterministic:
+            from inference_x.utils.determinism import ensure_deterministic_mode
+
+            ensure_deterministic_mode(require=True)
+
     async def complete(self, request: ChatCompletionRequest) -> ChatCompletionResponse:
         """Route and execute a chat completion request.
 
@@ -237,6 +236,7 @@ class ChatService:
             RuntimeError: engine inference failure.
         """
         routed_model, engine = self._resolve_engine(request)
+        self._enforce_deterministic(request)
         admitted = await self._admission.admit(routed_model, request, engine)
         effective_request = request.model_copy(
             update={"max_tokens": admitted.effective_max_tokens}
@@ -312,6 +312,7 @@ class ChatService:
         is covered by the same, single release call site.
         """
         routed_model, engine = self._resolve_engine(request)
+        self._enforce_deterministic(request)
         admitted = await self._admission.admit(routed_model, request, engine)
         gen: AsyncGenerator[ChatStreamChunk, None] | None = None
         try:

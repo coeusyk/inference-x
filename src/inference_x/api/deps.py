@@ -267,6 +267,12 @@ def initialize_app() -> None:
     _build_router(config_dir, default_model)
     logger.info("Task router ready (default_model=%s)", default_model)
 
+    if settings.deterministic:
+        from inference_x.utils.determinism import ensure_deterministic_mode
+
+        # Fail fast on unsupported hardware before constructing engines (C3).
+        ensure_deterministic_mode(require=True)
+
     pool = _build_engine_pool(config_dir, tuple(loaded_models))
     if not pool.all_healthy():
         unhealthy = [n for n, s in pool.health_status().items() if s != "ok"]
@@ -275,6 +281,22 @@ def initialize_app() -> None:
         )
 
     logger.info("Engine pool ready: %s", pool.loaded_models())
+
+
+async def warm_deterministic_if_configured() -> None:
+    """App-level deterministic warmup after engines are up (design.md D3).
+
+    Called from the async lifespan so we never nest ``run_until_complete`` inside
+    an already-running event loop.
+    """
+    settings = get_settings()
+    if not settings.deterministic:
+        return
+    from inference_x.utils.determinism import warm_deterministic_engine
+
+    pool = _build_engine_pool(settings.config_dir, tuple(settings.loaded_models))
+    engine = pool.get(settings.loaded_models[0])
+    await warm_deterministic_engine(engine)
 
 
 def shutdown_app() -> None:

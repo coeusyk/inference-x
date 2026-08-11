@@ -96,6 +96,13 @@ class AppSettings:
             os.environ.get("INFERENCE_X_MAX_QUEUED_BATCH_MULTIPLIER", "8")
         )
 
+        # Phase C C3: process-wide deterministic / batch-invariant mode.
+        # When true, startup enables VLLM_BATCH_INVARIANT before engine
+        # construction (SM ≥ 8.0) or fails fast on unsupported hardware.
+        self.deterministic: bool = os.environ.get(
+            "INFERENCE_X_DETERMINISTIC", ""
+        ).strip().lower() in ("1", "true", "yes")
+
     def get_model_config(self, model_name: str | None = None) -> dict[str, Any]:
         """Return the config block for *model_name* from models.yaml.
 
