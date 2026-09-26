@@ -172,6 +172,24 @@ The new entry is `qwen2.5-coder-1.5b`: `Qwen/Qwen2.5-Coder-1.5B-Instruct`,
 - About 3.1 GB bf16 weights, which fits the 6 GiB laptop with KV headroom.
 - It is a live-validation target only. Unit tests use stubs.
 
+## D10 — HF preflight fails open (found during live validation)
+
+`preflight_hf_access` called the Hub API (`model_info`) on every start. A
+local server could therefore not start at all, even with fully cached weights,
+in either of two cases:
+
+- **Offline mode:** `HF_HUB_OFFLINE=1` raised `OfflineModeIsEnabled`.
+- **Network drop:** a failed DNS lookup raised `httpx.ConnectError`.
+
+Both happened on 2026-09-26. The preflight exists only to fail fast on gated
+or private repos, so it is advisory:
+
+- In offline mode it is skipped.
+- A transport error is downgraded to a warning, and vLLM then loads from the
+  cache or fails with its own error.
+
+Gated and not-found handling is unchanged.
+
 ## Risks
 
 - **Clients that relied on 422 or on silent dropping** now get 400. Mitigation: the

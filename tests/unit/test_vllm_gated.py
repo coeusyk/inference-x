@@ -57,6 +57,25 @@ def test_preflight_no_probe_for_public_ungated_hub_model():
     dl.assert_not_called()
 
 
+def test_preflight_skipped_in_offline_mode(monkeypatch):
+    """V1-0: cached models must start with HF_HUB_OFFLINE=1 — no Hub call at all."""
+    monkeypatch.setattr("huggingface_hub.constants.HF_HUB_OFFLINE", True)
+    with mock.patch("huggingface_hub.model_info") as mi:
+        preflight_hf_access("qwen", "Qwen/Qwen2.5-0.5B-Instruct", token=None)
+    mi.assert_not_called()
+
+
+def test_preflight_fails_open_when_hub_unreachable(monkeypatch):
+    """V1-0: a network failure is advisory, not a startup error."""
+    import httpx
+
+    monkeypatch.setattr("huggingface_hub.constants.HF_HUB_OFFLINE", False)
+    with mock.patch(
+        "huggingface_hub.model_info", side_effect=httpx.ConnectError("name resolution")
+    ):
+        preflight_hf_access("qwen", "Qwen/Qwen2.5-0.5B-Instruct", token=None)
+
+
 def test_preflight_gated_without_token_fails_fast():
     from huggingface_hub.errors import GatedRepoError
 

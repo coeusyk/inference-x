@@ -200,8 +200,13 @@ def preflight_hf_access(
         return
 
     try:
-        from huggingface_hub import hf_hub_download, model_info
-        from huggingface_hub.errors import GatedRepoError, RepositoryNotFoundError
+        import httpx
+        from huggingface_hub import constants, hf_hub_download, model_info
+        from huggingface_hub.errors import (
+            GatedRepoError,
+            OfflineModeIsEnabled,
+            RepositoryNotFoundError,
+        )
     except ImportError:
         logger.warning(
             "huggingface_hub not available; skipping HF preflight for %s",
@@ -209,8 +214,23 @@ def preflight_hf_access(
         )
         return
 
+    # V1-0: the preflight is an advisory fast-fail for gated/private repos, not a
+    # startup requirement. Offline mode or an unreachable Hub must not stop a
+    # model whose weights are already cached — vLLM then loads from the cache
+    # or fails with its own error. Fail open with a log, like other advisory
+    # signals (DEC-047 §4).
+    if constants.HF_HUB_OFFLINE:
+        logger.info("HF_HUB_OFFLINE set; skipping HF preflight for %s", model_path)
+        return
     try:
         info = model_info(model_path, token=token)
+    except (OfflineModeIsEnabled, httpx.TransportError) as exc:
+        logger.warning(
+            "HF preflight for %s skipped: Hub unreachable (%s); relying on local cache",
+            model_path,
+            exc,
+        )
+        return
     except RepositoryNotFoundError:
         raise RuntimeError(
             f"Model '{model_path}' not found on HuggingFace. "
