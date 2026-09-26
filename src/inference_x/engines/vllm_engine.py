@@ -635,6 +635,8 @@ class VLLMEngine(BaseEngine):
         # Do not normalize backend sentinels (e.g. -1).
         if request.seed is not None:
             kwargs["seed"] = request.seed
+        if request.stop is not None:
+            kwargs["stop"] = [request.stop] if isinstance(request.stop, str) else request.stop
         return SamplingParams(**kwargs)
 
     def _stream_prompt(self, request: ChatCompletionRequest) -> str:

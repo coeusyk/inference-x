@@ -154,6 +154,7 @@ def _build_manifest(
         seed=resolved.seed,
         max_tokens=original_request.max_tokens,
         resolved_max_tokens=resolved.max_tokens,
+        stop=resolved.stop,
     )
 
     manifest_request = ManifestRequestInfo(
@@ -279,7 +280,13 @@ class ChatService:
             warnings=warnings,
             response=response,
         )
-        return response.model_copy(update={"run_id": manifest.run_id})
+        # V1-0: the full manifest rides the body only on request (include_manifest).
+        return response.model_copy(
+            update={
+                "run_id": manifest.run_id,
+                "manifest": manifest if request.include_manifest else None,
+            }
+        )
 
     async def stream_response(
         self, request: ChatCompletionRequest

@@ -97,12 +97,66 @@ class TestContextCeiling:
 class TestPromptTooLong:
     async def test_prompt_alone_exceeding_ceiling_raises_400_class(self):
         controller = AdmissionController(_registry(max_model_len=8))
-        with pytest.raises(ContextTooLongError, match="Prompt is 10 tokens"):
+        # V1-0: OpenAI wording, so litellm/Aider recognize a context-window error.
+        with pytest.raises(
+            ContextTooLongError,
+            match="This model's maximum context length is 8 tokens.*10 tokens",
+        ):
             await controller.admit("m", _req(), _FakeEngine(prompt_tokens=10))
 
     def test_context_too_long_is_a_value_error(self):
-        """ContextTooLongError must subclass ValueError to hit the sanitized 400 handler."""
+        """Still a ValueError (400 family); its own handler adds the error code."""
         assert issubclass(ContextTooLongError, ValueError)
+
+
+class TestOmittedMaxTokens:
+    """V1-0 (DEC-063): no max_tokens means the remaining context window."""
+
+    async def test_resolves_to_remaining_context_without_warning(self):
+        controller = AdmissionController(
+            _registry(max_model_len=8192), tier=_FakeTier(max_model_len_cap=8192)
+        )
+        result = await controller.admit("m", _req(), _FakeEngine(prompt_tokens=5000))
+        assert result.effective_max_tokens == 3192
+        assert not [w for w in result.warnings if w.type == "substituted"]
+
+    async def test_no_room_left_is_rejected(self):
+        controller = AdmissionController(
+            _registry(max_model_len=8192), tier=_FakeTier(max_model_len_cap=8192)
+        )
+        with pytest.raises(ContextTooLongError, match="maximum context length is 8192"):
+            await controller.admit("m", _req(), _FakeEngine(prompt_tokens=8190))
+
+    async def test_kv_gate_still_applies_to_resolved_budget(self):
+        controller = AdmissionController(
+            _registry(max_model_len=8192), tier=_FakeTier(max_model_len_cap=8192)
+        )
+        result = await controller.admit(
+            "m", _req(), _FakeEngine(prompt_tokens=1000, kv_capacity_tokens=4000)
+        )
+        # budget 4000 * 0.9 = 3600 - 1000 prompt = 2600 < 7192 -> clamped with a warning
+        assert result.effective_max_tokens == 2600
+        assert [w.code for w in result.warnings] == ["max_tokens_clamped_to_kv_budget"]
+
+
+class TestTierComposition:
+    """DEC-064: tier cap composes with max_num_seqs as a KV-budget envelope."""
+
+    async def test_concurrency_traded_for_context(self):
+        controller = AdmissionController(
+            _registry(max_model_len=8192, max_num_seqs=1),
+            tier=_FakeTier(max_model_len_cap=2048, max_num_seqs=4),
+        )
+        result = await controller.admit("m", _req(), _FakeEngine(prompt_tokens=5000))
+        assert result.effective_max_tokens == 3192
+
+    async def test_trade_not_made_keeps_tier_cap(self):
+        controller = AdmissionController(
+            _registry(max_model_len=8192),
+            tier=_FakeTier(max_model_len_cap=2048, max_num_seqs=4),
+        )
+        with pytest.raises(ContextTooLongError, match="maximum context length is 2048"):
+            await controller.admit("m", _req(), _FakeEngine(prompt_tokens=5000))
 
 
 class TestClampVsReject:

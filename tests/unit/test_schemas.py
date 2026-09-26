@@ -84,7 +84,8 @@ class TestChatCompletionRequest:
         )
         assert req.model == "test-model"
         assert req.temperature == 0.7
-        assert req.max_tokens == 512
+        # V1-0: absent max_tokens means "remaining context" (resolved by admission).
+        assert req.max_tokens is None
         assert req.stream is False
 
     def test_temperature_bounds(self):
@@ -111,21 +112,59 @@ class TestChatCompletionRequest:
                 max_tokens=0,
             )
 
-    def test_max_tokens_exceeds_4096_raises(self):
+    def test_large_max_tokens_is_accepted(self):
+        # V1-0 (DEC-063): the context gate is the bound, not a fixed 4096 cap.
+        req = ChatCompletionRequest(
+            model="m",
+            messages=[ChatMessage(role="user", content="x")],
+            max_tokens=6000,
+        )
+        assert req.max_tokens == 6000
+
+    def test_content_exceeds_max_length_raises(self):
+        with pytest.raises(ValidationError):
+            ChatMessage(role="user", content="x" * 1_000_001)
+
+    def test_content_at_max_length_is_valid(self):
+        msg = ChatMessage(role="user", content="x" * 1_000_000)
+        assert len(msg.content) == 1_000_000
+
+    def test_long_session_message_count_is_accepted(self):
+        msgs = [ChatMessage(role="user", content="x")] * 120
+        assert len(ChatCompletionRequest(model="m", messages=msgs).messages) == 120
+
+    def test_unknown_request_field_is_rejected(self):
+        with pytest.raises(ValidationError):
+            ChatCompletionRequest.model_validate(
+                {"model": "m", "messages": [{"role": "user", "content": "x"}], "n": 2}
+            )
+
+    def test_unknown_message_field_is_rejected(self):
+        with pytest.raises(ValidationError):
+            ChatMessage.model_validate({"role": "user", "content": "x", "name": "bob"})
+
+    @pytest.mark.parametrize("stop", ["\n\n", ["a"], ["a", "b", "c", "d"]])
+    def test_valid_stop_is_accepted(self, stop):
+        req = ChatCompletionRequest(
+            model="m", messages=[ChatMessage(role="user", content="x")], stop=stop
+        )
+        assert req.stop == stop
+
+    @pytest.mark.parametrize("stop", ["", [], ["a", "b", "c", "d", "e"], ["a", ""]])
+    def test_invalid_stop_is_rejected(self, stop):
+        with pytest.raises(ValidationError):
+            ChatCompletionRequest(
+                model="m", messages=[ChatMessage(role="user", content="x")], stop=stop
+            )
+
+    def test_include_manifest_with_stream_is_rejected(self):
         with pytest.raises(ValidationError):
             ChatCompletionRequest(
                 model="m",
                 messages=[ChatMessage(role="user", content="x")],
-                max_tokens=4097,
+                stream=True,
+                include_manifest=True,
             )
-
-    def test_content_exceeds_max_length_raises(self):
-        with pytest.raises(ValidationError):
-            ChatMessage(role="user", content="x" * 32001)
-
-    def test_content_at_max_length_is_valid(self):
-        msg = ChatMessage(role="user", content="x" * 32000)
-        assert len(msg.content) == 32000
 
     def test_temperature_at_boundaries_is_valid(self):
         req_min = ChatCompletionRequest(
@@ -182,7 +221,7 @@ class TestChatCompletionRequest:
 
 
 class TestSchemaConstraintsViaAPI:
-    """Verify that out-of-range values produce HTTP 422 when sent through the API."""
+    """Out-of-range values produce an OpenAI-shaped HTTP 400 (V1-0, DEC-063; was 422)."""
 
     def _client(self) -> TestClient:
         app.dependency_overrides[get_chat_service] = _service
@@ -198,40 +237,33 @@ class TestSchemaConstraintsViaAPI:
             "messages": [{"role": "user", "content": "hello"}],
         }
 
-    def test_temperature_above_2_returns_422(self):
-        client = self._client()
-        payload = self._base_payload()
-        payload["temperature"] = 3.0
-        resp = client.post("/v1/chat/completions", json=payload)
-        assert resp.status_code == 422
+    def _assert_invalid(self, payload: dict, param: str) -> None:
+        resp = self._client().post("/v1/chat/completions", json=payload)
+        assert resp.status_code == 400
+        err = resp.json()["error"]
+        assert err["type"] == "invalid_request_error"
+        assert err["param"] == param
 
-    def test_temperature_below_0_returns_422(self):
-        client = self._client()
-        payload = self._base_payload()
-        payload["temperature"] = -0.5
-        resp = client.post("/v1/chat/completions", json=payload)
-        assert resp.status_code == 422
+    def test_temperature_above_2_returns_400(self):
+        self._assert_invalid({**self._base_payload(), "temperature": 3.0}, "temperature")
 
-    def test_max_tokens_above_4096_returns_422(self):
-        client = self._client()
-        payload = self._base_payload()
-        payload["max_tokens"] = 5000
-        resp = client.post("/v1/chat/completions", json=payload)
-        assert resp.status_code == 422
+    def test_temperature_below_0_returns_400(self):
+        self._assert_invalid({**self._base_payload(), "temperature": -0.5}, "temperature")
 
-    def test_max_tokens_zero_returns_422(self):
-        client = self._client()
-        payload = self._base_payload()
-        payload["max_tokens"] = 0
-        resp = client.post("/v1/chat/completions", json=payload)
-        assert resp.status_code == 422
+    def test_max_tokens_zero_returns_400(self):
+        self._assert_invalid({**self._base_payload(), "max_tokens": 0}, "max_tokens")
 
-    def test_content_exceeds_32000_chars_returns_422(self):
-        client = self._client()
-        payload = self._base_payload()
-        payload["messages"] = [{"role": "user", "content": "x" * 32001}]
-        resp = client.post("/v1/chat/completions", json=payload)
-        assert resp.status_code == 422
+    def test_unknown_field_returns_400_naming_it(self):
+        self._assert_invalid({**self._base_payload(), "n": 2}, "n")
+
+    def test_too_many_stop_sequences_returns_400(self):
+        self._assert_invalid({**self._base_payload(), "stop": list("abcde")}, "stop")
+
+    def test_include_manifest_with_stream_returns_400(self):
+        self._assert_invalid(
+            {**self._base_payload(), "stream": True, "include_manifest": True},
+            "include_manifest",
+        )
 
     def test_valid_request_returns_200(self):
         client = self._client()
@@ -245,12 +277,8 @@ class TestSchemaConstraintsViaAPI:
         resp = client.post("/v1/chat/completions", json=payload)
         assert resp.status_code == 200
 
-    def test_seed_non_integer_returns_422(self):
-        client = self._client()
-        payload = self._base_payload()
-        payload["seed"] = "nope"
-        resp = client.post("/v1/chat/completions", json=payload)
-        assert resp.status_code == 422
+    def test_seed_non_integer_returns_400(self):
+        self._assert_invalid({**self._base_payload(), "seed": "nope"}, "seed")
 
 
 class TestChatCompletionResponse:
@@ -300,7 +328,9 @@ class TestEffectiveRequestSurfaces:
 
     # The two exclusion classes from the derivability rule: message content, and
     # the transport/policy controls. Everything else must appear in `resolved`.
-    _EXCLUDED = {"messages", "stream", "stream_options", "strict", "deterministic"}
+    _EXCLUDED = {
+        "messages", "stream", "stream_options", "strict", "deterministic", "include_manifest"
+    }
 
     def test_resolved_field_set_is_derivable_from_the_request(self):
         """The rule is enforced here rather than in review.
@@ -313,9 +343,12 @@ class TestEffectiveRequestSurfaces:
             set(ChatCompletionRequest.model_fields) - self._EXCLUDED
         )
 
-    def test_deterministic_defaults_to_false_and_is_last(self):
+    def test_deterministic_defaults_to_false_and_precedes_include_manifest(self):
         assert ChatCompletionRequest.model_fields["deterministic"].default is False
-        assert list(ChatCompletionRequest.model_fields)[-1] == "deterministic"
+        assert list(ChatCompletionRequest.model_fields)[-2:] == [
+            "deterministic",
+            "include_manifest",
+        ]
 
     def test_strict_defaults_to_false(self):
         assert ChatCompletionRequest.model_fields["strict"].default is False

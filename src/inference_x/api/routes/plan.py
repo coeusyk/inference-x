@@ -13,7 +13,7 @@ from inference_x.utils.vllm_pool_config import (
     probe_gpu_memory_gib,
     scale_model_config,
 )
-from inference_x.utils.vram_tiers import VramTier
+from inference_x.utils.vram_tiers import VramTier, effective_context
 
 router = APIRouter()
 
@@ -48,6 +48,11 @@ def plan(
             # plan reports no fabricated utilization for it (D2's never-fabricate rule).
             utilization = None
 
+        env = (
+            effective_context(tier, model_entry.max_model_len, model_entry.max_num_seqs)
+            if tier is not None
+            else None
+        )
         entries.append(
             PlanEntry(
                 model=model_entry.name,
@@ -69,6 +74,9 @@ def plan(
                 enable_prefix_caching=config.get("enable_prefix_caching"),
                 max_num_seqs=config.get("max_num_seqs"),
                 max_num_batched_tokens=config.get("max_num_batched_tokens"),
+                context_window=env.max_model_len if env else None,
+                context_composed=env.composed if env else None,
+                context_tier_limited=env.tier_limited if env else None,
             )
         )
     return PlanResponse(models=entries)

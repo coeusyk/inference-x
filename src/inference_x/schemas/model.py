@@ -76,3 +76,9 @@ class ModelObject(BaseModel):
     quantization: Optional[str] = None
     max_model_len: Optional[int] = None
     estimated_weights_gib: Optional[float] = None
+    # DEC-064: effective context ceiling / concurrency on the resolved tier, which
+    # can differ from the configured max_model_len. None when no tier resolved.
+    context_window: Optional[int] = None
+    max_num_seqs: Optional[int] = None
+    context_composed: Optional[bool] = None
+    context_tier_limited: Optional[bool] = None

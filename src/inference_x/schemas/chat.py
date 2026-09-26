@@ -4,12 +4,16 @@ import time
 import uuid
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 
 class ChatMessage(BaseModel):
+    # V1-0 (DEC-063): unknown fields are rejected, never silently dropped.
+    model_config = ConfigDict(extra="forbid")
+
     role: Literal["system", "user", "assistant"]
-    content: str = Field(..., max_length=32_000)
+    # Body-size sanity guard only; the context gate is the real (token) bound.
+    content: str = Field(..., max_length=1_000_000)
 
 
 class StreamOptions(BaseModel):
@@ -27,11 +31,23 @@ class StreamOptions(BaseModel):
 
 
 class ChatCompletionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     model: str
-    messages: list[ChatMessage] = Field(..., min_length=1, max_length=50)
+    messages: list[ChatMessage] = Field(..., min_length=1, max_length=2048)
     temperature: Optional[float] = Field(default=0.7, ge=0.0, le=2.0)
-    max_tokens: Optional[int] = Field(default=512, ge=1, le=4096)
+    max_tokens: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="Output token budget. Absent means the remaining context window "
+        "(context ceiling minus prompt tokens), as in OpenAI's API.",
+    )
     top_p: Optional[float] = Field(default=0.95, ge=0.0, le=1.0)
+    stop: Optional[str | list[str]] = Field(
+        default=None,
+        description="Up to 4 sequences where generation stops; the matched sequence is "
+        "not included in the returned content.",
+    )
     stream: bool = False
     max_context_tokens: Optional[int] = Field(
         default=None,
@@ -42,7 +58,6 @@ class ChatCompletionRequest(BaseModel):
     max_output_tokens: Optional[int] = Field(
         default=None,
         ge=1,
-        le=4096,
         description="Preferred alias for max_tokens; takes precedence over max_tokens "
         "when both are set. Kept max_tokens for OpenAI-client compatibility.",
     )
@@ -80,6 +95,30 @@ class ChatCompletionRequest(BaseModel):
         "8.0). Otherwise returns 400 rather than running non-deterministically "
         "or activating it too late to matter. Distinct from strict (DEC-052).",
     )
+    include_manifest: bool = Field(
+        default=False,
+        description="When true, a non-streaming response carries the full run "
+        "manifest in `manifest` (V1-0). Off by default so ordinary OpenAI clients "
+        "get a lean body; run_id and X-Run-Id are emitted either way.",
+    )
+
+    # Field validators (not a model validator) so the error `loc` — and hence
+    # the OpenAI error `param` — names the offending field.
+    @field_validator("stop")
+    @classmethod
+    def _check_stop(cls, v: str | list[str] | None) -> str | list[str] | None:
+        stops = [v] if isinstance(v, str) else v
+        if stops is not None and (not 1 <= len(stops) <= 4 or not all(stops)):
+            raise ValueError("must be a non-empty string or a list of 1-4 non-empty strings")
+        return v
+
+    @field_validator("include_manifest")
+    @classmethod
+    def _check_include_manifest(cls, v: bool, info: ValidationInfo) -> bool:
+        # `stream` is declared earlier, so it is already in info.data.
+        if v and info.data.get("stream"):
+            raise ValueError("is only supported on non-streaming requests")
+        return v
 
 
 class ResponseWarning(BaseModel):
@@ -128,6 +167,7 @@ class ResolvedRequest(BaseModel):
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
     top_p: Optional[float] = None
+    stop: Optional[str | list[str]] = None
     max_context_tokens: Optional[int] = None
     max_output_tokens: Optional[int] = None
     priority: Literal["interactive", "batch"] = "interactive"
@@ -243,6 +283,7 @@ class ManifestSampling(BaseModel):
     seed: Optional[int] = None
     max_tokens: Optional[int] = None
     resolved_max_tokens: Optional[int] = None
+    stop: Optional[str | list[str]] = None
 
 
 class ManifestRequestInfo(BaseModel):
@@ -372,4 +413,12 @@ class ChatCompletionResponse(BaseModel):
         "engine/model/runtime/sampling/request and each warning's "
         "type/code/field (not hardware, and not a warning's free-text "
         "message) — a comparability guarantee, not a reproducibility one.",
+    )
+    manifest: Optional[RunManifest] = Field(
+        default=None,
+        description="The full run manifest whose run_id is carried above, present only "
+        "when the request set include_manifest (V1-0; supersedes PR #38's always-inline "
+        "design). A client can recompute run_id from this object's own "
+        "engine/model/runtime/sampling/request/warnings fields. The key is omitted "
+        "from the default response body.",
     )

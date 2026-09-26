@@ -26,6 +26,11 @@ class PlanEntry(BaseModel):
     enable_prefix_caching: Optional[bool] = None
     max_num_seqs: Optional[int] = None
     max_num_batched_tokens: Optional[int] = None
+    # DEC-064: the context ceiling admission enforces after composing the entry
+    # with its tier. None when no tier resolved (then no composition happens).
+    context_window: Optional[int] = None
+    context_composed: Optional[bool] = None
+    context_tier_limited: Optional[bool] = None
 
 
 class PlanResponse(BaseModel):

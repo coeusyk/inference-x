@@ -151,3 +151,21 @@ def test_generate_and_stream_share_sampling_builder(capture_sampling_params):
     assert kwargs_complete["seed"] == 7
     # Same builder return type path (captured kwargs constructor).
     assert type(params_complete) is type(params_stream)
+
+
+@pytest.mark.parametrize("stop, expected", [("\n\n", ["\n\n"]), (["a", "b"], ["a", "b"])])
+def test_stop_forwarded_as_list(capture_sampling_params, stop, expected):
+    """V1-0: `stop` reaches the sampler, normalized to a list at the boundary."""
+    engine = _engine_with_config(instruction_tuned=True)
+    request = ChatCompletionRequest(
+        model="m", messages=[ChatMessage(role="user", content="hi")], stop=stop
+    )
+    engine._sampling_params(request)
+    assert capture_sampling_params.last_kwargs["stop"] == expected
+
+
+def test_stop_omitted_when_absent(capture_sampling_params):
+    engine = _engine_with_config(instruction_tuned=True)
+    request = ChatCompletionRequest(model="m", messages=[ChatMessage(role="user", content="hi")])
+    engine._sampling_params(request)
+    assert "stop" not in capture_sampling_params.last_kwargs

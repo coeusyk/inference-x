@@ -156,7 +156,9 @@ class TestChatService:
         resp = await svc.complete(self._req())
         assert resp.resolved is not None
         assert resp.resolved.model == "test"
-        assert resp.resolved.max_tokens == 512
+        # V1-0: omitted max_tokens resolves to the remaining context (4096 cap - 1
+        # prompt token), not a fixed 512 — and resolved reports what actually ran.
+        assert resp.resolved.max_tokens == 4095
         # The stub engine builds its response without either field.
         assert isinstance(resp.warnings, list)
 

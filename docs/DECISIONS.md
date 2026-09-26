@@ -2255,3 +2255,120 @@ Use this document to capture non-obvious design decisions as the project evolves
   merged into the live spec via this change's `MODIFIED Requirements` delta
   on archive. Does not modify or reopen DEC-053's `resolved`-block or
   `ResponseWarning` contracts.
+
+### DEC-063
+- Date: 2026-09-26
+- Status: accepted
+- Title: Aider-driven OpenAI serving surface; the full run manifest becomes
+  opt-in (V1-0, `complete-openai-serving-surface`)
+- Context: v1.0 re-centers InferenceX on being a local server a real coding
+  client can use (`docs/INFERENCEX-EVOLUTION.md` §9). Aider 0.86.2 traffic was
+  captured against a logging stub. Every request was `{model, messages,
+  stream?, temperature: 0}`, and none carried `max_tokens`, `stop`, or tools.
+  Against it the server had five defects:
+  - An omitted `max_tokens` became 512, truncating whole-file edits.
+  - DEC-025's caps (≤ 50 messages, ≤ 32k chars per message, `max_tokens` ≤
+    4096) break a long session or a two-file chat.
+  - `ContextTooLongError` was sanitized to "Request could not be processed."
+    litellm recognizes context overflow only by the phrase "maximum context
+    length".
+  - Unknown OpenAI fields (`stop`, `n`, …) were silently dropped by pydantic,
+    contrary to the never-lie principle (DEC-052/053).
+  - Validation errors used FastAPI's `422 {"detail": …}`.
+
+  PR #38 (C5) had put the full manifest in every response. The owner decided
+  (2026-09-26) that only the manifest becomes opt-in.
+- Decision:
+  1. **Unknown fields are rejected** (`extra="forbid"` on the request and the
+     message), with HTTP 400 naming the field. There is no "harmless"
+     allowlist; a field is added only when an acceptance client proves it
+     needs it.
+  2. **Validation errors use the OpenAI envelope**: 400,
+     `invalid_request_error`, and `param` set to the field. `ErrorDetail`
+     gains an optional `param`.
+  3. **`stop`** is a string or a list of 1–4 non-empty strings, forwarded to
+     `SamplingParams`. It is echoed in `resolved` and in
+     `manifest.sampling.stop`.
+  4. **An omitted `max_tokens` resolves to the remaining context** (ceiling −
+     prompt). No warning is emitted, because nothing was substituted. The KV
+     gate and `strict` still apply. There is no fixed output cap.
+  5. **Bounds are token-based via the context gate.** Messages are capped at
+     2048 and content at 1,000,000 chars, as body-size guards only.
+  6. **`ContextTooLongError` returns 400** with `context_length_exceeded` and
+     OpenAI-worded text. **`StrictModeViolationError` returns 400** with
+     `strict_violation` and its real message. Both messages carry only
+     token counts and model names.
+  7. **Full manifest is opt-in** via `include_manifest: true`, on
+     non-streaming requests only (400 with `stream`). The default body has
+     no `manifest` key. `timing`, `resolved`, `warnings`, `run_id`, and
+     `X-Run-Id` are unchanged. PR #38 is closed as superseded; its
+     reconstruction test was ported.
+- Alternatives considered:
+  - **Silently ignoring harmless OpenAI fields.** Rejected: harmlessness is a
+    claim about client intent the server cannot verify.
+  - **Making all InferenceX extension fields opt-in.** Rejected by the owner
+    as an unnecessary break for existing consumers. Revisit only on client
+    evidence.
+  - **A header-based manifest opt-in.** Rejected in favor of a request field,
+    matching `strict` and `deterministic`.
+- Consequences:
+  - Positive: Aider's real request shape is served. Context errors are
+    actionable in Aider. Nothing is silently dropped.
+  - Negative (contract change): validation errors go from 422 to 400 with a
+    new body shape; previously ignored fields now return 400; an omitted
+    `max_tokens` is no longer 512.
+  - Omitted-`max_tokens` requests reserve prompt + remaining context in the
+    KV tracker. That is the honest worst case, and it serializes earlier on
+    multi-sequence models.
+  - Varex sends only `model`/`messages`/`max_tokens` and is unaffected.
+- Supersession: Supersedes DEC-025's request caps and, for three error
+  classes whose messages carry no internals, its error sanitization. DEC-025
+  otherwise stands. Resolves add-run-manifest D5 (manifest delivery) as
+  opt-in body delivery.
+
+### DEC-064
+- Date: 2026-09-26
+- Status: accepted
+- Title: The VRAM tier context cap composes with concurrency as a KV-budget
+  envelope (V1-0, `complete-openai-serving-surface`)
+- Context: The 6gb tier's `max_model_len_cap: 2048` was applied as an
+  unconditional per-model ceiling in admission (`_context_ceiling`). Aider's
+  system prompt plus repo map is about 5k tokens, so Aider could not run on
+  the 6 GiB dev laptop at all. Tracing the vLLM path showed several things:
+  - The tier cap never reaches vLLM. `VLLMEngine` passes the entry's own
+    `max_model_len` and the tier-composed `max_num_seqs`.
+  - vLLM sizes the KV pool from `gpu_memory_utilization`, not from
+    `max_model_len × max_num_seqs`, and refuses to start if one
+    `max_model_len` sequence does not fit.
+  - Admission's KV gate reserves per request against the measured
+    `kv_capacity_tokens`.
+  - `/v1/models` reported the configured `max_model_len` (8192) while
+    admission enforced 2048 — silently.
+- Decision: owner decision, 2026-09-26.
+  - `max_model_len_cap × tier.max_num_seqs` is a policy envelope on
+    concurrent context tokens.
+  - A model entry may exceed the per-sequence cap only if `max_model_len ×
+    effective max_num_seqs` stays within that envelope (for example 8192 × 1
+    on 6gb, which equals 2048 × 4). Otherwise the cap applies, as before.
+  - `utils/vram_tiers.effective_context()` is the single source.
+    `AdmissionController._context_ceiling`, `/v1/models`, and `/v1/plan` all
+    use it.
+  - `/v1/models` and `/v1/plan` report `context_window`, `max_num_seqs`,
+    `context_composed`, and `context_tier_limited`.
+  - A new entry, `qwen2.5-coder-1.5b` (8192 context, 1 sequence), is the
+    Aider acceptance model.
+- Alternatives considered:
+  - **Raising the 6gb cap globally.** Rejected: it quarters concurrency for
+    every model.
+  - **Deferring Aider to the llama.cpp path (V1-1).** Rejected: it leaves the
+    V1-0 exit test unrunnable on the dev laptop.
+- Consequences:
+  - The envelope is explicitly *not* a VRAM figure. The physical guarantees
+    remain vLLM's startup KV check and admission's measured KV gate, both
+    unchanged.
+  - A tier-limited model is now reported rather than silently clamped.
+  - A composed model runs one sequence at a time.
+- Supersession: Amends the tier contract of the Phase 7/8 VRAM-tier and
+  admission decisions (DEC-037/038) from independent hard ceilings to a
+  composed envelope. `apply_tier_knobs` and the other tier knobs are
+  unchanged.

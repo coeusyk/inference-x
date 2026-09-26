@@ -1,9 +1,14 @@
 import logging
 
 from fastapi import Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from inference_x.routing.admission import EngineSaturatedError
+from inference_x.routing.admission import (
+    ContextTooLongError,
+    EngineSaturatedError,
+    StrictModeViolationError,
+)
 from inference_x.schemas.common import ErrorDetail, ErrorResponse
 from inference_x.utils.determinism import DeterminismUnsupportedError
 
@@ -32,6 +37,56 @@ async def value_error_handler(request: Request, exc: ValueError) -> JSONResponse
             )
         ).model_dump(),
     )
+
+
+def _invalid_request(message: str, *, param: str | None = None, code: str | None = None) -> JSONResponse:
+    return JSONResponse(
+        status_code=400,
+        content=ErrorResponse(
+            error=ErrorDetail(
+                message=message, type="invalid_request_error", param=param, code=code
+            )
+        ).model_dump(),
+    )
+
+
+async def request_validation_error_handler(
+    request: Request, exc: RequestValidationError
+) -> JSONResponse:
+    """Schema validation failure → OpenAI-shaped 400 instead of FastAPI's 422 (DEC-063).
+
+    Pydantic's messages name only the field and the constraint — no internals —
+    so they are returned as-is; `param` is the first error's location with the
+    leading `body` segment dropped.
+    """
+    errors = exc.errors()
+    first = errors[0] if errors else {}
+    loc = [str(p) for p in first.get("loc", ()) if p != "body"]
+    param = ".".join(loc) or None
+    msg = str(first.get("msg", "Invalid request."))
+    if first.get("type") == "extra_forbidden":
+        msg = "Unsupported parameter"
+    logger.warning("Request validation failed on %s: %s", request.url.path, errors)
+    return _invalid_request(f"{param}: {msg}" if param else msg, param=param)
+
+
+async def context_too_long_error_handler(
+    request: Request, exc: ContextTooLongError
+) -> JSONResponse:
+    """Context overflow: real message + OpenAI's `context_length_exceeded` code.
+
+    The message follows OpenAI's wording so clients (litellm/Aider) recognize
+    it as a context-window error. It names only token counts and the model.
+    """
+    logger.warning("ContextTooLongError on %s: %s", request.url.path, exc)
+    return _invalid_request(str(exc), code="context_length_exceeded")
+
+
+async def strict_violation_error_handler(
+    request: Request, exc: StrictModeViolationError
+) -> JSONResponse:
+    logger.warning("StrictModeViolationError on %s: %s", request.url.path, exc)
+    return _invalid_request(str(exc), code="strict_violation")
 
 
 async def determinism_unsupported_error_handler(
