@@ -222,7 +222,7 @@ V1-0  Aider-compatible serving surface (+ opt-in full manifest)
   |
       vLLM 0.30.0 qualification (done, GO, #44; runtime baseline, not a feature)
   |
-V1-1  llama.cpp backend (external llama-server, behind the Engine Boundary)
+V1-1  llama.cpp backend (external llama-server, behind the Engine Boundary) (done, #46)
   |
 V1-2  model lifecycle supervisor (above B6's one-model-per-process)
   |
@@ -234,7 +234,9 @@ v1.0.0
 V1-5  Varex consumer validation — parallel, non-gating
 ```
 
-The vLLM 0.30.0 qualification finished on 2026-09-27 with a GO, and #44 pins vLLM to exactly 0.30.0 as the v1.0 runtime baseline. It was run as its own compatibility change, not combined with any feature. The matrix, the performance baseline against 0.22.1 and the regressions it found live in the `qualify-vllm-0-30` OpenSpec change and in DEC-066 (the decision that makes 0.30.0 the exactly pinned, qualified baseline). Admission restoration stays deferred under the triggers in 10.3; finishing the qualification satisfies only the precondition there, not a trigger. V1-1, the llama.cpp backend, is the next core milestone.
+The vLLM 0.30.0 qualification finished on 2026-09-27 with a GO, and #44 pins vLLM to exactly 0.30.0 as the v1.0 runtime baseline. It was run as its own compatibility change, not combined with any feature. The matrix, the performance baseline against 0.22.1 and the regressions it found live in the `qualify-vllm-0-30` OpenSpec change and in DEC-066 (the decision that makes 0.30.0 the exactly pinned, qualified baseline). Admission restoration stays deferred under the triggers in 10.3; finishing the qualification satisfies only the precondition there, not a trigger.
+
+V1-1 finished on 2026-09-27 (#46; the `add-llama-cpp-backend` OpenSpec change and DEC-067, the decision that makes llama.cpp the second backend). GGUF models are served by an external `llama-server` that InferenceX owns, through the same endpoint, with per-backend planning and a manifest that records the llama.cpp build and the GGUF file's sha256. Qwen2.5-Coder-7B Q4_K_M passed Aider 7/7 at 8192 context on the 8 GiB card, where vLLM's AWQ 7B fits only 4096. What it deliberately left out (GGUF tool calling, more than one sequence per server, deterministic mode, prompt caching, and the vLLM pinned-memory probe that still runs in GGUF processes) is listed in that change's design. V1-2, the model lifecycle supervisor, is next.
 
 Invariants carried forward:
 
@@ -356,7 +358,7 @@ Candidate decision thresholds, **an experimental proposal only**, not architectu
 | Crash isolation not validated (B6 follow-up) | Validate before v1.0 (V1-2/V1-4) |
 | Free-VRAM probe relies on `nvidia-smi` (B6) | OK for vLLM; llama.cpp / CPU / non-NVIDIA must degrade honestly |
 | No runtime model switching | v1.0 blocker (V1-2) |
-| vLLM only | v1.0 blocker (V1-1) |
+| vLLM only | Resolved by V1-1 (#46): llama.cpp through external `llama-server` |
 | No operator CLI | v1.0 blocker (V1-3) |
 | Thin API compatibility / silent field dropping | v1.0 blocker (V1-0) |
 | Determinism is vLLM-only and partial | Capability-scoped; unsupported → refuse / report |
