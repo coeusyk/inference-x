@@ -602,13 +602,17 @@ def _manifest(req: ChatCompletionRequest):
 
 
 def _documented_preimage(manifest) -> dict:
-    """The preimage rule as documented (add-run-manifest D2 + DEC-065)."""
+    """The preimage rule as documented (add-run-manifest D2 + DEC-065 +
+    add-llama-cpp-backend D6)."""
     request = manifest.request.model_dump()
     if request["tools_sha256"] is None:
         del request["tools_sha256"]
+    model = manifest.model.model_dump()
+    if model["gguf_file"] is None:
+        del model["gguf_file"]
     return {
         "engine": manifest.engine.model_dump(),
-        "model": manifest.model.model_dump(),
+        "model": model,
         "runtime": manifest.runtime.model_dump(),
         "sampling": manifest.sampling.model_dump(),
         "request": request,

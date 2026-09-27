@@ -8,7 +8,7 @@ from fastapi import Depends
 
 from inference_x.core.settings import AppSettings, get_settings
 from inference_x.engines.pool import EnginePool
-from inference_x.engines.vllm_engine import VLLMEngine
+from inference_x.engines.registry import create_engine
 from inference_x.observability.exporters import build_exporter
 from inference_x.observability.recorder import MetricsRecorder
 from inference_x.observability.storage import InMemoryStorage
@@ -18,11 +18,7 @@ from inference_x.routing.variant_selector import select_variant
 from inference_x.services.chat_service import ChatService
 from inference_x.services.metrics_service import MetricsService
 from inference_x.services.model_service import ModelRegistry
-from inference_x.utils.vllm_pool_config import (
-    apply_tier_knobs,
-    probe_gpu_memory_gib,
-    validate_model_fits,
-)
+from inference_x.utils.vllm_pool_config import probe_gpu_memory_gib
 from inference_x.utils.vram_tiers import VramTier
 
 logger = logging.getLogger(__name__)
@@ -82,7 +78,7 @@ def _resolve_loaded_model_names(
 
 @lru_cache(maxsize=1)
 def _build_engine_pool(config_dir: str, loaded_models: tuple[str, ...]) -> EnginePool:
-    """Build an EnginePool with exactly one VLLMEngine for the configured model.
+    """Build an EnginePool with exactly one engine for the configured model.
 
     B6 (Option A, docs/DECISIONS.md DEC-059): each server process serves
     exactly one model. Multi-model serving is achieved by running one
@@ -111,10 +107,15 @@ def _build_engine_pool(config_dir: str, loaded_models: tuple[str, ...]) -> Engin
         )
 
     model_name = distinct_models[0]
-    model_config = apply_tier_knobs(registry.get(model_name).model_dump(), tier)
-    validate_model_fits(model_config, total_vram_gib=total_vram, free_vram_gib=free_gib)
-    logger.info("Loading engine for model=%s", model_name)
-    engine = VLLMEngine(model_config, free_vram_gib=free_gib, total_vram_gib=total_gib)
+    entry = registry.get(model_name)
+    if entry.engine != "vllm" and get_settings().deterministic:
+        # Deterministic mode is vLLM batch invariance; nothing equivalent is
+        # wired for other backends (add-llama-cpp-backend D7).
+        raise ValueError(
+            f"INFERENCE_X_DETERMINISTIC=1 is only supported for vLLM models; "
+            f"'{model_name}' uses engine {entry.engine}"
+        )
+    engine = create_engine(entry, tier, free_gib, total_gib)
     return EnginePool({model_name: engine})
 
 

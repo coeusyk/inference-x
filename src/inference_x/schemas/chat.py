@@ -339,10 +339,12 @@ class ManifestEngine(BaseModel):
 class ManifestModel(BaseModel):
     """`model` block of the run manifest.
 
-    `hf_revision` and `weights_sha256` are always `None` in this capability
-    — their completeness/degradation policy is explicitly open
-    (add-run-manifest design.md D4) — present in the schema, never
-    fabricated, deferred rather than guessed.
+    For vLLM runs `hf_revision` and `weights_sha256` are always `None`: their
+    completeness/degradation policy is explicitly open (add-run-manifest
+    design.md D4), so they are present in the schema, never fabricated, and
+    deferred rather than guessed. llama.cpp runs fill them from the GGUF file actually loaded:
+    the snapshot revision it was resolved from and the sha256 of its bytes
+    (add-llama-cpp-backend D6).
     """
 
     registry_name: str
@@ -351,6 +353,9 @@ class ManifestModel(BaseModel):
     weights_sha256: Optional[str] = None
     quantization: Optional[str] = None
     dtype: Optional[str] = None
+    # GGUF file name for llama.cpp runs (add-llama-cpp-backend D6). Enters the
+    # run_id preimage only when set, so vLLM run_ids keep their shape.
+    gguf_file: Optional[str] = None
 
 
 class ManifestRuntime(BaseModel):

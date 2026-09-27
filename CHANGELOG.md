@@ -8,6 +8,20 @@ refactors with no observable behavior change are not listed — see
 
 ### Added
 
+- **llama.cpp backend for GGUF models.** A `config/models.yaml` entry with
+  `engine: llama_cpp` is served by an external `llama-server` that InferenceX
+  starts, health-checks and stops, behind the same `/v1/chat/completions`
+  endpoint. Two entries ship: `qwen2.5-0.5b-gguf` and `qwen2.5-coder-7b-gguf`
+  (8192-token context in about 5.3 GiB on an 8 GiB card). Tool calling and
+  deterministic mode are not supported on these models, and `timing` is null
+  because llama-server doesn't measure queue time. The run manifest records the
+  llama.cpp build and the GGUF file's repo, revision, name and sha256.
+  `/v1/plan` and `/v1/doctor` report a `backend` per model and plan GGUF
+  models with llama.cpp's own fitter. Set `INFERENCE_X_LLAMA_SERVER` to the
+  binary, or put `llama-server` on `PATH`.
+- **503 `engine_unavailable`** when a model's backend process has stopped,
+  with `/health` returning 503, instead of a generic 500.
+
 - **Streaming tool calling for Continue.** `POST /v1/chat/completions` accepts
   OpenAI function `tools` on streaming requests, assistant `tool_calls`, and
   `role: "tool"` results, for models that declare `tool_call_parser` in

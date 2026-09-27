@@ -8,6 +8,12 @@ from inference_x.schemas.chat import (
 )
 
 
+class EngineUnavailableError(RuntimeError):
+    """The backend behind a loaded engine has stopped (for example its server
+    process exited). Mapped to HTTP 503 `engine_unavailable`. Backend-neutral:
+    any engine whose execution runs outside this process can hit it."""
+
+
 class BaseEngine(ABC):
     """The Engine Boundary. All inference implementations must satisfy this interface.
 

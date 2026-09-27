@@ -2,15 +2,30 @@ from __future__ import annotations
 
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class ModelEntry(BaseModel):
     """Metadata for one configured model, as loaded from models.yaml."""
 
     name: str
-    engine: Literal["vllm"] = "vllm"
+    engine: Literal["vllm", "llama_cpp"] = "vllm"
     model_path: str
+    gguf_file: Optional[str] = Field(
+        default=None,
+        description=(
+            "llama_cpp only: the GGUF file inside the Hugging Face repo named by "
+            "model_path. Unset when model_path is a local .gguf file"
+        ),
+    )
+    n_gpu_layers: Optional[int] = Field(
+        default=None,
+        ge=-1,
+        description=(
+            "llama_cpp only: layers to offload to the GPU (-1 = all). Unset lets "
+            "llama-server fit them to free VRAM"
+        ),
+    )
     family: Optional[str] = Field(
         default=None,
         description=(
@@ -77,6 +92,36 @@ class ModelEntry(BaseModel):
         if not 0.0 <= value <= 1.0:
             raise ValueError("gpu_memory_utilization must be between 0.0 and 1.0")
         return value
+
+    @model_validator(mode="after")
+    def _check_backend_fields(self) -> "ModelEntry":
+        """Reject settings the entry's backend would ignore (add-llama-cpp-backend D3)."""
+        if self.engine == "vllm":
+            wrong = {"gguf_file", "n_gpu_layers"} & self.model_fields_set
+            if wrong:
+                raise ValueError(f"{sorted(wrong)} apply only to engine: llama_cpp")
+            return self
+        wrong = {
+            "gpu_memory_utilization",
+            "max_num_batched_tokens",
+            "quantization",
+            "tool_call_parser",
+        } & self.model_fields_set
+        if wrong:
+            raise ValueError(f"{sorted(wrong)} are not supported for engine: llama_cpp")
+        if self.max_model_len is None:
+            raise ValueError("engine: llama_cpp requires max_model_len")
+        if self.max_num_seqs is None:
+            self.max_num_seqs = 1
+        elif self.max_num_seqs != 1:
+            raise ValueError("engine: llama_cpp serves one sequence per process (max_num_seqs: 1)")
+        is_local = self.model_path.endswith(".gguf")
+        if is_local == (self.gguf_file is not None):
+            raise ValueError(
+                "engine: llama_cpp needs either a local .gguf model_path, or a Hugging "
+                "Face repo id in model_path plus gguf_file"
+            )
+        return self
 
 
 class ModelList(BaseModel):

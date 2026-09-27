@@ -4,6 +4,7 @@ from fastapi import Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from inference_x.engines.base import EngineUnavailableError
 from inference_x.routing.admission import (
     ContextTooLongError,
     EngineSaturatedError,
@@ -118,6 +119,20 @@ async def determinism_unsupported_error_handler(
                 type="invalid_request_error",
                 code="deterministic_unsupported",
             )
+        ).model_dump(),
+    )
+
+
+async def engine_unavailable_error_handler(
+    request: Request, exc: EngineUnavailableError
+) -> JSONResponse:
+    """The engine's backend has stopped (add-llama-cpp-backend D7). A 503, not a
+    500: the request was fine and the server cannot run anything right now."""
+    logger.error("EngineUnavailableError on %s: %s", request.url.path, exc)
+    return JSONResponse(
+        status_code=503,
+        content=ErrorResponse(
+            error=ErrorDetail(message=str(exc), type="server_error", code="engine_unavailable")
         ).model_dump(),
     )
 

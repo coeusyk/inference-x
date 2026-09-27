@@ -253,6 +253,40 @@ Tool calls are streamed once the model has finished writing them. If the model w
 
 To check the whole path end to end, `scripts/continue_acceptance.py --trials 5` runs the same buggy-`median()` task through `cn` headless and then runs the test. `scripts/log_proxy.py` can sit in front of the server to record every request and streamed response.
 
+### GGUF models with llama.cpp
+
+A model entry with `engine: llama_cpp` is served by llama.cpp instead of vLLM, through the same `/v1/chat/completions` endpoint. InferenceX starts one external `llama-server` for the model, on `127.0.0.1` and a free port, and stops it again on shutdown (or when InferenceX itself dies). llama.cpp is not a Python dependency, so the binary is installed separately. The official release builds work, for example `llama-bNNNNN-bin-ubuntu-cuda-13.4-x64.tar.gz` together with the matching `cudart-...` archive unpacked into the same directory.
+
+```bash
+# Point InferenceX at the binary (or put llama-server on PATH)
+export INFERENCE_X_LLAMA_SERVER=<llama.cpp dir>/llama-server
+
+# Qwen2.5-Coder-7B Q4_K_M, 8192-token context, one sequence (about 5.3 GiB of VRAM)
+INFERENCE_X_DEFAULT_MODEL=qwen2.5-coder-7b-gguf ./scripts/dev.sh serve
+```
+
+A GGUF entry names the file, either as a Hugging Face repo plus `gguf_file` (downloaded into the Hugging Face cache on first start) or as a local `.gguf` path:
+
+```yaml
+  - name: qwen2.5-coder-7b-gguf
+    engine: llama_cpp
+    model_path: Qwen/Qwen2.5-Coder-7B-Instruct-GGUF
+    gguf_file: qwen2.5-coder-7b-instruct-q4_k_m.gguf
+    max_model_len: 8192       # required: the context llama-server is started with
+    # n_gpu_layers: 20        # optional; unset lets llama-server fit the layers to free VRAM
+```
+
+What differs from vLLM models:
+
+- One sequence at a time (`max_num_seqs: 1`). vLLM-only settings such as `gpu_memory_utilization` or `quantization` are rejected on these entries rather than ignored.
+- Tool calling is not supported yet (400 `tool_calling_unsupported`), and neither is deterministic mode.
+- `timing` in responses is `null`: `llama-server` doesn't measure queue time, and InferenceX does not report two of the three numbers and guess the third.
+- Prompt caching is off, so a request's output does not depend on what ran before it. Every turn processes its whole prompt again.
+- The run manifest records `backend: "llama.cpp"`, the server's build id, and the GGUF file: repo, revision, file name, sha256 of the file that was loaded, and the quantization the server reports.
+- `GET /v1/plan` and `GET /v1/doctor` ask llama.cpp's own `llama-fit-params` how many layers fit at the configured context. A model that only partially fits on the GPU is reported as not fitting, since it would run mostly on the CPU.
+
+Aider works with it as described above; pass `--model openai/qwen2.5-coder-7b-gguf`.
+
 ---
 
 ## Commands
@@ -298,6 +332,8 @@ Key environment variables:
 | `INFERENCE_X_CONFIG_DIR` | `config` | Path to config directory |
 | `INFERENCE_X_METRICS_FILE` | (unset) | If set, enables NDJSON metrics export to this path |
 | `INFERENCE_X_STREAM_TIMEOUT_S` | `120` | Per-token SSE timeout in seconds (0 = disabled) |
+| `INFERENCE_X_LLAMA_SERVER` | (unset) | Path to the `llama-server` binary for `engine: llama_cpp` models; `llama-server` on `PATH` is used when unset |
+| `INFERENCE_X_LLAMA_STARTUP_TIMEOUT_S` | `300` | How long to wait for `llama-server` to report healthy before startup fails |
 
 ---
 

@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends
 from inference_x.api.deps import get_registry, get_vram_tier
 from inference_x.schemas.model import ModelList, ModelObject
 from inference_x.services.model_service import ModelRegistry
+from inference_x.utils.llama_cpp_plan import gguf_size_gib
 from inference_x.utils.vllm_pool_config import estimate_weight_gib
 from inference_x.utils.vram_tiers import VramTier, effective_context
 
@@ -34,8 +35,10 @@ def list_models(
                 id=entry.name,
                 quantization=entry.quantization,
                 max_model_len=entry.max_model_len,
-                estimated_weights_gib=round(
-                    estimate_weight_gib(entry.model_path, entry.quantization), 3
+                estimated_weights_gib=(
+                    gguf_size_gib(entry.model_path, entry.gguf_file)
+                    if entry.engine == "llama_cpp"
+                    else round(estimate_weight_gib(entry.model_path, entry.quantization), 3)
                 ),
                 context_window=env.max_model_len if env else None,
                 max_num_seqs=env.max_num_seqs if env else None,

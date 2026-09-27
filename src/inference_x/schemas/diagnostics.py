@@ -17,9 +17,12 @@ class PlanEntry(BaseModel):
     """Sizing report for one registered model, as the engine construction path would compute it."""
 
     model: str
-    estimated_weight_gib: float
-    estimated_kv_cache_gib: float
-    estimated_footprint_gib: float
+    backend: str = "vllm"
+    # For llama.cpp entries: the GGUF file size when cached, and null for the
+    # vLLM estimator's KV/footprint figures (add-llama-cpp-backend D2).
+    estimated_weight_gib: Optional[float] = None
+    estimated_kv_cache_gib: Optional[float] = None
+    estimated_footprint_gib: Optional[float] = None
     gpu_memory_utilization: Optional[float] = None
     block_size: Optional[int] = None
     kv_cache_dtype: Optional[str] = None
@@ -31,6 +34,9 @@ class PlanEntry(BaseModel):
     context_window: Optional[int] = None
     context_composed: Optional[bool] = None
     context_tier_limited: Optional[bool] = None
+    # llama.cpp only: layers llama-fit-params places on the GPU at the
+    # configured context (-1 = all). Null when it could not run.
+    gpu_layers: Optional[int] = None
 
 
 class PlanResponse(BaseModel):
@@ -43,6 +49,7 @@ class DoctorModelFit(BaseModel):
     """Whether one registered model fits on the currently probed VRAM."""
 
     model: str
+    backend: str = "vllm"
     fits: bool
     reason: Optional[str] = None
 

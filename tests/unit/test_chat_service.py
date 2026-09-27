@@ -1003,7 +1003,10 @@ class TestRunManifest:
 
         preimage = {
             "engine": manifest.engine.model_dump(),
-            "model": manifest.model.model_dump(),
+            # add-llama-cpp-backend D6: gguf_file joins only when non-null.
+            "model": manifest.model.model_dump(
+                exclude={"gguf_file"} if manifest.model.gguf_file is None else None
+            ),
             "runtime": manifest.runtime.model_dump(),
             "sampling": manifest.sampling.model_dump(),
             # DEC-065: tools_sha256 joins the preimage only when non-null.
