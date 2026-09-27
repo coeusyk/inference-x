@@ -114,7 +114,6 @@ def _patch_vllm_available(monkeypatch):
 def _make_engine(llm: _FakeAsyncLLM) -> VLLMEngine:
     engine = VLLMEngine.__new__(VLLMEngine)
     engine._model_name = "test-model"
-    engine._max_completion_tokens = None
     engine._instruction_tuned = True
     engine._repetition_penalty = None
     engine._supports_chat = False

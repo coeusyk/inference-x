@@ -63,6 +63,7 @@ from typing import Any
 from inference_x.engines.base import BaseEngine
 from inference_x.schemas.chat import ChatCompletionRequest, ResponseWarning
 from inference_x.services.model_service import ModelRegistry
+from inference_x.utils.vram_tiers import effective_context
 
 logger = logging.getLogger(__name__)
 
@@ -78,8 +79,9 @@ _DEFAULT_BATCH_WAITER_MULTIPLIER = 8  # fallback only; production value comes fr
 class ContextTooLongError(ValueError):
     """Prompt (+ requested output) exceeds the model's context window.
 
-    Subclasses ValueError so it is handled by the existing sanitized 400
-    handler (api/errors.value_error_handler) without a new registration.
+    Has its own 400 handler (api/errors.context_too_long_error_handler, V1-0)
+    returning the real message with code `context_length_exceeded`; the
+    message follows OpenAI's wording so clients recognize it.
     """
 
 
@@ -97,9 +99,8 @@ class EngineSaturatedError(Exception):
 class StrictModeViolationError(ValueError):
     """The request asked for `strict` and the server would have substituted.
 
-    Subclasses ValueError so it is handled by the existing sanitized 400 handler
-    (api/errors.value_error_handler) without a new registration — the same route
-    ContextTooLongError takes.
+    Has its own 400 handler (api/errors.strict_violation_error_handler, V1-0)
+    returning the real message with code `strict_violation`.
 
     Raised only where a "substituted" warning would otherwise be emitted, from
     inside that same branch (DEC-052: one predicate, two outcomes). Never raised
@@ -213,12 +214,24 @@ class AdmissionController:
 
     def _context_ceiling(self, routed_model: str) -> int:
         """Highest token count (prompt + output) this model's context window allows."""
-        ceiling = self._tier.max_model_len_cap if self._tier is not None else _DEFAULT_CONTEXT_CAP
-        if routed_model in self._registry:
-            entry_cap = self._registry.get(routed_model).max_model_len
-            if entry_cap is not None:
-                ceiling = min(ceiling, entry_cap)
-        return ceiling
+        entry = self._registry.get(routed_model) if routed_model in self._registry else None
+        if self._tier is None:
+            ceiling = _DEFAULT_CONTEXT_CAP
+            if entry is not None and entry.max_model_len is not None:
+                ceiling = min(ceiling, entry.max_model_len)
+            return ceiling
+        # DEC-064: tier cap composes with max_num_seqs as a KV-budget envelope.
+        return effective_context(
+            self._tier,
+            entry.max_model_len if entry is not None else None,
+            entry.max_num_seqs if entry is not None else None,
+        ).max_model_len
+
+    def _model_completion_cap(self, routed_model: str) -> int | None:
+        """The registry's per-model output cap, or None if unset/unregistered."""
+        if routed_model not in self._registry:
+            return None
+        return self._registry.get(routed_model).max_completion_tokens
 
     def _effective_max_num_seqs(self, routed_model: str) -> int | None:
         """Resolved sequence-concurrency ceiling for *routed_model*, or None if no
@@ -347,26 +360,66 @@ class AdmissionController:
         # only because Gates 2/3 contain no `await` below — if that ever
         # changes, this must become an explicit `acquired` flag guard instead.
         try:
-            requested_output = request.max_output_tokens or request.max_tokens or 512
+            requested_output = request.max_output_tokens or request.max_tokens
             context_ceiling = self._context_ceiling(routed_model)
             if request.max_context_tokens is not None:
                 context_ceiling = min(context_ceiling, request.max_context_tokens)
 
+            # Messages follow OpenAI's wording ("This model's maximum context
+            # length is N tokens") so clients such as litellm/Aider recognize a
+            # context-window error (V1-0, DEC-063).
             prompt_tokens = _prompt_tokens(engine, request, warnings)
-            if prompt_tokens > context_ceiling:
+            room = context_ceiling - prompt_tokens
+            if prompt_tokens > context_ceiling or (
+                requested_output is None and room < _MIN_CLAMPED_OUTPUT_TOKENS
+            ):
                 raise ContextTooLongError(
-                    f"Prompt is {prompt_tokens} tokens, which exceeds the "
-                    f"{context_ceiling}-token context limit for model '{routed_model}'."
+                    f"This model's maximum context length is {context_ceiling} tokens. "
+                    f"However, your messages resulted in {prompt_tokens} tokens, leaving "
+                    f"no room for output. Please reduce the length of the messages "
+                    f"(model '{routed_model}')."
                 )
 
+            omitted = requested_output is None
+            if requested_output is None:
+                # OpenAI semantics: no max_tokens means "up to the context window".
+                # Nothing was substituted, so no warning (DEC-063).
+                requested_output = room
             effective_output = requested_output
+
+            # The model's own output cap is resolved here, not in the engine, so
+            # `effective_max_tokens` is exactly what runs (V1-0). Applied before the
+            # context clamp so one over-cap request produces one warning, not two.
+            model_cap = self._model_completion_cap(routed_model)
+            if model_cap is not None and effective_output > model_cap:
+                if not omitted:
+                    if request.strict:
+                        raise StrictModeViolationError(
+                            f"strict: requested output ({effective_output} tokens) exceeds "
+                            f"model '{routed_model}' max_completion_tokens ({model_cap}); "
+                            f"the server would have clamped it to {model_cap}."
+                        )
+                    _warn(
+                        warnings,
+                        type="substituted",
+                        code="max_tokens_clamped_to_model_cap",
+                        field_name="max_tokens",
+                        message=(
+                            f"Requested {effective_output} output tokens; clamped to "
+                            f"{model_cap}, the max_completion_tokens configured for "
+                            f"model '{routed_model}'."
+                        ),
+                    )
+                effective_output = model_cap
+
             if prompt_tokens + effective_output > context_ceiling:
-                room = context_ceiling - prompt_tokens
                 if request.priority == "batch" or room < _MIN_CLAMPED_OUTPUT_TOKENS:
                     raise ContextTooLongError(
-                        f"Prompt ({prompt_tokens} tokens) + requested output "
-                        f"({effective_output} tokens) exceeds the {context_ceiling}-token "
-                        f"context limit for model '{routed_model}'."
+                        f"This model's maximum context length is {context_ceiling} tokens. "
+                        f"However, you requested {prompt_tokens + effective_output} tokens "
+                        f"({prompt_tokens} in the messages, {effective_output} in the "
+                        f"completion). Please reduce the length of the messages or "
+                        f"completion (model '{routed_model}')."
                     )
                 # DEC-052: one predicate, two outcomes. The condition that raises under
                 # strict is textually the condition that warns by default — there is no

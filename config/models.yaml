@@ -49,6 +49,16 @@ models:
     gpu_memory_utilization: auto
     max_model_len: 8192
 
+  # V1-0 Aider acceptance model. Trades concurrency for context (DEC-064):
+  # 8192 x 1 sequence stays inside the 6gb tier's 2048 x 4 envelope, so Aider's
+  # ~5k-token system prompt + repo map fits on a 6 GiB laptop.
+  - name: qwen2.5-coder-1.5b
+    engine: vllm
+    model_path: Qwen/Qwen2.5-Coder-1.5B-Instruct
+    gpu_memory_utilization: auto
+    max_model_len: 8192
+    max_num_seqs: 1
+
   - name: minicpm5-1b
     engine: vllm
     model_path: openbmb/MiniCPM5-1B

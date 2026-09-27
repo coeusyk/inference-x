@@ -29,25 +29,27 @@ def capture_sampling_params(monkeypatch):
 
 def _engine_with_config(**config_overrides) -> VLLMEngine:
     engine = VLLMEngine.__new__(VLLMEngine)
-    engine._max_completion_tokens = config_overrides.get("max_completion_tokens")
     engine._instruction_tuned = config_overrides.get("instruction_tuned", True)
     engine._repetition_penalty = config_overrides.get("repetition_penalty")
     return engine
 
 
-def test_max_completion_tokens_applied(capture_sampling_params):
-    """max_completion_tokens in model config overrides request max_tokens."""
-    engine = _engine_with_config(max_completion_tokens=256, instruction_tuned=False)
+@pytest.mark.parametrize("max_tokens", [8, 512])
+def test_engine_executes_request_max_tokens_exactly(capture_sampling_params, max_tokens):
+    """The engine applies no hidden output cap of its own: max_completion_tokens
+    is resolved by admission, so the engine runs exactly what `resolved` reports
+    (both below and above the model's configured cap)."""
+    engine = _engine_with_config(instruction_tuned=False)
     request = ChatCompletionRequest(
         model="opt-125m",
         messages=[ChatMessage(role="user", content="hi")],
-        max_tokens=512,
+        max_tokens=max_tokens,
     )
 
     engine._sampling_params(request)
 
     assert capture_sampling_params.last_kwargs is not None
-    assert capture_sampling_params.last_kwargs["max_tokens"] == 256
+    assert capture_sampling_params.last_kwargs["max_tokens"] == max_tokens
 
 
 def test_instruction_tuned_model_has_no_repetition_penalty(capture_sampling_params):
@@ -151,3 +153,21 @@ def test_generate_and_stream_share_sampling_builder(capture_sampling_params):
     assert kwargs_complete["seed"] == 7
     # Same builder return type path (captured kwargs constructor).
     assert type(params_complete) is type(params_stream)
+
+
+@pytest.mark.parametrize("stop, expected", [("\n\n", ["\n\n"]), (["a", "b"], ["a", "b"])])
+def test_stop_forwarded_as_list(capture_sampling_params, stop, expected):
+    """V1-0: `stop` reaches the sampler, normalized to a list at the boundary."""
+    engine = _engine_with_config(instruction_tuned=True)
+    request = ChatCompletionRequest(
+        model="m", messages=[ChatMessage(role="user", content="hi")], stop=stop
+    )
+    engine._sampling_params(request)
+    assert capture_sampling_params.last_kwargs["stop"] == expected
+
+
+def test_stop_omitted_when_absent(capture_sampling_params):
+    engine = _engine_with_config(instruction_tuned=True)
+    request = ChatCompletionRequest(model="m", messages=[ChatMessage(role="user", content="hi")])
+    engine._sampling_params(request)
+    assert "stop" not in capture_sampling_params.last_kwargs

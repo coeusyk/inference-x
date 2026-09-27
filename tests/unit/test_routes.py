@@ -206,22 +206,139 @@ class TestChatCompletionsEndpoint:
         assert body["choices"][0]["message"]["content"] == "Hello from stub"
         assert body["usage"]["total_tokens"] == 8
 
-    def test_missing_messages_returns_422(self, client):
+    # V1-0 (DEC-063): validation errors are OpenAI-shaped 400s, not FastAPI 422s.
+    def test_missing_messages_returns_400(self, client):
         resp = client.post("/v1/chat/completions", json={"model": "m"})
-        assert resp.status_code == 422
+        assert resp.status_code == 400
+        assert resp.json()["error"]["param"] == "messages"
 
-    def test_invalid_role_returns_422(self, client):
+    def test_invalid_role_returns_400(self, client):
         resp = client.post(
             "/v1/chat/completions",
             json={"model": "m", "messages": [{"role": "bad", "content": "hi"}]},
         )
-        assert resp.status_code == 422
+        assert resp.status_code == 400
+        assert resp.json()["error"]["param"] == "messages.0.role"
 
-    def test_temperature_out_of_range_returns_422(self, client):
+    def test_temperature_out_of_range_returns_400(self, client):
         payload = dict(self._payload)
         payload["temperature"] = 5.0
         resp = client.post("/v1/chat/completions", json=payload)
-        assert resp.status_code == 422
+        assert resp.status_code == 400
+        assert resp.json()["error"] == {
+            "message": resp.json()["error"]["message"],
+            "type": "invalid_request_error",
+            "param": "temperature",
+            "code": None,
+        }
+
+    def test_context_overflow_is_actionable_400(self, client):
+        """V1-0: real message + context_length_exceeded, not the generic sanitized 400."""
+        resp = client.post(
+            "/v1/chat/completions", json={**self._payload, "max_context_tokens": 1}
+        )
+        assert resp.status_code == 400
+        err = resp.json()["error"]
+        assert err["code"] == "context_length_exceeded"
+        assert err["message"].startswith("This model's maximum context length is 1 tokens")
+
+    def test_strict_violation_returns_its_message_and_code(self, client):
+        resp = client.post(
+            "/v1/chat/completions",
+            json={**self._payload, "max_tokens": 1_000_000, "strict": True},
+        )
+        assert resp.status_code == 400
+        err = resp.json()["error"]
+        assert err["code"] == "strict_violation"
+        assert err["message"].startswith("strict:")
+
+    def test_default_response_has_no_manifest_key(self, client):
+        """V1-0: the full manifest is opt-in; the default body is unchanged otherwise."""
+        resp = client.post("/v1/chat/completions", json=self._payload)
+        body = resp.json()
+        assert "manifest" not in body
+        assert {"timing", "resolved", "warnings", "run_id"} <= body.keys()
+        assert resp.headers["X-Run-Id"] == body["run_id"]
+
+    def test_include_manifest_carries_manifest_matching_run_id(self, client):
+        """V1-0 opt-in manifest (ported from superseded PR #38's C5 test).
+
+        The manifest rides the body so a client can recompute run_id from it
+        rather than trusting the string.
+        """
+        from inference_x.utils.ids import compute_run_id
+
+        resp = client.post(
+            "/v1/chat/completions", json={**self._payload, "include_manifest": True}
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        manifest = body["manifest"]
+        assert manifest["run_id"] == body["run_id"] == resp.headers["X-Run-Id"]
+        preimage = {
+            "engine": manifest["engine"],
+            "model": manifest["model"],
+            "runtime": manifest["runtime"],
+            "sampling": manifest["sampling"],
+            "request": manifest["request"],
+            "warnings": [
+                {"type": w["type"], "code": w["code"], "field": w["field"]}
+                for w in manifest["warnings"]
+            ],
+        }
+        assert compute_run_id(preimage) == manifest["run_id"]
+
+    def test_stop_is_echoed_in_resolved_and_manifest(self, client):
+        resp = client.post(
+            "/v1/chat/completions",
+            json={**self._payload, "stop": ["\n\n"], "include_manifest": True},
+        )
+        body = resp.json()
+        assert body["resolved"]["stop"] == ["\n\n"]
+        assert body["manifest"]["sampling"]["stop"] == ["\n\n"]
+
+    def test_model_completion_cap_reaches_engine_resolved_and_manifest_alike(self):
+        """V1-0 truthfulness: a registry max_completion_tokens is resolved once, by
+        admission, so the engine runs exactly the value `resolved` and the manifest
+        report (it used to be re-applied inside VLLMEngine after the fact)."""
+        seen: list[int | None] = []
+
+        class _RecordingEngine(_StubEngine):
+            async def generate(self, request):
+                seen.append(request.max_tokens)
+                return await super().generate(request)
+
+        registry = ModelRegistry(
+            [ModelEntry(name=_TEST_MODEL, model_path="test/stub", max_completion_tokens=4)]
+        )
+        service = ChatService(
+            engine_pool=EnginePool({_TEST_MODEL: _RecordingEngine()}),
+            registry=registry,
+            router=TaskRouter(registry, _TEST_MODEL),
+        )
+        app.dependency_overrides[get_chat_service] = lambda: service
+        app.dependency_overrides[get_registry] = lambda: registry
+        try:
+            with TestClient(app) as c:
+                ok = c.post(
+                    "/v1/chat/completions",
+                    json={**self._payload, "max_tokens": 64, "include_manifest": True},
+                )
+                strict = c.post(
+                    "/v1/chat/completions",
+                    json={**self._payload, "max_tokens": 64, "strict": True},
+                )
+        finally:
+            app.dependency_overrides.clear()
+
+        body = ok.json()
+        assert seen == [4]
+        assert body["resolved"]["max_tokens"] == 4
+        assert body["manifest"]["sampling"]["max_tokens"] == 64
+        assert body["manifest"]["sampling"]["resolved_max_tokens"] == 4
+        assert "max_tokens_clamped_to_model_cap" in [w["code"] for w in body["warnings"]]
+        assert strict.status_code == 400
+        assert strict.json()["error"]["code"] == "strict_violation"
 
     def test_stream_true_returns_event_stream(self, client):
         payload = dict(self._payload)
@@ -622,6 +739,39 @@ class TestPlanEndpoint:
     def test_returns_200(self, plan_client):
         resp = plan_client.get("/v1/plan")
         assert resp.status_code == 200
+
+    def test_no_tier_reports_no_context_composition(self, plan_client):
+        entry = plan_client.get("/v1/plan").json()["models"][0]
+        assert entry["context_window"] is None
+        assert entry["context_tier_limited"] is None
+
+    def test_tier_composition_is_reported(self):
+        """DEC-064: plan and models both report the effective context envelope."""
+        from inference_x.utils.vram_tiers import VramTier
+
+        tier = VramTier(
+            name="6gb", min_vram_gb=0, description="", gpu_memory_utilization_ceiling=0.9,
+            max_model_len_cap=2048, max_num_seqs=4, block_size=16, kv_cache_dtype="auto",
+        )
+        registry = ModelRegistry(
+            [
+                ModelEntry(name="coder", model_path="t/c", max_model_len=8192, max_num_seqs=1),
+                ModelEntry(name="plain", model_path="t/p", max_model_len=8192),
+            ]
+        )
+        app.dependency_overrides[get_registry] = lambda: registry
+        app.dependency_overrides[get_vram_tier] = lambda: tier
+        try:
+            with TestClient(app) as c:
+                plan = {m["model"]: m for m in c.get("/v1/plan").json()["models"]}
+                models = {m["id"]: m for m in c.get("/v1/models").json()["data"]}
+        finally:
+            app.dependency_overrides.clear()
+        assert (plan["coder"]["context_window"], plan["coder"]["context_composed"]) == (8192, True)
+        assert (plan["plain"]["context_window"], plan["plain"]["context_tier_limited"]) == (2048, True)
+        assert models["coder"]["context_window"] == 8192 and models["coder"]["max_num_seqs"] == 1
+        assert models["plain"]["max_model_len"] == 8192  # configured value unchanged
+        assert models["plain"]["context_window"] == 2048
 
     def test_no_engine_dependency_overridden(self, plan_client):
         """Plan must not require get_chat_service/get_engine_pool to be wired at all —

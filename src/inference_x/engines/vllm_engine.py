@@ -200,8 +200,13 @@ def preflight_hf_access(
         return
 
     try:
-        from huggingface_hub import hf_hub_download, model_info
-        from huggingface_hub.errors import GatedRepoError, RepositoryNotFoundError
+        import httpx
+        from huggingface_hub import constants, hf_hub_download, model_info
+        from huggingface_hub.errors import (
+            GatedRepoError,
+            OfflineModeIsEnabled,
+            RepositoryNotFoundError,
+        )
     except ImportError:
         logger.warning(
             "huggingface_hub not available; skipping HF preflight for %s",
@@ -209,8 +214,23 @@ def preflight_hf_access(
         )
         return
 
+    # V1-0: the preflight is an advisory fast-fail for gated/private repos, not a
+    # startup requirement. Offline mode or an unreachable Hub must not stop a
+    # model whose weights are already cached — vLLM then loads from the cache
+    # or fails with its own error. Fail open with a log, like other advisory
+    # signals (DEC-047 §4).
+    if constants.HF_HUB_OFFLINE:
+        logger.info("HF_HUB_OFFLINE set; skipping HF preflight for %s", model_path)
+        return
     try:
         info = model_info(model_path, token=token)
+    except (OfflineModeIsEnabled, httpx.TransportError) as exc:
+        logger.warning(
+            "HF preflight for %s skipped: Hub unreachable (%s); relying on local cache",
+            model_path,
+            exc,
+        )
+        return
     except RepositoryNotFoundError:
         raise RuntimeError(
             f"Model '{model_path}' not found on HuggingFace. "
@@ -379,7 +399,6 @@ class VLLMEngine(BaseEngine):
 
         self._model_name: str = model_config["name"]
         self._model_path: str = model_config["model_path"]
-        self._max_completion_tokens: int | None = model_config.get("max_completion_tokens")
         self._instruction_tuned: bool = bool(model_config.get("instruction_tuned", True))
         self._repetition_penalty: float | None = model_config.get("repetition_penalty")
         self._healthy = False
@@ -616,8 +635,9 @@ class VLLMEngine(BaseEngine):
             return max(1, total_chars // 4)
 
     def _resolve_max_tokens(self, request: ChatCompletionRequest) -> int:
-        if self._max_completion_tokens is not None:
-            return self._max_completion_tokens
+        # No model-level cap here: admission resolves max_completion_tokens into
+        # request.max_tokens, so the engine runs exactly what `resolved` reports.
+        # The 512 fallback only serves direct engine callers that bypass admission.
         return request.max_tokens if request.max_tokens is not None else 512
 
     def _sampling_params(self, request: ChatCompletionRequest):
@@ -635,6 +655,8 @@ class VLLMEngine(BaseEngine):
         # Do not normalize backend sentinels (e.g. -1).
         if request.seed is not None:
             kwargs["seed"] = request.seed
+        if request.stop is not None:
+            kwargs["stop"] = [request.stop] if isinstance(request.stop, str) else request.stop
         return SamplingParams(**kwargs)
 
     def _stream_prompt(self, request: ChatCompletionRequest) -> str:

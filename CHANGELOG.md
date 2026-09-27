@@ -8,6 +8,17 @@ refactors with no observable behavior change are not listed — see
 
 ### Added
 
+- **`stop` sequences** on `POST /v1/chat/completions` (a string or up to 4
+  strings), honored by the engine and echoed in `resolved`.
+- **Opt-in full run manifest**: `include_manifest: true` on a non-streaming
+  request returns the complete manifest in a `manifest` field. The default
+  response is unchanged and has no `manifest` key; `run_id` and `X-Run-Id` are
+  still always present.
+- **`/v1/models` and `/v1/plan` report each model's effective context window**
+  (`context_window`, `max_num_seqs`, `context_composed`,
+  `context_tier_limited`). A model may exceed its VRAM tier's per-sequence
+  context cap by running fewer concurrent sequences. The new
+  `qwen2.5-coder-1.5b` entry uses this to give 8k context on a 6 GB GPU.
 - **`GET /metrics`: vLLM's own native Prometheus stats are now exposed
   directly**, alongside the existing `GET /v1/metrics` JSON summary.
   `/metrics` returns vLLM's `vllm:`-prefixed series (request queue depth, KV
@@ -26,6 +37,24 @@ refactors with no observable behavior change are not listed — see
 
 ### Changed
 
+- **Omitting `max_tokens` now means "up to the context window"**, as in
+  OpenAI's API, instead of a fixed 512 tokens.
+- **A model's `max_completion_tokens` is now applied before generation and
+  reported.** A larger `max_tokens` is clamped with a `substituted` warning
+  (`max_tokens_clamped_to_model_cap`), or rejected under `strict`, and
+  `resolved.max_tokens` shows the value that ran. Previously the engine
+  replaced the requested value after the fact, so `resolved` could disagree
+  with the actual generation length in either direction.
+- **Request size limits are now token-based.** The old caps of 4096
+  `max_tokens`, 50 messages, and 32,000 characters per message are gone; the
+  model's context window is the limit.
+- **Unknown request fields are now rejected with 400** naming the field.
+  Previously they were silently ignored.
+- **Validation errors now return 400 in the OpenAI error shape**
+  (`{"error": {"message", "type", "param", "code"}}`), not 422 `{"detail": …}`.
+- **Context-overflow errors now say what went wrong**: "This model's maximum
+  context length is N tokens…", with code `context_length_exceeded`. Strict
+  mode rejections return their real reason with code `strict_violation`.
 - **Cancellation now actually stops the model computing for a disconnected
   client.** Previously, if a client disconnected mid-stream, the server
   stopped *reading* the response but the underlying generation kept running

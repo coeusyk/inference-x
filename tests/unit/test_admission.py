@@ -97,12 +97,106 @@ class TestContextCeiling:
 class TestPromptTooLong:
     async def test_prompt_alone_exceeding_ceiling_raises_400_class(self):
         controller = AdmissionController(_registry(max_model_len=8))
-        with pytest.raises(ContextTooLongError, match="Prompt is 10 tokens"):
+        # V1-0: OpenAI wording, so litellm/Aider recognize a context-window error.
+        with pytest.raises(
+            ContextTooLongError,
+            match="This model's maximum context length is 8 tokens.*10 tokens",
+        ):
             await controller.admit("m", _req(), _FakeEngine(prompt_tokens=10))
 
     def test_context_too_long_is_a_value_error(self):
-        """ContextTooLongError must subclass ValueError to hit the sanitized 400 handler."""
+        """Still a ValueError (400 family); its own handler adds the error code."""
         assert issubclass(ContextTooLongError, ValueError)
+
+
+class TestOmittedMaxTokens:
+    """V1-0 (DEC-063): no max_tokens means the remaining context window."""
+
+    async def test_resolves_to_remaining_context_without_warning(self):
+        controller = AdmissionController(
+            _registry(max_model_len=8192), tier=_FakeTier(max_model_len_cap=8192)
+        )
+        result = await controller.admit("m", _req(), _FakeEngine(prompt_tokens=5000))
+        assert result.effective_max_tokens == 3192
+        assert not [w for w in result.warnings if w.type == "substituted"]
+
+    async def test_no_room_left_is_rejected(self):
+        controller = AdmissionController(
+            _registry(max_model_len=8192), tier=_FakeTier(max_model_len_cap=8192)
+        )
+        with pytest.raises(ContextTooLongError, match="maximum context length is 8192"):
+            await controller.admit("m", _req(), _FakeEngine(prompt_tokens=8190))
+
+    async def test_kv_gate_still_applies_to_resolved_budget(self):
+        controller = AdmissionController(
+            _registry(max_model_len=8192), tier=_FakeTier(max_model_len_cap=8192)
+        )
+        result = await controller.admit(
+            "m", _req(), _FakeEngine(prompt_tokens=1000, kv_capacity_tokens=4000)
+        )
+        # budget 4000 * 0.9 = 3600 - 1000 prompt = 2600 < 7192 -> clamped with a warning
+        assert result.effective_max_tokens == 2600
+        assert [w.code for w in result.warnings] == ["max_tokens_clamped_to_kv_budget"]
+
+
+class TestModelCompletionCap:
+    """V1-0: a registry max_completion_tokens is resolved here, once, so the
+    engine runs exactly `effective_max_tokens` and `resolved` cannot drift."""
+
+    async def test_request_under_cap_is_untouched(self):
+        controller = AdmissionController(_registry(max_completion_tokens=256))
+        result = await controller.admit("m", _req(max_tokens=100), _FakeEngine())
+        assert result.effective_max_tokens == 100
+        assert not [w for w in result.warnings if w.type == "substituted"]
+
+    async def test_request_over_cap_is_clamped_with_one_warning(self):
+        controller = AdmissionController(_registry(max_completion_tokens=256))
+        result = await controller.admit("m", _req(max_tokens=512), _FakeEngine())
+        assert result.effective_max_tokens == 256
+        assert [(w.type, w.code, w.field) for w in result.warnings if w.type != "degraded"] == [
+            ("substituted", "max_tokens_clamped_to_model_cap", "max_tokens")
+        ]
+
+    async def test_cap_applies_before_context_clamp(self):
+        # 10 prompt + 5000 requested overflows the 4096 window, but the cap (256)
+        # already fits it: exactly one warning, from the cap.
+        controller = AdmissionController(_registry(max_completion_tokens=256))
+        result = await controller.admit("m", _req(max_tokens=5000), _FakeEngine())
+        assert result.effective_max_tokens == 256
+        assert [w.code for w in result.warnings if w.type == "substituted"] == [
+            "max_tokens_clamped_to_model_cap"
+        ]
+
+    async def test_omitted_max_tokens_resolves_to_cap_without_warning(self):
+        controller = AdmissionController(_registry(max_completion_tokens=256))
+        result = await controller.admit("m", _req(), _FakeEngine())
+        assert result.effective_max_tokens == 256
+        assert not [w for w in result.warnings if w.type == "substituted"]
+
+    async def test_strict_rejects_instead_of_clamping(self):
+        controller = AdmissionController(_registry(max_completion_tokens=256))
+        with pytest.raises(StrictModeViolationError, match="max_completion_tokens"):
+            await controller.admit("m", _req(max_tokens=512, strict=True), _FakeEngine())
+
+
+class TestTierComposition:
+    """DEC-064: tier cap composes with max_num_seqs as a KV-budget envelope."""
+
+    async def test_concurrency_traded_for_context(self):
+        controller = AdmissionController(
+            _registry(max_model_len=8192, max_num_seqs=1),
+            tier=_FakeTier(max_model_len_cap=2048, max_num_seqs=4),
+        )
+        result = await controller.admit("m", _req(), _FakeEngine(prompt_tokens=5000))
+        assert result.effective_max_tokens == 3192
+
+    async def test_trade_not_made_keeps_tier_cap(self):
+        controller = AdmissionController(
+            _registry(max_model_len=8192),
+            tier=_FakeTier(max_model_len_cap=2048, max_num_seqs=4),
+        )
+        with pytest.raises(ContextTooLongError, match="maximum context length is 2048"):
+            await controller.admit("m", _req(), _FakeEngine(prompt_tokens=5000))
 
 
 class TestClampVsReject:

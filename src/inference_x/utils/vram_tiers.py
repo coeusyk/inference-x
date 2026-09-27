@@ -54,6 +54,43 @@ class VramTier:
         )
 
 
+@dataclass(frozen=True)
+class ContextEnvelope:
+    """A model's effective context ceiling and sequence concurrency on a tier.
+
+    `composed`: the model exceeds the tier's max_model_len_cap by trading away
+    concurrency (DEC-064). `tier_limited`: the model asked for more context than
+    the tier cap and did not make that trade, so the cap applies.
+    """
+
+    max_model_len: int
+    max_num_seqs: int
+    composed: bool = False
+    tier_limited: bool = False
+
+
+def effective_context(
+    tier: VramTier, entry_max_model_len: int | None, entry_max_num_seqs: int | None
+) -> ContextEnvelope:
+    """Compose a model entry with its tier as a KV-budget envelope (DEC-064).
+
+    The tier's `max_model_len_cap × max_num_seqs` is a policy envelope on
+    concurrent context tokens, not a VRAM formula: vLLM sizes the real KV pool
+    from gpu_memory_utilization, refuses to start if one max_model_len sequence
+    doesn't fit, and admission's KV gate reserves against the measured
+    kv_capacity_tokens. A model may exceed the per-sequence cap only by lowering
+    its max_num_seqs enough to stay inside that envelope.
+    """
+    cap = tier.max_model_len_cap
+    seqs = min(entry_max_num_seqs or tier.max_num_seqs, tier.max_num_seqs)
+    wanted = entry_max_model_len or cap
+    if wanted <= cap:
+        return ContextEnvelope(wanted, seqs)
+    if wanted * seqs <= cap * tier.max_num_seqs:
+        return ContextEnvelope(wanted, seqs, composed=True)
+    return ContextEnvelope(cap, seqs, tier_limited=True)
+
+
 def _tiers_path(config_dir: str) -> Path:
     return Path(config_dir) / "vram_tiers.yaml"
 

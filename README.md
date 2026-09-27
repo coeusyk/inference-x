@@ -188,6 +188,34 @@ INFERENCE_X_DEFAULT_MODEL=tinyllama-chat uv run uvicorn inference_x.api.main:app
 `make playground` and `make playground-compare` do this automatically — see
 `playground/README.md`.
 
+### Coding with Aider
+
+Aider can use InferenceX as its OpenAI-compatible backend. These are the commands used for the V1-0 acceptance runs (Aider 0.86.2, `qwen2.5-coder-1.5b`, 8192-token context with one sequence).
+
+```bash
+# Once: download the model and install Aider as a standalone tool
+uv run hf download Qwen/Qwen2.5-Coder-1.5B-Instruct
+uv tool install --python 3.12 aider-chat
+
+# Terminal 1: serve the coder model
+INFERENCE_X_DEFAULT_MODEL=qwen2.5-coder-1.5b ./scripts/dev.sh serve
+
+# Terminal 2: from the repo you want to edit
+aider --model openai/qwen2.5-coder-1.5b \
+  --openai-api-base http://127.0.0.1:8000/v1 \
+  --openai-api-key unused \
+  --no-show-model-warnings \
+  path/to/file.py
+```
+
+With the currently pinned `huggingface-hub`/`click` versions, `hf download` prints a `click.exceptions.Exit: 0` traceback after it finishes. The download has still succeeded (exit code 0, snapshot path printed first).
+
+The `openai/` prefix tells Aider to talk plain OpenAI protocol, and the model name after it must match the model the server loaded. Any API key value works because the server doesn't check it. `--no-show-model-warnings` only silences Aider's notice that it has no metadata for this model name. Aider picks the `whole` edit format for it, and the 1.5B coder model followed that format in all 7 acceptance runs (streaming and `--no-stream`).
+
+On a machine that has no network, add `HF_HUB_OFFLINE=1` to the serve command once the model is cached. Larger repos may need `--map-tokens` lowered so Aider's repo map fits in the 8k context. If it doesn't fit, the server returns an OpenAI-style `context_length_exceeded` error that states the model's context length.
+
+To check the whole path end to end, `scripts/aider_acceptance.py` makes a throwaway repo with a buggy function and a failing test, asks Aider to fix it through the running server, and then runs the test.
+
 ---
 
 ## Commands

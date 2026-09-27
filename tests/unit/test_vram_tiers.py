@@ -3,7 +3,13 @@ from __future__ import annotations
 
 import pytest
 
-from inference_x.utils.vram_tiers import VramTier, load_tiers, resolve_tier
+from inference_x.utils.vram_tiers import (
+    ContextEnvelope,
+    VramTier,
+    effective_context,
+    load_tiers,
+    resolve_tier,
+)
 
 _TIERS_YAML = """
 tiers:
@@ -171,3 +177,27 @@ tiers:
     tiers = load_tiers(str(tmp_path))
     assert tiers[0].max_num_batched_tokens == 2048
     assert tiers[0].enable_prefix_caching is False
+
+
+class TestEffectiveContext:
+    """DEC-064: tier cap composes with max_num_seqs as a KV-budget envelope."""
+
+    _TIER = VramTier(
+        name="6gb", min_vram_gb=0, description="", gpu_memory_utilization_ceiling=0.9,
+        max_model_len_cap=2048, max_num_seqs=4, block_size=16, kv_cache_dtype="auto",
+    )
+
+    @pytest.mark.parametrize(
+        "ctx, seqs, expected",
+        [
+            (None, None, ContextEnvelope(2048, 4)),  # tier defaults
+            (1024, None, ContextEnvelope(1024, 4)),  # under the cap: untouched
+            (8192, 1, ContextEnvelope(8192, 1, composed=True)),  # 8192x1 <= 2048x4
+            (4096, 2, ContextEnvelope(4096, 2, composed=True)),  # boundary: equal
+            (8192, 2, ContextEnvelope(2048, 2, tier_limited=True)),  # 16384 > 8192
+            (8192, None, ContextEnvelope(2048, 4, tier_limited=True)),  # no trade made
+            (1024, 16, ContextEnvelope(1024, 4)),  # entry seqs never exceed the tier
+        ],
+    )
+    def test_composition(self, ctx, seqs, expected):
+        assert effective_context(self._TIER, ctx, seqs) == expected

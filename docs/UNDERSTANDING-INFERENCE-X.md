@@ -176,9 +176,10 @@ Tracing `POST /v1/chat/completions` through the source:
    starts a `perf_counter`, and for this path reads and caches the request body to
    extract `model` and `stream`.
 2. **Validation.** FastAPI validates the body against `ChatCompletionRequest`
-   (`schemas/chat.py`). Constraints: 1–50 messages, content ≤ 32,000 chars,
-   `temperature` 0–2, `max_tokens` 1–4096, `top_p` 0–1. A violation returns 422 before
-   any application code runs.
+   (`schemas/chat.py`). Unknown fields are rejected. Structural guards are 1 to 2048
+   messages and content up to 1,000,000 chars; the real length limit is the model's
+   context window, enforced later by admission. A violation returns 400 in the OpenAI
+   error envelope, naming the parameter, before any application code runs (V1-0).
 3. **Dependency resolution.** `get_chat_service` assembles a `ChatService` from the four
    cached singletons. Nothing is constructed per request except the `ChatService` wrapper.
 4. **Routing.** `TaskRouter.select()` applies `ExplicitModelPolicy` — return
@@ -1010,14 +1011,20 @@ disabled anywhere in the source).
 | Field | Type | Default | Constraint |
 |---|---|---|---|
 | `model` | str | required | Not validated against the registry |
-| `messages` | list[ChatMessage] | required | 1–50 items; `content` ≤ 32,000 chars |
+| `messages` | list[ChatMessage] | required | 1 to 2048 items; `content` up to 1,000,000 chars |
 | `temperature` | float? | `0.7` | 0.0 – 2.0 |
-| `max_tokens` | int? | `512` | 1 – 4096 |
+| `max_tokens` | int? | `None` | at least 1, no fixed upper bound; omitted means the remaining context, further limited by the model's `max_completion_tokens` |
 | `top_p` | float? | `0.95` | 0.0 – 1.0 |
 | `stream` | bool | `False` | — |
 | `max_context_tokens` | int? | `None` | ≥ 1; prompt-token ceiling for admission |
-| `max_output_tokens` | int? | `None` | 1 – 4096; preferred alias for `max_tokens` |
+| `max_output_tokens` | int? | `None` | at least 1; preferred alias for `max_tokens` |
 | `priority` | `"interactive"` \| `"batch"` | `"interactive"` | Chooses clamp-vs-reject under pressure |
+| `stop` | str or list[str]? | `None` | one non-empty string or 1 to 4 of them (V1-0) |
+| `include_manifest` | bool | `False` | non-streaming only; returns the full run manifest (V1-0) |
+
+This table is not exhaustive (`seed`, `strict`, `deterministic`, and `stream_options` are
+also accepted). `ChatCompletionRequest` in `schemas/chat.py` is the source of truth, and
+any field not declared there is rejected with 400.
 
 `max_context_tokens`, `max_output_tokens`, and `priority` are **Inference-X extensions**,
 not part of the OpenAI schema.
