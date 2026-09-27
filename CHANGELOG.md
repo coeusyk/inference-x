@@ -58,7 +58,8 @@ refactors with no observable behavior change are not listed — see
   (for example 400 `context_length_exceeded`) instead of a 200 stream that
   breaks. The error is raised before the response starts.
 - **The run manifest `request` block has a `tools_sha256` field** (null
-  without tools), so `run_id` values differ from earlier builds.
+  without tools). It counts toward `run_id` only when the request used
+  tools, so requests without tools keep the same `run_id` as before.
 - **Omitting `max_tokens` now means "up to the context window"**, as in
   OpenAI's API, instead of a fixed 512 tokens.
 - **A model's `max_completion_tokens` is now applied before generation and

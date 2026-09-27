@@ -35,4 +35,4 @@ The protocol was also run against vLLM 0.22.1's own OpenAI server with its Herme
 - `schemas/chat.py`, `schemas/model.py`, `engines/base.py`, `engines/vllm_engine.py`, `services/chat_service.py`, `services/model_service.py`, `routing/policies.py`, `utils/ids.py`, `api/errors.py`, `api/main.py`, `api/routes/chat_completions.py`
 - `scripts/continue_acceptance.py`, `scripts/log_proxy.py`
 - `config/models.yaml`, `docs/DECISIONS.md`, `CHANGELOG.md`, `README.md`
-- Non-tool requests are unchanged on the wire and in `prompt_sha256`. `run_id` gains the `tools_sha256` key (null when absent) in its preimage; see design D8.
+- Non-tool requests are unchanged on the wire and in `prompt_sha256`. A no-tools request keeps its historical `run_id`: `tools_sha256` joins the preimage only when the request carries tools (design D8).

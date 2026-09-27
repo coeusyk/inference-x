@@ -529,3 +529,140 @@ class TestAliases:
         )
         prologue = _events(svc, _request(model="local-4b"))[0]
         assert prologue["resolved"]["model"] == "qwen3-4b-fp8"  # type: ignore[index]
+
+
+# ---------------------------------------------------------------------------
+# run_id identity: tools extend it only when used (DEC-065, design D8)
+# ---------------------------------------------------------------------------
+
+# run_id of `_golden_request()` computed by the pre-DEC-065 code on develop
+# (4b2f797) with the same pinned environment. A no-tools request must keep it.
+_PRE_DEC065_RUN_ID = "sha256:ec6cba87880269912a3485c668b15da12877241fa2332ccfcd0563a15a5d02fb"
+
+
+def _golden_request(**overrides) -> ChatCompletionRequest:
+    body = {
+        "model": "test",
+        "messages": [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "hello"},
+        ],
+        "temperature": 0.0,
+        "seed": 7,
+        "stop": ["\n\n"],
+        **overrides,
+    }
+    return ChatCompletionRequest.model_validate(body)
+
+
+@pytest.fixture()
+def _pinned_manifest_env(monkeypatch):
+    import inference_x.services.chat_service as cs
+    from inference_x.schemas.chat import ManifestHardware
+
+    monkeypatch.setattr(cs, "package_version", lambda name: f"{name}-1.0")
+    monkeypatch.setattr(cs, "resolve_git_sha", lambda: "0123abcd")
+    monkeypatch.setattr(cs, "_batch_invariant_enabled", lambda: False)
+    monkeypatch.setattr(cs, "_manifest_hardware_snapshot", lambda: ManifestHardware())
+
+
+def _manifest(req: ChatCompletionRequest):
+    from inference_x.schemas.chat import (
+        ChatCompletionChoice,
+        ChatCompletionMessage,
+        ChatCompletionResponse,
+    )
+    from inference_x.services.chat_service import _build_manifest, _resolved
+
+    class _Engine:
+        model_path = "org/model"
+
+    response = ChatCompletionResponse(
+        model="test",
+        choices=[
+            ChatCompletionChoice(
+                index=0, message=ChatCompletionMessage(content="ok"), finish_reason="stop"
+            )
+        ],
+        usage=ChatCompletionUsage(prompt_tokens=12, completion_tokens=1, total_tokens=13),
+    )
+    return _build_manifest(
+        routed_model="test",
+        registry=ModelRegistry([ModelEntry(name="test", model_path="org/model")]),
+        engine=_Engine(),  # type: ignore[arg-type]
+        original_request=req,
+        resolved=_resolved(req.model_copy(update={"max_tokens": 100})),
+        warnings=[],
+        response=response,
+    )
+
+
+def _documented_preimage(manifest) -> dict:
+    """The preimage rule as documented (add-run-manifest D2 + DEC-065)."""
+    request = manifest.request.model_dump()
+    if request["tools_sha256"] is None:
+        del request["tools_sha256"]
+    return {
+        "engine": manifest.engine.model_dump(),
+        "model": manifest.model.model_dump(),
+        "runtime": manifest.runtime.model_dump(),
+        "sampling": manifest.sampling.model_dump(),
+        "request": request,
+        "warnings": [{"type": w.type, "code": w.code, "field": w.field} for w in manifest.warnings],
+    }
+
+
+@pytest.mark.usefixtures("_pinned_manifest_env")
+class TestRunIdentity:
+    # The golden fixture is non-streaming, and `tools` requires streaming at the
+    # schema level. model_construct sets `tools` on an otherwise validated request
+    # so the manifest rule can be exercised for when that restriction lifts.
+    def _with_tools(self, tools: list[dict]) -> ChatCompletionRequest:
+        from inference_x.schemas.chat import ToolDefinition
+
+        req = _golden_request()
+        req.__dict__["tools"] = [ToolDefinition.model_validate(t) for t in tools]
+        return req
+
+    def test_no_tools_run_id_is_unchanged_from_before_dec_065(self):
+        manifest = _manifest(_golden_request())
+        assert manifest.run_id == _PRE_DEC065_RUN_ID
+        # The manifest may still expose the key, as null.
+        assert manifest.request.tools_sha256 is None
+
+    def test_adding_tools_changes_the_run_id(self):
+        with_tools = _manifest(self._with_tools([_READ_TOOL]))
+        assert with_tools.request.tools_sha256 is not None
+        assert with_tools.run_id != _PRE_DEC065_RUN_ID
+
+    def test_changing_only_tool_definitions_changes_the_run_id(self):
+        other = {**_READ_TOOL, "function": {**_READ_TOOL["function"], "description": "other"}}
+        a = _manifest(self._with_tools([_READ_TOOL]))
+        b = _manifest(self._with_tools([other]))
+        assert a.run_id != b.run_id
+
+    def test_key_order_inside_schemas_does_not_change_tools_sha256(self):
+        reordered = {
+            "function": {
+                "parameters": {
+                    "properties": {"filepath": {"description": "The path", "type": "string"}},
+                    "required": ["filepath"],
+                    "type": "object",
+                },
+                "description": _READ_TOOL["function"]["description"],
+                "name": "Read",
+            },
+            "type": "function",
+        }
+        a = _manifest(self._with_tools([_READ_TOOL]))
+        b = _manifest(self._with_tools([reordered]))
+        assert a.request.tools_sha256 == b.request.tools_sha256
+        assert a.run_id == b.run_id
+
+    @pytest.mark.parametrize("tools", [None, [_READ_TOOL]])
+    def test_run_id_is_recomputable_from_the_documented_preimage(self, tools):
+        from inference_x.utils.ids import compute_run_id
+
+        req = _golden_request() if tools is None else self._with_tools(tools)
+        manifest = _manifest(req)
+        assert compute_run_id(_documented_preimage(manifest)) == manifest.run_id

@@ -87,11 +87,16 @@ For a streamed completion that ends in tool calls, the platform SHALL emit, for 
 - **THEN** the engine keeps yielding heartbeat chunks that produce no SSE event, so the per-token timeout measures an engine stall rather than the call's length
 
 ### Requirement: Tool definitions and tool-call history participate in run identity
-The run manifest `request` block SHALL carry `tools_sha256`, the SHA-256 of the canonical JSON of the request's tools, or null when the request has none. `prompt_sha256` SHALL cover each message's `tool_calls` and `tool_call_id` when present, and SHALL hash a message without them exactly as before. The full tool schemas SHALL NOT be inlined into the manifest.
+The run manifest `request` block SHALL carry `tools_sha256`, the SHA-256 of the canonical JSON of the request's tools, or null when the request has none. `prompt_sha256` SHALL cover each message's `tool_calls` and `tool_call_id` when present, and SHALL hash a message without them exactly as before. The full tool schemas SHALL NOT be inlined into the manifest. `tools_sha256` SHALL enter the `run_id` preimage only when it is non-null; the rest of the `request` block SHALL enter it unchanged.
 
 #### Scenario: Different tools, different identity
 - **WHEN** two otherwise identical requests carry different `tools`
 - **THEN** their `tools_sha256` values differ, and so would their `run_id`s
+
+#### Scenario: A request without tools keeps its run identity
+- **WHEN** a request carries no `tools`
+- **THEN** `tools_sha256` does not enter the `run_id` preimage, the `request` block is hashed in its pre-existing shape, and the `run_id` equals the value computed before tool calling existed
+- **AND** the returned manifest may still show `tools_sha256` as null
 
 #### Scenario: Plain messages keep their hash
 - **WHEN** a request contains only system, user, and assistant messages without tool calls

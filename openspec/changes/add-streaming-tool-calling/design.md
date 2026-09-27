@@ -104,7 +104,7 @@ Tools change what the model generates, so two runs with different tool sets are 
 Two facts about the current system matter here:
 
 - `run_id` is computed only on non-streaming responses today, and `tools` requires streaming. So no request that carries `tools` gets a `run_id` yet. A non-streaming request with tool-call history but no `tools` does get one, and its `prompt_sha256` now distinguishes it. The rule is defined now so the preimage is already correct if streaming manifests or non-streaming tool calls arrive later.
-- Adding `tools_sha256` puts one more key (null for non-tool requests) into every preimage. So `run_id` for an otherwise identical non-tool request differs from the value computed before this change. That is not a new kind of break: `engine.version` and `engine.git_sha` are already in the preimage, so `run_id`s were never comparable across builds.
+- `tools_sha256` extends identity only when the request actually uses tools. The `request` block enters the `run_id` preimage in exactly its pre-DEC-065 shape, and `tools_sha256` is added to it only when it is non-null (`chat_service._request_preimage`). The returned manifest still shows `tools_sha256: null` for a no-tools request, but that key is not hashed. So a no-tools request keeps its historical `run_id`, and a regression test pins the value computed by the pre-change code on `develop`. Only this key is conditional; the block's other nullable fields keep their nulls in the preimage, as before. The first version of this change hashed the null key into every preimage and so changed every no-tools `run_id`. The owner rejected that before merge.
 
 ## D9: Unsupported features stay rejected
 

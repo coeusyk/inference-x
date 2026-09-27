@@ -105,6 +105,21 @@ def _resolved(effective_request: ChatCompletionRequest) -> ResolvedRequest:
     )
 
 
+def _request_preimage(request_info: ManifestRequestInfo) -> dict:
+    """The manifest `request` block as it enters the run_id preimage.
+
+    Exactly the pre-DEC-065 shape, plus `tools_sha256` only when the request
+    carried tools. A no-tools request therefore keeps its historical run_id;
+    tool definitions extend identity only when they were used. Only this key is
+    conditional: the block's other nullable fields keep their `null`s, because
+    they were in the C1 preimage before.
+    """
+    block = request_info.model_dump(exclude={"tools_sha256"})
+    if request_info.tools_sha256 is not None:
+        block["tools_sha256"] = request_info.tools_sha256
+    return block
+
+
 def _batch_invariant_enabled() -> bool:
     """Whether VLLM_BATCH_INVARIANT is currently set — reported honestly."""
     from inference_x.utils.determinism import batch_invariant_env_enabled
@@ -194,7 +209,7 @@ def _build_manifest(
         "model": manifest_model.model_dump(),
         "runtime": manifest_runtime.model_dump(),
         "sampling": manifest_sampling.model_dump(),
-        "request": manifest_request.model_dump(),
+        "request": _request_preimage(manifest_request),
         # Stable identity fields only (design.md D2) — `message` is free text
         # that ResponseWarning's own contract (OS-4/DEC-053) already permits
         # to change without a spec change, so it must not affect run_id.
