@@ -4,7 +4,7 @@ version = "0.6.0"
 description = "Self-hosted LLM inference platform with smart routing and observability"
 requires-python = ">=3.13"
 dependencies = [
-    "vllm>=0.6.0",
+    "vllm==0.30.0",
     "fastapi>=0.115.0",
     "httpx>=0.27.0",
     "pydantic>=2.0.0",

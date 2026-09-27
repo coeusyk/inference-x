@@ -220,7 +220,7 @@ V1-0  Aider-compatible serving surface (+ opt-in full manifest)
   |
       streaming tool calling for Continue (done, #41)
   |
-      vLLM 0.30.0 qualification (runtime baseline for v1.0; not a feature)
+      vLLM 0.30.0 qualification (done, GO, #44; runtime baseline, not a feature)
   |
 V1-1  llama.cpp backend (external llama-server, behind the Engine Boundary)
   |
@@ -233,6 +233,8 @@ V1-4  validation + hardening (realistic models, crash isolation, retuned admissi
 v1.0.0
 V1-5  Varex consumer validation — parallel, non-gating
 ```
+
+The vLLM 0.30.0 qualification finished on 2026-09-27 with a GO, and #44 pins vLLM to exactly 0.30.0 as the v1.0 runtime baseline. It was run as its own compatibility change, not combined with any feature. The matrix, the performance baseline against 0.22.1 and the regressions it found live in the `qualify-vllm-0-30` OpenSpec change and in DEC-066 (the decision that makes 0.30.0 the exactly pinned, qualified baseline). Admission restoration stays deferred under the triggers in 10.3; finishing the qualification satisfies only the precondition there, not a trigger. V1-1, the llama.cpp backend, is the next core milestone.
 
 Invariants carried forward:
 

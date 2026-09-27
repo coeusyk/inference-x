@@ -601,7 +601,8 @@ class VLLMEngine(BaseEngine):
         try:
             # AsyncLLM exposes vllm_config directly as an instance attribute (no
             # llm_engine indirection, unlike the offline LLM class this replaced) —
-            # verified against vLLM 0.22.1's AsyncLLM/EngineCoreClient
+            # verified against vLLM 0.22.1's AsyncLLM/EngineCoreClient and
+            # re-checked on 0.30.0
             # (migrate-async-llm-engine Decision 6).
             cache_config = getattr(
                 getattr(self._llm, "vllm_config", None), "cache_config", None
@@ -664,7 +665,7 @@ class VLLMEngine(BaseEngine):
         Manifest provenance (Phase C, C1 — add-run-manifest). Mirrors
         `_log_kv_cache_stats`'s defensive `getattr`-chain introspection of
         `AsyncLLM.vllm_config` (verified against vLLM 0.22.1's `VllmConfig`
-        dataclass): any field that cannot be read is None, never guessed.
+        dataclass, re-checked on 0.30.0): any field that cannot be read is None, never guessed.
         Not part of `BaseEngine`'s declared contract — discovered via
         `getattr`, same as `kv_capacity_tokens`.
         """
