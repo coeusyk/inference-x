@@ -1,3 +1,4 @@
+from collections.abc import AsyncGenerator
 from typing import Annotated
 
 from fastapi import APIRouter, Depends
@@ -20,10 +21,23 @@ async def chat_completions(
     service: Annotated[ChatService, Depends(get_chat_service)],
 ) -> JSONResponse | StreamingResponse:
     if request.stream is True:
-        return StreamingResponse(
-            service.stream_response(request),
-            media_type="text/event-stream",
-        )
+        events = service.stream_response(request)
+        # Advance to the pre-generation event before the 200 starts, so routing,
+        # capability (DEC-065) and admission rejections reach the client as HTTP
+        # errors instead of being raised after the response has begun.
+        first = await anext(events)
+
+        async def _stream() -> AsyncGenerator[str, None]:
+            try:
+                yield first
+                async for event in events:
+                    yield event
+            finally:
+                # Closing propagates into stream_response, whose finally
+                # releases the admission reservation exactly once.
+                await events.aclose()
+
+        return StreamingResponse(_stream(), media_type="text/event-stream")
 
     result = await service.complete(request)
     # Phase C, C1 (add-run-manifest): non-streaming only — the run_id is not

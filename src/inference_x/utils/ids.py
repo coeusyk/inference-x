@@ -18,7 +18,7 @@ from importlib import metadata
 from pathlib import Path
 from typing import Any
 
-from inference_x.schemas.chat import ChatMessage
+from inference_x.schemas.chat import ChatMessage, ToolDefinition
 
 _RUN_ID_PREFIX = "sha256:"
 _UNSET = object()
@@ -54,12 +54,25 @@ def compute_prompt_sha256(messages: list[ChatMessage]) -> str:
     (DEC-047) — combined with `chat_template_sha256`, "same messages + same
     template" is recoverable without the server needing to expose the
     rendered string itself.
+
+    `tool_calls`/`tool_call_id` are hashed only when present
+    (`exclude_none`), so a plain message hashes exactly as it did before
+    tool calling existed (add-streaming-tool-calling D8).
     """
+    return _sha256_json([m.model_dump(exclude_none=True) for m in messages])
+
+
+def compute_tools_sha256(tools: list[ToolDefinition] | None) -> str | None:
+    """Content hash of a request's tool definitions, or None without tools
+    (manifest `request.tools_sha256`, add-streaming-tool-calling D8)."""
+    if tools is None:
+        return None
+    return _sha256_json([t.model_dump(exclude_none=True) for t in tools])
+
+
+def _sha256_json(value: Any) -> str:
     canonical = json.dumps(
-        [{"role": m.role, "content": m.content} for m in messages],
-        sort_keys=True,
-        ensure_ascii=False,
-        separators=(",", ":"),
+        value, sort_keys=True, ensure_ascii=False, separators=(",", ":")
     )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 

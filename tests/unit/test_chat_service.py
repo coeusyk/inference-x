@@ -1006,7 +1006,10 @@ class TestRunManifest:
             "model": manifest.model.model_dump(),
             "runtime": manifest.runtime.model_dump(),
             "sampling": manifest.sampling.model_dump(),
-            "request": manifest.request.model_dump(),
+            # DEC-065: tools_sha256 joins the preimage only when non-null.
+            "request": manifest.request.model_dump(
+                exclude={"tools_sha256"} if manifest.request.tools_sha256 is None else None
+            ),
             "warnings": [
                 {"type": w.type, "code": w.code, "field": w.field}
                 for w in manifest.warnings

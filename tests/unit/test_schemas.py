@@ -329,7 +329,8 @@ class TestEffectiveRequestSurfaces:
     # The two exclusion classes from the derivability rule: message content, and
     # the transport/policy controls. Everything else must appear in `resolved`.
     _EXCLUDED = {
-        "messages", "stream", "stream_options", "strict", "deterministic", "include_manifest"
+        "messages", "tools", "stream", "stream_options", "strict", "deterministic",
+        "include_manifest",
     }
 
     def test_resolved_field_set_is_derivable_from_the_request(self):

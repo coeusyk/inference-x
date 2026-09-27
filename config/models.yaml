@@ -59,6 +59,28 @@ models:
     max_model_len: 8192
     max_num_seqs: 1
 
+  # Continue acceptance model (add-streaming-tool-calling, DEC-065). Chosen on
+  # measured Continue edits against vLLM's reference server: 3/3, where the 1.5B
+  # coder model made 0/6 (no <tool_call> output) and qwen2.5-7b-awq made 1/6.
+  # tool_call_parser declares the capability; without it tool requests are
+  # rejected. Same 8192 x 1 envelope as the Aider model (DEC-064).
+  - name: qwen3-4b-fp8
+    engine: vllm
+    model_path: Qwen/Qwen3-4B-Instruct-2507-FP8
+    quantization: fp8
+    # Explicit rather than auto on the 8 GiB RTX 4060: footprint auto-sizing asked
+    # for 0.911 (7.28 GiB) from free VRAM measured before the engine process's own
+    # CUDA context existed, and vLLM then saw only 6.93 GiB free and refused to start.
+    gpu_memory_utilization: 0.85
+    max_model_len: 8192
+    max_num_seqs: 1
+    tool_call_parser: hermes
+    # Client-facing alias for Continue. Continue CLI 1.5.47 offers its MultiEdit tool
+    # (a nested `edits` array) to any model whose name matches /qwen/ and its flat Edit
+    # tool otherwise; this model malformed the MultiEdit JSON on every first attempt.
+    # The alias routes here; resolved.model and the manifest still say qwen3-4b-fp8.
+    aliases: [local-4b]
+
   - name: minicpm5-1b
     engine: vllm
     model_path: openbmb/MiniCPM5-1B

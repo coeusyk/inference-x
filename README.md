@@ -216,6 +216,43 @@ On a machine that has no network, add `HF_HUB_OFFLINE=1` to the serve command on
 
 To check the whole path end to end, `scripts/aider_acceptance.py` makes a throwaway repo with a buggy function and a failing test, asks Aider to fix it through the running server, and then runs the test.
 
+### Coding with Continue
+
+Continue edits through OpenAI tool calls, so it needs a model that declares a tool-call parser in `config/models.yaml`. Tool requests to any other model get a 400 with code `tool_calling_unsupported`. These are the settings used for the Continue acceptance runs (Continue CLI 1.5.47, `qwen3-4b-fp8`, 8192-token context with one sequence, RTX 4060 8 GiB).
+
+```bash
+# Once: download the model and install the Continue CLI
+uv run hf download Qwen/Qwen3-4B-Instruct-2507-FP8
+npm i -g @continuedev/cli
+
+# Terminal 1: serve the tool-calling model
+INFERENCE_X_DEFAULT_MODEL=qwen3-4b-fp8 ./scripts/dev.sh serve
+```
+
+Continue config (`~/.continue/config.yaml`, or pass it with `cn --config`):
+
+```yaml
+name: inferencex
+version: 0.0.1
+schema: v1
+models:
+  - name: local-4b
+    provider: openai
+    model: local-4b
+    apiBase: http://127.0.0.1:8000/v1
+    apiKey: unused
+    roles: [chat, edit, apply]
+    capabilities: [tool_use]
+```
+
+`local-4b` is an alias of `qwen3-4b-fp8`. The alias matters. Continue offers its `MultiEdit` tool (edits nested in an array) to any model whose name contains `qwen`, `llama`, `gpt` and a few others, and the flat `Edit` tool to everything else. Qwen3-4B gets MultiEdit's nested JSON wrong on its first try almost every time, and gets `Edit` right. Responses still report `qwen3-4b-fp8` as the model that ran.
+
+The same config works for the Continue VS Code extension. The extension reads its config from the machine it runs on, so with VS Code on Windows that is `%USERPROFILE%\.continue\config.yaml` even inside a Remote - WSL window, and `127.0.0.1` still reaches the server in WSL. Use Agent mode so tools are sent. The extension also sends `parallel_tool_calls: false`. InferenceX then returns at most one tool call per turn, and if the model wrote more than one it says so in a `parallel_tool_calls_truncated` warning on the stream's final event.
+
+Tool calls are streamed once the model has finished writing them. If the model writes a well-formed `<tool_call>` block whose arguments are not valid JSON, the call is passed to Continue with the model's arguments exactly as written, so Continue can report the error and the model can retry. Nothing is ever repaired or made up. Output that isn't clearly a tool call comes back as plain text.
+
+To check the whole path end to end, `scripts/continue_acceptance.py --trials 5` runs the same buggy-`median()` task through `cn` headless and then runs the test. `scripts/log_proxy.py` can sit in front of the server to record every request and streamed response.
+
 ---
 
 ## Commands

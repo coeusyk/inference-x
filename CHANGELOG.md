@@ -8,6 +8,27 @@ refactors with no observable behavior change are not listed — see
 
 ### Added
 
+- **Streaming tool calling for Continue.** `POST /v1/chat/completions` accepts
+  OpenAI function `tools` on streaming requests, assistant `tool_calls`, and
+  `role: "tool"` results, for models that declare `tool_call_parser` in
+  `config/models.yaml`. Tool calls stream as `delta.tool_calls` with
+  `finish_reason: "tool_calls"`. A call is only sent after the model's whole
+  output is known to be a tool call. A clearly framed call whose arguments
+  are not valid JSON is passed through with the model's arguments exactly as
+  written, so the client can report the error; anything that isn't clearly a
+  tool call comes back as plain text. Nothing is repaired or made up. Models
+  without a parser reject tool requests with 400 `tool_calling_unsupported`.
+  New `qwen3-4b-fp8` model entry for Continue.
+- **`parallel_tool_calls`** (Continue for VS Code always sends `false`). With
+  `false`, at most one tool call is returned; if the model produced more, the
+  first is returned and the stream's final event carries a
+  `parallel_tool_calls_truncated` warning saying how many there were.
+- **Model aliases.** A `config/models.yaml` entry can list `aliases`; a
+  request naming an alias is served by that entry, and `resolved` and the run
+  manifest report the entry's real name. `qwen3-4b-fp8` has the alias
+  `local-4b` so Continue offers its simpler `Edit` tool.
+- `scripts/continue_acceptance.py` (Continue CLI end-to-end edit check) and
+  `scripts/log_proxy.py` (records client traffic).
 - **`stop` sequences** on `POST /v1/chat/completions` (a string or up to 4
   strings), honored by the engine and echoed in `resolved`.
 - **Opt-in full run manifest**: `include_manifest: true` on a non-streaming
@@ -37,6 +58,12 @@ refactors with no observable behavior change are not listed — see
 
 ### Changed
 
+- **Streaming requests rejected before generation now get a real HTTP error**
+  (for example 400 `context_length_exceeded`) instead of a 200 stream that
+  breaks. The error is raised before the response starts.
+- **The run manifest `request` block has a `tools_sha256` field** (null
+  without tools). It counts toward `run_id` only when the request used
+  tools, so requests without tools keep the same `run_id` as before.
 - **Omitting `max_tokens` now means "up to the context window"**, as in
   OpenAI's API, instead of a fixed 512 tokens.
 - **A model's `max_completion_tokens` is now applied before generation and

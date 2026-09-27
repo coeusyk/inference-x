@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import re
@@ -18,8 +19,11 @@ from inference_x.schemas.chat import (
     ChatCompletionRequest,
     ChatCompletionResponse,
     ChatCompletionUsage,
+    ChatMessage,
     ChatStreamChunk,
     EngineTiming,
+    FunctionCall,
+    ToolCall,
 )
 
 logger = logging.getLogger(__name__)
@@ -108,6 +112,125 @@ def _derive_engine_timing(output: Any) -> EngineTiming | None:
         decode_time_ms=decode_time_ms,
         inference_time_ms=prefill_time_ms + decode_time_ms,
     )
+
+
+def _resolve_tool_parser(name: str) -> Any:
+    """vLLM tool-parser class for a model entry's `tool_call_parser`, resolved
+    at startup so an unknown name fails the load, not the first request.
+
+    `vllm.tool_parsers` is not a documented stable API. The coupling is kept to
+    this lookup, the constructor, `extract_tool_calls`, `tool_call_start_token`
+    and the result's `tools_called`/`tool_calls` (DEC-065); a unit test runs
+    the real parser so an upstream change fails there first.
+    """
+    from vllm.tool_parsers import ToolParserManager  # type: ignore[import-untyped]
+
+    try:
+        return ToolParserManager.get_tool_parser(name)
+    except KeyError:
+        raise RuntimeError(
+            f"tool_call_parser '{name}' is not provided by the installed vLLM"
+        ) from None
+
+
+def _held_back_start(text: str, tag: str) -> int:
+    """Index where streamable content ends: the first *tag*, or the start of a
+    trailing partial *tag* that the next tokens may complete."""
+    found = text.find(tag)
+    if found != -1:
+        return found
+    for k in range(min(len(tag) - 1, len(text)), 0, -1):
+        if text.endswith(tag[:k]):
+            return len(text) - k
+    return len(text)
+
+
+# A closed Hermes block whose envelope is exactly {"name": "<string>",
+# "arguments": <anything>}. The name slot and both braces must be intact; only
+# the arguments value may be malformed. Used solely to *locate* the raw
+# arguments text, never to rewrite it.
+_HERMES_BLOCK = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
+# The same block split Hermes2ProToolParser uses (closed blocks, then an
+# unclosed final one), so its calls line up one-to-one with these bodies.
+_HERMES_PARSER_BLOCKS = re.compile(r"<tool_call>(.*?)</tool_call>|<tool_call>(.*)", re.DOTALL)
+_HERMES_ENVELOPE = re.compile(
+    r'\s*\{\s*"name"\s*:\s*"([^"\\]+)"\s*,\s*"arguments"\s*:\s*(.*?)\s*\}\s*', re.DOTALL
+)
+
+
+def _raw_arguments(body: str) -> str | None:
+    match = _HERMES_ENVELOPE.fullmatch(body)
+    return match.group(2) if match else None
+
+
+def _same_json(a: str, b: str) -> bool:
+    try:
+        return bool(json.loads(a) == json.loads(b))
+    except ValueError:
+        return False
+
+
+def _extract_tool_calls(parser: Any, text: str) -> list[ToolCall] | None:
+    """Tool calls from the complete output, or None (DEC-065).
+
+    First vLLM's Hermes parser (non-streaming path), which `json.loads` every
+    call. If that finds nothing, a call is still transported when its framing is
+    unambiguous: every `<tool_call>` block is closed and its envelope matches
+    `_HERMES_ENVELOPE`. Whenever the envelope is intact, a call's arguments are
+    the model's own text for them, byte for byte, valid JSON or not, so one
+    call is carried identically whatever its neighbours look like. Only a block
+    Hermes parses but the envelope cannot frame (e.g. keys in another order)
+    keeps Hermes's re-serialized arguments. Output whose framing is not
+    unambiguous is never turned into a call. Nothing is repaired or guessed.
+    """
+    info = parser.extract_tool_calls(text, None)  # request is unused by Hermes
+    if info.tools_called:
+        bodies = [a or b for a, b in _HERMES_PARSER_BLOCKS.findall(text)]
+        if len(bodies) != len(info.tool_calls):
+            bodies = [""] * len(info.tool_calls)
+        try:
+            calls = []
+            for call, body in zip(info.tool_calls, bodies):
+                raw = _raw_arguments(body)
+                # The span is the arguments only if it decodes to exactly what
+                # Hermes parsed; an extra key after "arguments" would otherwise
+                # be swept into it.
+                if raw is None or not _same_json(raw, call.function.arguments):
+                    raw = None
+                arguments = raw if raw is not None else call.function.arguments
+                calls.append(
+                    ToolCall(
+                        id=call.id,
+                        function=FunctionCall(name=call.function.name, arguments=arguments),
+                    )
+                )
+            return calls
+        except ValueError:  # e.g. an empty name: not an unambiguous call
+            return None
+    tag = parser.tool_call_start_token
+    blocks = _HERMES_BLOCK.findall(text)
+    if not blocks or text.count(tag) != len(blocks):  # an unclosed block is ambiguous
+        return None
+    envelopes = [_HERMES_ENVELOPE.fullmatch(block) for block in blocks]
+    if not all(envelopes):
+        return None
+    return [
+        ToolCall(
+            id=f"chatcmpl-tool-{uuid.uuid4().hex[:16]}",
+            function=FunctionCall(name=m.group(1), arguments=m.group(2)),
+        )
+        for m in envelopes
+        if m is not None
+    ]
+
+
+def _template_message(message: ChatMessage) -> dict[str, Any]:
+    """A message as HF chat templates expect it: tool-call arguments as a
+    dict, not the OpenAI JSON string (same as vLLM's `_postprocess_messages`)."""
+    rendered = message.model_dump(exclude_none=True)
+    for call in rendered.get("tool_calls", []):
+        call["function"]["arguments"] = json.loads(call["function"]["arguments"])
+    return rendered
 
 
 def _probe_cuda_vram() -> dict[str, float | bool]:
@@ -403,6 +526,10 @@ class VLLMEngine(BaseEngine):
         self._repetition_penalty: float | None = model_config.get("repetition_penalty")
         self._healthy = False
         self._kv_capacity_tokens: int | None = None
+        tool_call_parser = model_config.get("tool_call_parser")
+        self._tool_parser_cls: Any = (
+            _resolve_tool_parser(tool_call_parser) if tool_call_parser else None
+        )
 
         hf_token = resolve_hf_token()
         preflight_hf_access(self._model_name, self._model_path, hf_token)
@@ -583,6 +710,14 @@ class VLLMEngine(BaseEngine):
             )
         return snapshot
 
+    @property
+    def supports_tools(self) -> bool:
+        """True when a tool parser was resolved at startup and the tokenizer has
+        a chat template to render tools with (BaseEngine capability, DEC-065)."""
+        return getattr(self, "_tool_parser_cls", None) is not None and bool(
+            getattr(self, "_supports_chat", False)
+        )
+
     def _detect_chat_support(self) -> bool:
         try:
             tok = self._llm.get_tokenizer()
@@ -657,9 +792,22 @@ class VLLMEngine(BaseEngine):
             kwargs["seed"] = request.seed
         if request.stop is not None:
             kwargs["stop"] = [request.stop] if isinstance(request.stop, str) else request.stop
+        if request.tools:
+            # As Hermes2ProToolParser.adjust_request: some Hermes models mark the
+            # tool-call tags special, and skipping them would hide the call.
+            kwargs["skip_special_tokens"] = False
         return SamplingParams(**kwargs)
 
     def _stream_prompt(self, request: ChatCompletionRequest) -> str:
+        if request.uses_tools:
+            # No plain-text fallback here: it would drop the tools silently.
+            tools = request.tools or []
+            return self._llm.get_tokenizer().apply_chat_template(
+                [_template_message(m) for m in request.messages],
+                tools=[t.model_dump(exclude_none=True) for t in tools] or None,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
         if not self._supports_chat:
             return self._messages_to_prompt(request.messages)
 
@@ -695,24 +843,59 @@ class VLLMEngine(BaseEngine):
         `CancelledError` straight into `AsyncLLM.generate()`'s own consumption
         loop, which reacts by aborting the request on the engine core
         (Decision 4) — this must not be caught and swallowed here.
+
+        With `tools` (DEC-065), text before the first tool-call tag streams as
+        content and everything from the tag on is held back, with empty
+        heartbeat chunks so the per-token stream timeout still measures a stall.
+        Once the model finishes, the complete output is parsed
+        (`_extract_tool_calls`): recognized calls ride the terminal chunk with
+        `finish_reason: "tool_calls"`; otherwise the held-back text is released
+        verbatim with the engine's own finish reason. vLLM's streaming parser is
+        deliberately not used: it starts emitting a call before the framing is
+        known to be complete.
         """
         sampling = self._sampling_params(request)
         prompt = self._stream_prompt(request)
         request_id = f"cmpl-{uuid.uuid4().hex}"
+        parser = (
+            self._tool_parser_cls(self._llm.get_tokenizer()) if request.tools else None
+        )
         previous_text = ""
         try:
             async for output in self._llm.generate(prompt, sampling, request_id):
                 if not output.outputs:
                     continue
                 text = output.outputs[0].text or ""
-                chunk = text[len(previous_text) :] if text.startswith(previous_text) else text
-                previous_text = text
+                if parser is not None:
+                    text_ready = text[: _held_back_start(text, parser.tool_call_start_token)]
+                else:
+                    text_ready = text
+                chunk = (
+                    text_ready[len(previous_text) :]
+                    if text_ready.startswith(previous_text)
+                    else text_ready
+                )
+                previous_text = text_ready
                 if chunk:
                     yield ChatStreamChunk(content=chunk)
+                elif parser is not None and not output.finished:
+                    yield ChatStreamChunk()  # heartbeat while a call is held back
                 if output.finished:
                     finish, usage, timing = derive_terminal_metadata(output)
+                    finish_reason: Literal["stop", "length", "tool_calls"] = finish
+                    tool_calls = None
+                    if parser is not None:
+                        tool_calls = _extract_tool_calls(parser, text)
+                        if tool_calls:
+                            finish_reason = "tool_calls"
+                        elif len(text) > len(previous_text):
+                            yield ChatStreamChunk(content=text[len(previous_text) :])
                     yield ChatStreamChunk(
-                        content="", finish_reason=finish, usage=usage, timing=timing
+                        content="",
+                        finish_reason=finish_reason,
+                        tool_calls=tool_calls,
+                        usage=usage,
+                        timing=timing,
                     )
         except (asyncio.CancelledError, GeneratorExit):
             raise

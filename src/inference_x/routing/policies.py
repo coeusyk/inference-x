@@ -7,18 +7,16 @@ from inference_x.services.model_service import ModelRegistry
 class ExplicitModelPolicy:
     """Pass-through policy: honour the model name the client requested.
 
-    If the requested model is registered, return it.
-    Raises ValueError if the model is not in the registry.
+    If the requested model is registered, directly or as an alias, return its
+    canonical name; otherwise None.
     """
 
     def __init__(self, registry: ModelRegistry) -> None:
         self._registry = registry
 
     def apply(self, request: ChatCompletionRequest) -> str | None:
-        """Return the requested model name if registered, else None."""
-        if request.model in self._registry:
-            return request.model
-        return None
+        """Return the canonical name of the requested model if registered, else None."""
+        return self._registry.canonical_name(request.model)
 
 
 class DefaultModelPolicy:

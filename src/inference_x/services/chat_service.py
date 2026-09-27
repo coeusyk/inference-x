@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import uuid
 from collections.abc import AsyncGenerator
 
@@ -9,7 +10,7 @@ from inference_x.benchmarks.hardware import extended_hardware_fields, profile_ha
 from inference_x.core.settings import get_settings
 from inference_x.engines.base import BaseEngine
 from inference_x.engines.pool import EnginePool
-from inference_x.routing.admission import AdmissionController
+from inference_x.routing.admission import AdmissionController, AdmissionResult
 from inference_x.routing.task_router import TaskRouter
 from inference_x.schemas.chat import (
     ChatCompletionRequest,
@@ -25,17 +26,71 @@ from inference_x.schemas.chat import (
     ResolvedRequest,
     ResponseWarning,
     RunManifest,
+    ToolCall,
 )
 from inference_x.services.model_service import ModelRegistry
 from inference_x.utils.ids import (
     compute_prompt_sha256,
     compute_run_id,
+    compute_tools_sha256,
     is_hf_hub_repo_id,
     package_version,
     resolve_git_sha,
 )
 
+logger = logging.getLogger(__name__)
+
 _RESOLVED_FIELDS = tuple(ResolvedRequest.model_fields)
+
+
+class ToolCallingUnsupportedError(ValueError):
+    """A tool request was routed to a model with no declared tool-call parser
+    (DEC-065). Raised before admission; mapped to 400 `tool_calling_unsupported`."""
+
+
+def _apply_parallel_tool_calls(
+    request: ChatCompletionRequest, tool_calls: list[ToolCall] | None
+) -> tuple[list[ToolCall], list[ResponseWarning]]:
+    """Honor `parallel_tool_calls: false` on the calls the engine produced (DEC-065).
+
+    Generation cannot be constrained to one call, so when the model produced
+    several the first is returned and the truncation is disclosed with a
+    post-generation warning, never dropped silently.
+    """
+    calls = list(tool_calls or [])
+    if request.parallel_tool_calls is not False or len(calls) <= 1:
+        return calls, []
+    logger.warning(
+        "parallel_tool_calls=false: model produced %d tool calls, returned 1", len(calls)
+    )
+    return calls[:1], [
+        ResponseWarning(
+            type="substituted",
+            code="parallel_tool_calls_truncated",
+            message=(
+                f"The model produced {len(calls)} tool calls while "
+                "parallel_tool_calls=false; only the first call was returned."
+            ),
+            field="parallel_tool_calls",
+        )
+    ]
+
+
+def _tool_call_events(tool_calls: list[ToolCall]) -> list[dict]:
+    """OpenAI `delta.tool_calls` payloads for a terminal chunk's calls (DEC-065):
+    per call, identity and name first, then the complete arguments string."""
+    events: list[dict] = []
+    for index, call in enumerate(tool_calls):
+        events.append(
+            {
+                "index": index,
+                "id": call.id,
+                "type": call.type,
+                "function": {"name": call.function.name, "arguments": ""},
+            }
+        )
+        events.append({"index": index, "function": {"arguments": call.function.arguments}})
+    return events
 
 _UNSET = object()
 _manifest_hardware_cache: object = _UNSET
@@ -80,6 +135,21 @@ def _resolved(effective_request: ChatCompletionRequest) -> ResolvedRequest:
     return ResolvedRequest(
         **{name: getattr(effective_request, name) for name in _RESOLVED_FIELDS}
     )
+
+
+def _request_preimage(request_info: ManifestRequestInfo) -> dict:
+    """The manifest `request` block as it enters the run_id preimage.
+
+    Exactly the pre-DEC-065 shape, plus `tools_sha256` only when the request
+    carried tools. A no-tools request therefore keeps its historical run_id;
+    tool definitions extend identity only when they were used. Only this key is
+    conditional: the block's other nullable fields keep their `null`s, because
+    they were in the C1 preimage before.
+    """
+    block = request_info.model_dump(exclude={"tools_sha256"})
+    if request_info.tools_sha256 is not None:
+        block["tools_sha256"] = request_info.tools_sha256
+    return block
 
 
 def _batch_invariant_enabled() -> bool:
@@ -161,6 +231,7 @@ def _build_manifest(
         prompt_sha256=compute_prompt_sha256(original_request.messages),
         prompt_tokens=response.usage.prompt_tokens,
         chat_template_sha256=getattr(engine, "chat_template_sha256", None),
+        tools_sha256=compute_tools_sha256(original_request.tools),
     )
 
     manifest_hardware = _manifest_hardware_snapshot()
@@ -170,7 +241,7 @@ def _build_manifest(
         "model": manifest_model.model_dump(),
         "runtime": manifest_runtime.model_dump(),
         "sampling": manifest_sampling.model_dump(),
-        "request": manifest_request.model_dump(),
+        "request": _request_preimage(manifest_request),
         # Stable identity fields only (design.md D2) — `message` is free text
         # that ResponseWarning's own contract (OS-4/DEC-053) already permits
         # to change without a spec change, so it must not affect run_id.
@@ -242,6 +313,32 @@ class ChatService:
                 "be activated per-request once the engine is running"
             )
 
+    @staticmethod
+    def _enforce_tool_support(
+        request: ChatCompletionRequest, routed_model: str, engine: BaseEngine
+    ) -> None:
+        """Refuse a tool request the engine cannot serve, before admission.
+
+        Running it anyway would mean dropping the tools or returning whatever
+        text the model produced as if tool calling had happened (DEC-065).
+        """
+        if request.uses_tools and not engine.supports_tools:
+            raise ToolCallingUnsupportedError(
+                f"Model '{routed_model}' does not support tool calling: no tool-call "
+                "parser is configured for it."
+            )
+
+    def _effective_request(
+        self, request: ChatCompletionRequest, routed_model: str, admitted: AdmissionResult
+    ) -> ChatCompletionRequest:
+        """What actually runs: admission's max_tokens, and the canonical model name
+        when the client used an alias (DEC-065), so `resolved.model` names the
+        registry entry that served the request."""
+        update: dict[str, object] = {"max_tokens": admitted.effective_max_tokens}
+        if self._registry.canonical_name(request.model) == routed_model:
+            update["model"] = routed_model
+        return request.model_copy(update=update)
+
     async def complete(self, request: ChatCompletionRequest) -> ChatCompletionResponse:
         """Route and execute a chat completion request.
 
@@ -253,10 +350,9 @@ class ChatService:
         """
         routed_model, engine = self._resolve_engine(request)
         self._enforce_deterministic(request)
+        self._enforce_tool_support(request, routed_model, engine)
         admitted = await self._admission.admit(routed_model, request, engine)
-        effective_request = request.model_copy(
-            update={"max_tokens": admitted.effective_max_tokens}
-        )
+        effective_request = self._effective_request(request, routed_model, admitted)
         try:
             response = await engine.generate(effective_request)
         finally:
@@ -298,9 +394,13 @@ class ChatService:
 
         0. exactly one pre-generation event with ``choices: []`` carrying
            ``resolved`` and ``warnings``, always, before any content;
-        1. zero or more content events, each with ``finish_reason: null``;
+        1. zero or more content events, each with ``finish_reason: null``,
+           then, when the engine's terminal chunk carries tool calls, two
+           ``delta.tool_calls`` events per call (DEC-065);
         2. exactly one terminal event with an empty delta and a real
-           ``finish_reason``;
+           ``finish_reason``, carrying a top-level ``warnings`` list only when
+           a post-generation warning exists (DEC-065:
+           ``parallel_tool_calls_truncated``);
         3. one usage event with ``choices: []`` — only when the client asked via
            ``stream_options.include_usage`` and the engine accounted usage.
            Carries ``timing`` alongside ``usage`` (Phase B3) when the engine
@@ -335,12 +435,11 @@ class ChatService:
         """
         routed_model, engine = self._resolve_engine(request)
         self._enforce_deterministic(request)
+        self._enforce_tool_support(request, routed_model, engine)
         admitted = await self._admission.admit(routed_model, request, engine)
         gen: AsyncGenerator[ChatStreamChunk, None] | None = None
         try:
-            effective_request = request.model_copy(
-                update={"max_tokens": admitted.effective_max_tokens}
-            )
+            effective_request = self._effective_request(request, routed_model, admitted)
             completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
             timeout_s = get_settings().stream_timeout_s
             include_usage = bool(
@@ -392,20 +491,41 @@ class ChatService:
                         }
                     )
 
-                if chunk.finish_reason is not None:
+                tool_calls, post_warnings = _apply_parallel_tool_calls(
+                    effective_request, chunk.tool_calls
+                )
+                for tool_call_delta in _tool_call_events(tool_calls):
                     yield _event(
                         {
                             "id": completion_id,
                             "object": "chat.completion.chunk",
                             "choices": [
                                 {
-                                    "delta": {},
+                                    "delta": {"tool_calls": [tool_call_delta]},
                                     "index": 0,
-                                    "finish_reason": chunk.finish_reason,
+                                    "finish_reason": None,
                                 }
                             ],
                         }
                     )
+
+                if chunk.finish_reason is not None:
+                    terminal: dict = {
+                        "id": completion_id,
+                        "object": "chat.completion.chunk",
+                        "choices": [
+                            {
+                                "delta": {},
+                                "index": 0,
+                                "finish_reason": chunk.finish_reason,
+                            }
+                        ],
+                    }
+                    # Post-generation warnings (DEC-065) can only be known here,
+                    # so they ride the terminal event, same key as the prologue's.
+                    if post_warnings:
+                        terminal["warnings"] = [w.model_dump() for w in post_warnings]
+                    yield _event(terminal)
                     if include_usage and chunk.usage is not None:
                         payload = {
                             "id": completion_id,

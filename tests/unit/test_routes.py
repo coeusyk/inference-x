@@ -280,7 +280,11 @@ class TestChatCompletionsEndpoint:
             "model": manifest["model"],
             "runtime": manifest["runtime"],
             "sampling": manifest["sampling"],
-            "request": manifest["request"],
+            # DEC-065: tools_sha256 joins the preimage only when non-null.
+            "request": {
+                k: v for k, v in manifest["request"].items()
+                if k != "tools_sha256" or v is not None
+            },
             "warnings": [
                 {"type": w["type"], "code": w["code"], "field": w["field"]}
                 for w in manifest["warnings"]

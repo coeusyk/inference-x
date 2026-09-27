@@ -19,6 +19,20 @@ class ModelRegistry:
 
     def __init__(self, models: list[ModelEntry]) -> None:
         self._models: dict[str, ModelEntry] = {m.name: m for m in models}
+        # Client-facing alternative names -> canonical entry name (DEC-065).
+        self._aliases: dict[str, str] = {}
+        for m in models:
+            for alias in m.aliases:
+                if alias in self._models or alias in self._aliases:
+                    raise ValueError(
+                        f"Alias '{alias}' of model '{m.name}' collides with another "
+                        "model name or alias"
+                    )
+                self._aliases[alias] = m.name
+
+    def canonical_name(self, name: str) -> str | None:
+        """The registered name *name* refers to (itself or via an alias), or None."""
+        return name if name in self._models else self._aliases.get(name)
 
     @classmethod
     def from_config(cls, config_dir: str = "config") -> "ModelRegistry":
