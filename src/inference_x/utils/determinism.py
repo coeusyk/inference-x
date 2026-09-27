@@ -2,7 +2,8 @@
 
 Wires ``VLLM_BATCH_INVARIANT`` on SM ≥ 8.0 and refuses otherwise. Application-
 level warmup replaces the plan's ``VLLM_DETERMINISM_WARMUP_ITERATIONS`` name,
-which does not exist in the pinned vLLM 0.22.1 (design.md D3).
+which does not exist in vLLM (absent in 0.22.1 and still absent in the
+pinned 0.30.0; design.md D3).
 
 ``ensure_deterministic_mode()`` must run before the engine is constructed:
 vLLM may capture CUDA graphs during construction, and a graph captured before
@@ -80,7 +81,7 @@ def ensure_deterministic_mode(*, require: bool = True) -> bool:
         return False
 
     os.environ["VLLM_BATCH_INVARIANT"] = "1"
-    from vllm.model_executor.layers.batch_invariant import (  # type: ignore[import-untyped]
+    from vllm.model_executor.determinism.batch_invariant import (  # type: ignore[import-untyped]
         init_batch_invariance,
     )
 

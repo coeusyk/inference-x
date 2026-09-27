@@ -449,8 +449,8 @@ leaving vLLM's own defaults in place.
 | `INFERENCE_X_STREAM_TIMEOUT_S` | `120` | `core/settings.py` | Per-token SSE timeout; `0` disables |
 | `INFERENCE_X_METRICS_FILE` | *(unset)* | `observability/exporters.py` | Set → NDJSON export; unset → `NullExporter` |
 | `INFERENCEX_VRAM_SAFETY_BUFFER_GB` | `0.4` | `benchmarks/hardware.py` | VRAM buffer. **Note the prefix is `INFERENCEX_`, not `INFERENCE_X_`** — inconsistent with every other variable |
-| `INFERENCE_X_DISABLE_WSL_PIN_MEMORY` | *(unset)* | `utils/vllm_platform_patch.py` | Disables the WSL pin-memory patch |
-| `INFERENCE_X_VLLM_PATCH_APPLIED` | *(set by code)* | `utils/vllm_platform_patch.py` | Idempotency marker across subprocesses |
+| `INFERENCE_X_DISABLE_WSL_PIN_MEMORY` | *(unset)* | `utils/vllm_platform_patch.py` | Disables the WSL pin-memory opt-in |
+| `VLLM_WSL2_ENABLE_PIN_MEMORY` | *(set by code)* | `utils/vllm_platform_patch.py` | vLLM's own WSL pinned-memory opt-in, set only after the probe passes; inherited by vLLM workers |
 | `INFERENCE_X_HOST` | `127.0.0.1` | **`scripts/dev.sh` only** | Not read by any Python code |
 | `HF_TOKEN` / `HUGGING_FACE_HUB_TOKEN` / `HUGGINGFACE_HUB_TOKEN` | *(unset)* | `engines/vllm_engine.py` | First non-empty wins |
 | `CUDA_HOME`, `CUDA_PATH`, `PATH` | *(unset)* | `utils/cuda_env.py` | Located from the venv's bundled nvcc if unset |
@@ -978,7 +978,7 @@ Status assigned by the discriminator stated at the top of this document.
 | `.env` loading (shell wins) | Implemented | `test_settings.py` |
 | Rotating file + console logging | Implemented | `config/logging.yaml` |
 | WSL2 CUDA/nvcc auto-discovery | Implemented | `test_cuda_env.py` |
-| WSL2 vLLM pin-memory patch | Implemented | `test_vllm_platform_patch.py` |
+| WSL2 vLLM pin-memory opt-in | Implemented | `test_vllm_platform_patch.py` |
 | Makefile / `dev.sh` task runner | Implemented | Verified present |
 | HTTP smoke test | Implemented | `scripts/smoke_test.py` |
 | Dependency vulnerability scan | Implemented | `pip-audit` in dev deps; commit `0b55161` |
@@ -1386,10 +1386,10 @@ git churn on the package, and whether an unarchived OpenSpec change touches it.
 |---|---|
 | **Purpose** | Command-line wrappers for benchmarking, advice, and smoke testing. |
 | **Owner responsibility** | Argument parsing, preflight checks, and human-readable output. Business logic lives in `benchmarks/`. |
-| **Public APIs** | `benchmark.py` (`--model`, `--suite`, `--base-url`, `--concurrency`, `--output-dir`); `advise.py` (no flags); `smoke_test.py` (`--base-url`); `dev.sh` (`sync\|serve\|test\|smoke\|help`); `install_vllm_patch.sh`; `dev.ps1`. |
+| **Public APIs** | `benchmark.py` (`--model`, `--suite`, `--base-url`, `--concurrency`, `--output-dir`); `advise.py` (no flags); `smoke_test.py` (`--base-url`); `dev.sh` (`sync\|serve\|test\|smoke\|help`); `dev.ps1`. |
 | **Internal APIs** | `_check_server_reachable`, `_check_model_loaded`; `_estimate_vram_gib`, `_static_vram_estimates`, `_print_static_guidance`; `_hint_for_body`, `_post`, `_get`. |
 | **Dependencies** | `benchmarks`, `services`, `core` (via HTTP and direct import). |
-| **Files** | `advise.py` 160 · `benchmark.py` 140 · `smoke_test.py` 140 · **`setup_db.py` 0 (empty)** · `dev.sh` · `dev.ps1` · `install_vllm_patch.sh` |
+| **Files** | `advise.py` 160 · `benchmark.py` 140 · `smoke_test.py` 140 · **`setup_db.py` 0 (empty)** · `dev.sh` · `dev.ps1` |
 | **Size** | **440 lines** Python + 3 shell scripts · 17 commits |
 | **Maturity** | **Stable** — thin wrappers; no dedicated test files (covered indirectly through `benchmarks/` tests). |
 | **Importance** | **Supporting** — convenience layer over the library and API. |

@@ -51,7 +51,7 @@ def test_ensure_deterministic_mode_sets_env_on_supported(monkeypatch):
         return None
 
     monkeypatch.setattr(
-        "vllm.model_executor.layers.batch_invariant.init_batch_invariance",
+        "vllm.model_executor.determinism.batch_invariant.init_batch_invariance",
         _fake_init,
         raising=False,
     )
@@ -59,10 +59,10 @@ def test_ensure_deterministic_mode_sets_env_on_supported(monkeypatch):
     import sys
     from types import ModuleType
 
-    mod = ModuleType("vllm.model_executor.layers.batch_invariant")
+    mod = ModuleType("vllm.model_executor.determinism.batch_invariant")
     mod.init_batch_invariance = _fake_init  # type: ignore[attr-defined]
     monkeypatch.setitem(
-        sys.modules, "vllm.model_executor.layers.batch_invariant", mod
+        sys.modules, "vllm.model_executor.determinism.batch_invariant", mod
     )
 
     assert ensure_deterministic_mode(require=True) is True
@@ -84,10 +84,10 @@ def test_ensure_deterministic_mode_propagates_init_failure(monkeypatch):
     import sys
     from types import ModuleType
 
-    mod = ModuleType("vllm.model_executor.layers.batch_invariant")
+    mod = ModuleType("vllm.model_executor.determinism.batch_invariant")
     mod.init_batch_invariance = _raising_init  # type: ignore[attr-defined]
     monkeypatch.setitem(
-        sys.modules, "vllm.model_executor.layers.batch_invariant", mod
+        sys.modules, "vllm.model_executor.determinism.batch_invariant", mod
     )
 
     with pytest.raises(RuntimeError, match="torch.library override failed"):

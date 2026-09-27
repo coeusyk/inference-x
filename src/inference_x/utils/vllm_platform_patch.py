@@ -1,8 +1,10 @@
 """Enable CUDA pinned memory on WSL when the runtime supports it.
 
-vLLM disables pin_memory whenever ``in_wsl()`` is true, which adds host→device
-copy overhead. Recent WSL2 + CUDA driver stacks often support pinned memory;
-probe at startup and patch vLLM only when the probe succeeds.
+vLLM disables pin_memory under WSL unless ``VLLM_WSL2_ENABLE_PIN_MEMORY=1``
+(its supported opt-in since 0.30.0), which adds host to device copy overhead.
+Recent WSL2 + CUDA driver stacks often support pinned memory, so probe at
+startup and set the opt-in only when the probe succeeds. vLLM's worker
+processes inherit the variable, so no import-time hook is needed.
 """
 
 from __future__ import annotations
@@ -37,17 +39,9 @@ def _probe_cuda_pin_memory() -> bool:
 
 
 def apply() -> None:
-    """Patch vLLM WSL detection so pin_memory stays enabled when supported."""
+    """Opt vLLM into pinned host memory on WSL when the runtime supports it."""
     global _PATCHED
-    if _PATCHED:
-        return
-
-    if os.environ.get("INFERENCE_X_VLLM_PATCH_APPLIED") == "1":
-        _patch_vllm_wsl_flag()
-        _PATCHED = True
-        return
-
-    if not _is_wsl():
+    if _PATCHED or not _is_wsl():
         return
 
     if os.environ.get("INFERENCE_X_DISABLE_WSL_PIN_MEMORY", "").lower() in (
@@ -64,15 +58,8 @@ def apply() -> None:
         )
         return
 
-    os.environ["INFERENCE_X_VLLM_PATCH_APPLIED"] = "1"
-    _patch_vllm_wsl_flag()
+    os.environ["VLLM_WSL2_ENABLE_PIN_MEMORY"] = "1"
     _PATCHED = True
     logger.info(
         "WSL pin_memory probe passed; enabled pinned host memory for vLLM workers"
     )
-
-
-def _patch_vllm_wsl_flag() -> None:
-    import vllm.platforms.interface as vllm_platform
-
-    vllm_platform.in_wsl = lambda: False  # type: ignore[method-assign]

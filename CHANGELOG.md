@@ -58,6 +58,15 @@ refactors with no observable behavior change are not listed — see
 
 ### Changed
 
+- **vLLM is pinned to exactly 0.30.0** (was `>=0.6.0`, which resolved to
+  0.22.1). Qualified on an RTX 4060 8 GiB: Aider 7/7, Continue 10/10, oracle
+  and determinism suites pass. At the same `gpu_memory_utilization` vLLM
+  0.30.0 leaves less room for KV cache, FP8 models decode faster but prefill
+  slower, and AWQ 7B no longer needs eager mode. Details in `docs/DECISIONS.md`
+  under DEC-066 (the vLLM 0.30.0 baseline decision).
+- **WSL2 pinned memory now uses vLLM's own switch.** When the startup probe
+  passes, InferenceX sets `VLLM_WSL2_ENABLE_PIN_MEMORY=1` instead of patching
+  vLLM. `INFERENCE_X_DISABLE_WSL_PIN_MEMORY` still turns it off.
 - **Streaming requests rejected before generation now get a real HTTP error**
   (for example 400 `context_length_exceeded`) instead of a 200 stream that
   breaks. The error is raised before the response starts.
@@ -107,6 +116,9 @@ refactors with no observable behavior change are not listed — see
 
 ### Removed
 
+- **`scripts/install_vllm_patch.sh`.** Its `.pth` hook is not needed with
+  vLLM 0.30.0. If you ran it, you can delete `inferencex_vllm.pth` from your
+  venv's site-packages.
 - **A single server process can no longer load more than one model.**
   `INFERENCE_X_LOADED_MODELS` set to more than one distinct model is now a
   startup error instead of loading every listed model into one process.
