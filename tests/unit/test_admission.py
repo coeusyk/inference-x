@@ -139,6 +139,46 @@ class TestOmittedMaxTokens:
         assert [w.code for w in result.warnings] == ["max_tokens_clamped_to_kv_budget"]
 
 
+class TestModelCompletionCap:
+    """V1-0: a registry max_completion_tokens is resolved here, once, so the
+    engine runs exactly `effective_max_tokens` and `resolved` cannot drift."""
+
+    async def test_request_under_cap_is_untouched(self):
+        controller = AdmissionController(_registry(max_completion_tokens=256))
+        result = await controller.admit("m", _req(max_tokens=100), _FakeEngine())
+        assert result.effective_max_tokens == 100
+        assert not [w for w in result.warnings if w.type == "substituted"]
+
+    async def test_request_over_cap_is_clamped_with_one_warning(self):
+        controller = AdmissionController(_registry(max_completion_tokens=256))
+        result = await controller.admit("m", _req(max_tokens=512), _FakeEngine())
+        assert result.effective_max_tokens == 256
+        assert [(w.type, w.code, w.field) for w in result.warnings if w.type != "degraded"] == [
+            ("substituted", "max_tokens_clamped_to_model_cap", "max_tokens")
+        ]
+
+    async def test_cap_applies_before_context_clamp(self):
+        # 10 prompt + 5000 requested overflows the 4096 window, but the cap (256)
+        # already fits it: exactly one warning, from the cap.
+        controller = AdmissionController(_registry(max_completion_tokens=256))
+        result = await controller.admit("m", _req(max_tokens=5000), _FakeEngine())
+        assert result.effective_max_tokens == 256
+        assert [w.code for w in result.warnings if w.type == "substituted"] == [
+            "max_tokens_clamped_to_model_cap"
+        ]
+
+    async def test_omitted_max_tokens_resolves_to_cap_without_warning(self):
+        controller = AdmissionController(_registry(max_completion_tokens=256))
+        result = await controller.admit("m", _req(), _FakeEngine())
+        assert result.effective_max_tokens == 256
+        assert not [w for w in result.warnings if w.type == "substituted"]
+
+    async def test_strict_rejects_instead_of_clamping(self):
+        controller = AdmissionController(_registry(max_completion_tokens=256))
+        with pytest.raises(StrictModeViolationError, match="max_completion_tokens"):
+            await controller.admit("m", _req(max_tokens=512, strict=True), _FakeEngine())
+
+
 class TestTierComposition:
     """DEC-064: tier cap composes with max_num_seqs as a KV-budget envelope."""
 

@@ -227,6 +227,12 @@ class AdmissionController:
             entry.max_num_seqs if entry is not None else None,
         ).max_model_len
 
+    def _model_completion_cap(self, routed_model: str) -> int | None:
+        """The registry's per-model output cap, or None if unset/unregistered."""
+        if routed_model not in self._registry:
+            return None
+        return self._registry.get(routed_model).max_completion_tokens
+
     def _effective_max_num_seqs(self, routed_model: str) -> int | None:
         """Resolved sequence-concurrency ceiling for *routed_model*, or None if no
         tier is resolved (gate is skipped entirely — fail open, same posture as
@@ -374,11 +380,38 @@ class AdmissionController:
                     f"(model '{routed_model}')."
                 )
 
+            omitted = requested_output is None
             if requested_output is None:
                 # OpenAI semantics: no max_tokens means "up to the context window".
                 # Nothing was substituted, so no warning (DEC-063).
                 requested_output = room
             effective_output = requested_output
+
+            # The model's own output cap is resolved here, not in the engine, so
+            # `effective_max_tokens` is exactly what runs (V1-0). Applied before the
+            # context clamp so one over-cap request produces one warning, not two.
+            model_cap = self._model_completion_cap(routed_model)
+            if model_cap is not None and effective_output > model_cap:
+                if not omitted:
+                    if request.strict:
+                        raise StrictModeViolationError(
+                            f"strict: requested output ({effective_output} tokens) exceeds "
+                            f"model '{routed_model}' max_completion_tokens ({model_cap}); "
+                            f"the server would have clamped it to {model_cap}."
+                        )
+                    _warn(
+                        warnings,
+                        type="substituted",
+                        code="max_tokens_clamped_to_model_cap",
+                        field_name="max_tokens",
+                        message=(
+                            f"Requested {effective_output} output tokens; clamped to "
+                            f"{model_cap}, the max_completion_tokens configured for "
+                            f"model '{routed_model}'."
+                        ),
+                    )
+                effective_output = model_cap
+
             if prompt_tokens + effective_output > context_ceiling:
                 if request.priority == "batch" or room < _MIN_CLAMPED_OUTPUT_TOKENS:
                     raise ContextTooLongError(

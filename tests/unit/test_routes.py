@@ -297,6 +297,49 @@ class TestChatCompletionsEndpoint:
         assert body["resolved"]["stop"] == ["\n\n"]
         assert body["manifest"]["sampling"]["stop"] == ["\n\n"]
 
+    def test_model_completion_cap_reaches_engine_resolved_and_manifest_alike(self):
+        """V1-0 truthfulness: a registry max_completion_tokens is resolved once, by
+        admission, so the engine runs exactly the value `resolved` and the manifest
+        report (it used to be re-applied inside VLLMEngine after the fact)."""
+        seen: list[int | None] = []
+
+        class _RecordingEngine(_StubEngine):
+            async def generate(self, request):
+                seen.append(request.max_tokens)
+                return await super().generate(request)
+
+        registry = ModelRegistry(
+            [ModelEntry(name=_TEST_MODEL, model_path="test/stub", max_completion_tokens=4)]
+        )
+        service = ChatService(
+            engine_pool=EnginePool({_TEST_MODEL: _RecordingEngine()}),
+            registry=registry,
+            router=TaskRouter(registry, _TEST_MODEL),
+        )
+        app.dependency_overrides[get_chat_service] = lambda: service
+        app.dependency_overrides[get_registry] = lambda: registry
+        try:
+            with TestClient(app) as c:
+                ok = c.post(
+                    "/v1/chat/completions",
+                    json={**self._payload, "max_tokens": 64, "include_manifest": True},
+                )
+                strict = c.post(
+                    "/v1/chat/completions",
+                    json={**self._payload, "max_tokens": 64, "strict": True},
+                )
+        finally:
+            app.dependency_overrides.clear()
+
+        body = ok.json()
+        assert seen == [4]
+        assert body["resolved"]["max_tokens"] == 4
+        assert body["manifest"]["sampling"]["max_tokens"] == 64
+        assert body["manifest"]["sampling"]["resolved_max_tokens"] == 4
+        assert "max_tokens_clamped_to_model_cap" in [w["code"] for w in body["warnings"]]
+        assert strict.status_code == 400
+        assert strict.json()["error"]["code"] == "strict_violation"
+
     def test_stream_true_returns_event_stream(self, client):
         payload = dict(self._payload)
         payload["stream"] = True

@@ -399,7 +399,6 @@ class VLLMEngine(BaseEngine):
 
         self._model_name: str = model_config["name"]
         self._model_path: str = model_config["model_path"]
-        self._max_completion_tokens: int | None = model_config.get("max_completion_tokens")
         self._instruction_tuned: bool = bool(model_config.get("instruction_tuned", True))
         self._repetition_penalty: float | None = model_config.get("repetition_penalty")
         self._healthy = False
@@ -636,8 +635,9 @@ class VLLMEngine(BaseEngine):
             return max(1, total_chars // 4)
 
     def _resolve_max_tokens(self, request: ChatCompletionRequest) -> int:
-        if self._max_completion_tokens is not None:
-            return self._max_completion_tokens
+        # No model-level cap here: admission resolves max_completion_tokens into
+        # request.max_tokens, so the engine runs exactly what `resolved` reports.
+        # The 512 fallback only serves direct engine callers that bypass admission.
         return request.max_tokens if request.max_tokens is not None else 512
 
     def _sampling_params(self, request: ChatCompletionRequest):

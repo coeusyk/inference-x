@@ -40,7 +40,10 @@ class ModelEntry(BaseModel):
     max_completion_tokens: Optional[int] = Field(
         default=None,
         ge=1,
-        description="Per-request generation cap; overrides client max_tokens when set",
+        description=(
+            "Per-model output-token cap, resolved by admission: a larger requested "
+            "max_tokens is clamped with a substituted warning (rejected under strict)"
+        ),
     )
     repetition_penalty: Optional[float] = Field(
         default=None,

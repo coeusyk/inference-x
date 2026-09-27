@@ -42,7 +42,7 @@ itself SHALL NOT appear in the returned content.
 ### Requirement: Omitted max_tokens resolves to the remaining context window
 The platform SHALL, when a request sets neither `max_tokens` nor `max_output_tokens`,
 resolve the output budget to the model's effective context ceiling minus the prompt's
-token count, SHALL NOT emit a substitution warning for that resolution, and SHALL report
+token count (further limited by the model's `max_completion_tokens` when configured), SHALL NOT emit a substitution warning for that resolution, and SHALL report
 the resolved value in `resolved.max_tokens`. The KV-pressure gate SHALL still apply to the
 resolved value, with its existing warning and strict-mode behavior. The platform SHALL NOT
 impose a fixed upper bound on `max_tokens` or `max_output_tokens` other than the context
@@ -126,3 +126,20 @@ come from the engine-reported KV capacity.
   `max_num_seqs`
 - **THEN** that model's effective context ceiling is 2048, and `/v1/models` and
   `/v1/plan` report that the tier cap limited it
+
+### Requirement: A model's completion cap is resolved before dispatch, never inside the engine
+The platform SHALL apply a model's configured `max_completion_tokens` during admission, before `resolved` and the manifest are built, and the engine SHALL generate exactly the admitted output budget with no further model-level adjustment. When an explicit `max_tokens` or `max_output_tokens` exceeds the cap, the platform SHALL clamp it to the cap and emit a `substituted` warning with code `max_tokens_clamped_to_model_cap`, or, when the request sets `strict`, SHALL reject it with `strict_violation`. When the request omits the output budget, the platform SHALL resolve it to the smaller of the remaining context and the cap without a warning.
+
+#### Scenario: Request above the model cap
+- **WHEN** a model is configured with `max_completion_tokens: 4` and a request sets `max_tokens: 64`
+- **THEN** the engine is asked for exactly 4 tokens
+- **AND** `resolved.max_tokens` and `manifest.sampling.resolved_max_tokens` are 4
+- **AND** a `max_tokens_clamped_to_model_cap` warning is emitted
+
+#### Scenario: Request below the model cap
+- **WHEN** a model is configured with `max_completion_tokens: 256` and a request sets `max_tokens: 8`
+- **THEN** the engine is asked for exactly 8 tokens and no substitution warning is emitted
+
+#### Scenario: Strict request above the model cap
+- **WHEN** the same over-cap request sets `strict: true`
+- **THEN** the response is 400 with code `strict_violation` and nothing is generated

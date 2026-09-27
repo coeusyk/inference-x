@@ -190,6 +190,19 @@ or private repos, so it is advisory:
 
 Gated and not-found handling is unchanged.
 
+## D11 - A model's `max_completion_tokens` is resolved by admission (found in review)
+
+`ModelEntry.max_completion_tokens` (used by `opt-125m`, set to 256) was applied inside `VLLMEngine._resolve_max_tokens`, after admission had already produced `effective_max_tokens` and after `ResolvedRequest` and the manifest had been built from it. The engine did not even cap: it replaced the request's value, so `max_tokens: 8` against a cap of 256 ran 256 tokens while `resolved.max_tokens` said 8. Both directions broke the rule that `resolved` describes what ran.
+
+The cap now lives in `AdmissionController.admit`, the one place that already resolves the output budget:
+
+- It is applied after omitted-`max_tokens` resolution and before the context clamp, so an over-cap request that would also overflow the context gets a single warning (the cap already fits it).
+- An explicit request above the cap is clamped with a `substituted` warning, code `max_tokens_clamped_to_model_cap`, and is rejected with `strict_violation` under `strict`. It is clamped for both priorities: the cap is static model policy, not contention, so the batch "reject rather than clamp" rule for context/KV does not apply.
+- An omitted `max_tokens` resolves to `min(remaining context, cap)` with no warning, for the same reason D4 gives for the context window: nothing was requested, so nothing was substituted.
+- The KV gate then applies to the capped value as before.
+
+`VLLMEngine` no longer reads the field and runs `request.max_tokens` as given. Its 512 fallback remains only for direct engine callers that bypass admission (the oracle tests), which never produce a `resolved` block.
+
 ## Risks
 
 - **Clients that relied on 422 or on silent dropping** now get 400. Mitigation: the

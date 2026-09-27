@@ -39,6 +39,12 @@ refactors with no observable behavior change are not listed — see
 
 - **Omitting `max_tokens` now means "up to the context window"**, as in
   OpenAI's API, instead of a fixed 512 tokens.
+- **A model's `max_completion_tokens` is now applied before generation and
+  reported.** A larger `max_tokens` is clamped with a `substituted` warning
+  (`max_tokens_clamped_to_model_cap`), or rejected under `strict`, and
+  `resolved.max_tokens` shows the value that ran. Previously the engine
+  replaced the requested value after the fact, so `resolved` could disagree
+  with the actual generation length in either direction.
 - **Request size limits are now token-based.** The old caps of 4096
   `max_tokens`, 50 messages, and 32,000 characters per message are gone; the
   model's context window is the limit.

@@ -22,6 +22,8 @@
 - [x] 4.2 Opt-in manifest in `ChatService.complete`; route omits absent `manifest` key;
       port #38's run_id-recomputation test behind the opt-in
 - [x] 4.3 HF preflight fails open offline / on transport errors (D10)
+- [x] 4.4 `max_completion_tokens` resolved in admission, removed from `VLLMEngine` (D11);
+      regression tests in test_admission, test_vllm_sampling, test_routes
 
 ## 5. Config + docs
 - [x] 5.1 `qwen2.5-coder-1.5b` entry in `config/models.yaml` (D9)
