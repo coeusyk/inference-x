@@ -204,22 +204,25 @@ Do not add these before the relevant phase / an authorizing ADR:
 - model routing policies beyond a minimal Phase 1 dependency
 - observability dashboards or storage backends
 - playground UI work
-- a second concrete inference backend (requires a future accepted ADR; DEC-047)
-- `inference_x/execution/` or other backend-neutral packages/contracts until
-  justified by at least two concrete backend implementations (DEC-047)
-- optional-extra `vllm` (DEC-007 stands until a second-backend vertical slice)
+- a third concrete inference backend (requires its own accepted ADR; DEC-067
+  authorized exactly one more, llama.cpp through external `llama-server`)
+- `inference_x/execution/`, a backend plugin mechanism, or other backend-neutral
+  packages/contracts beyond what the two existing backends need (DEC-047, DEC-067)
+- optional-extra `vllm` (DEC-007 stands: vLLM stays a required dependency)
 - config sprawl without validation
 
 ## Engine Boundary (DEC-047)
 
-- Backend plurality is a long-term architectural direction; vLLM is the sole
-  supported backend today; no second backend is scheduled.
+- Two backends are supported: vLLM (in-process `AsyncLLM`) and llama.cpp (an
+  external `llama-server` per engine), authorized by DEC-067 (add-llama-cpp-backend).
+  Engines are built only by `engines/registry.create_engine`, a plain dispatch on
+  `ModelEntry.engine`; each backend keeps its own sizing and planning.
 - Allowed hygiene includes:
   - `engines/registry` factory
   - durable capability methods on `BaseEngine` (at minimum `count_prompt_tokens`)
   - typed, observable admission degradation when a capability is unavailable
 - Forbidden until justified: thick Execution Contract, speculative backend-neutral
-  IR, implementing a second backend without a future ADR.
+  IR, a third backend without its own ADR.
 - Engine Boundary hygiene must not gate Phase B (AsyncLLM).
 - Do not knowingly hard-code new vLLM-only assumptions into the composition root,
   `BaseEngine` surface, or admission capability discovery.

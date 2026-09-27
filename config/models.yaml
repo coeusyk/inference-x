@@ -107,3 +107,20 @@ models:
     family: qwen2.5-7b
     gpu_memory_utilization: auto
     max_model_len: 4096
+
+  # llama.cpp entries (add-llama-cpp-backend): served by an external llama-server
+  # (INFERENCE_X_LLAMA_SERVER or llama-server on PATH), one sequence per process.
+  # The GGUF file downloads into the Hugging Face cache on first start. vLLM-only
+  # fields (gpu_memory_utilization, quantization, ...) are rejected on these entries;
+  # llama-server fits the GPU layers itself unless n_gpu_layers is set.
+  - name: qwen2.5-0.5b-gguf
+    engine: llama_cpp
+    model_path: Qwen/Qwen2.5-0.5B-Instruct-GGUF
+    gguf_file: qwen2.5-0.5b-instruct-q4_k_m.gguf
+    max_model_len: 8192
+
+  - name: qwen2.5-coder-7b-gguf
+    engine: llama_cpp
+    model_path: Qwen/Qwen2.5-Coder-7B-Instruct-GGUF
+    gguf_file: qwen2.5-coder-7b-instruct-q4_k_m.gguf
+    max_model_len: 8192

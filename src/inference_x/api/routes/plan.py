@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends
 from inference_x.api.deps import get_registry, get_vram_tier
 from inference_x.schemas.diagnostics import PlanEntry, PlanResponse
 from inference_x.services.model_service import ModelRegistry
+from inference_x.utils.llama_cpp_plan import cached_gguf_path, fit_gpu_layers, gguf_size_gib
 from inference_x.utils.vllm_pool_config import (
     apply_tier_knobs,
     estimate_engine_footprint_gib,
@@ -32,6 +33,30 @@ def plan(
 
     entries: list[PlanEntry] = []
     for model_entry in registry.all():
+        env = (
+            effective_context(tier, model_entry.max_model_len, model_entry.max_num_seqs)
+            if tier is not None
+            else None
+        )
+        if model_entry.engine == "llama_cpp":
+            # Planned by llama.cpp's own fitter; vLLM's estimates don't apply.
+            gguf = cached_gguf_path(model_entry.model_path, model_entry.gguf_file)
+            layers = None
+            if gguf is not None and model_entry.max_model_len is not None:
+                layers, _ = fit_gpu_layers(gguf, model_entry.max_model_len, model_entry.n_gpu_layers)
+            entries.append(
+                PlanEntry(
+                    model=model_entry.name,
+                    backend="llama_cpp",
+                    estimated_weight_gib=gguf_size_gib(model_entry.model_path, model_entry.gguf_file),
+                    max_num_seqs=model_entry.max_num_seqs,
+                    context_window=env.max_model_len if env else None,
+                    context_composed=env.composed if env else None,
+                    context_tier_limited=env.tier_limited if env else None,
+                    gpu_layers=layers,
+                )
+            )
+            continue
         config = apply_tier_knobs(model_entry.model_dump(), tier)
         model_path = str(config["model_path"])
         quantization = config.get("quantization")

@@ -24,6 +24,7 @@ from inference_x.api.errors import (
     context_too_long_error_handler,
     determinism_unsupported_error_handler,
     engine_saturated_error_handler,
+    engine_unavailable_error_handler,
     request_validation_error_handler,
     runtime_error_handler,
     strict_violation_error_handler,
@@ -32,6 +33,7 @@ from inference_x.api.errors import (
 )
 from inference_x.services.chat_service import ToolCallingUnsupportedError
 from inference_x.routing.admission import ContextTooLongError, StrictModeViolationError
+from inference_x.engines.base import EngineUnavailableError
 from inference_x.api.routes.benchmark import router as benchmark_router
 from inference_x.api.routes.chat_completions import router as chat_router
 from inference_x.api.routes.doctor import router as doctor_router
@@ -83,6 +85,7 @@ app = FastAPI(
 app.add_exception_handler(RuntimeError, runtime_error_handler)  # type: ignore[arg-type]
 app.add_exception_handler(ValueError, value_error_handler)  # type: ignore[arg-type]
 app.add_exception_handler(EngineSaturatedError, engine_saturated_error_handler)  # type: ignore[arg-type]
+app.add_exception_handler(EngineUnavailableError, engine_unavailable_error_handler)  # type: ignore[arg-type]
 app.add_exception_handler(DeterminismUnsupportedError, determinism_unsupported_error_handler)  # type: ignore[arg-type]
 app.add_exception_handler(ContextTooLongError, context_too_long_error_handler)  # type: ignore[arg-type]
 app.add_exception_handler(StrictModeViolationError, strict_violation_error_handler)  # type: ignore[arg-type]

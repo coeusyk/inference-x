@@ -449,6 +449,8 @@ leaving vLLM's own defaults in place.
 | `INFERENCE_X_STREAM_TIMEOUT_S` | `120` | `core/settings.py` | Per-token SSE timeout; `0` disables |
 | `INFERENCE_X_METRICS_FILE` | *(unset)* | `observability/exporters.py` | Set → NDJSON export; unset → `NullExporter` |
 | `INFERENCEX_VRAM_SAFETY_BUFFER_GB` | `0.4` | `benchmarks/hardware.py` | VRAM buffer. **Note the prefix is `INFERENCEX_`, not `INFERENCE_X_`** — inconsistent with every other variable |
+| `INFERENCE_X_LLAMA_SERVER` | *(unset)* | `utils/llama_cpp_plan.py` | Path to `llama-server` for `engine: llama_cpp` models; `PATH` lookup when unset |
+| `INFERENCE_X_LLAMA_STARTUP_TIMEOUT_S` | `300` | `engines/llama_cpp_engine.py` | Seconds to wait for `llama-server` to report healthy |
 | `INFERENCE_X_DISABLE_WSL_PIN_MEMORY` | *(unset)* | `utils/vllm_platform_patch.py` | Disables the WSL pin-memory opt-in |
 | `VLLM_WSL2_ENABLE_PIN_MEMORY` | *(set by code)* | `utils/vllm_platform_patch.py` | vLLM's own WSL pinned-memory opt-in, set only after the probe passes; inherited by vLLM workers |
 | `INFERENCE_X_HOST` | `127.0.0.1` | **`scripts/dev.sh` only** | Not read by any Python code |

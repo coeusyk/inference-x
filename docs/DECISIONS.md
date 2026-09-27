@@ -2426,3 +2426,30 @@ Use this document to capture non-obvious design decisions as the project evolves
   - `run_id` changes for otherwise identical requests because `backend_version` is part of run identity. That is intended.
   - Anyone who ran `scripts/install_vllm_patch.sh` has a leftover `inferencex_vllm.pth` in their venv. It is inert on 0.30.0 and can be deleted.
 - Supersession: Replaces the WSL2 pinned-memory mechanism in `utils/vllm_platform_patch.py` (the probe, the opt-out and the WSL detection stay). Earlier records that say a coupling was verified against 0.22.1 remain accurate as history; the couplings they describe were re-checked against 0.30.0 in this change.
+
+### DEC-067
+- Date: 2026-09-27
+- Status: accepted
+- Title: llama.cpp is the second inference backend, served through an external `llama-server` per engine and built by a single engine factory (`add-llama-cpp-backend`)
+- Context: DEC-047 (the Engine Boundary decision) made backend plurality the long-term direction but deferred any second backend to its own accepted ADR, and `AGENTS.md` and `CONTRIBUTING.md` forbade one until then. `docs/INFERENCEX-EVOLUTION.md` lists "vLLM only" as a v1.0 blocker and names V1-1 as its fix. GGUF quantizations are what most local models ship as, and vLLM is a poor fit for them on consumer cards. On the RTX 4060 8 GiB, vLLM's AWQ 7B runs only at 4096 context, while Qwen2.5-Coder-7B Q4_K_M under llama.cpp serves an 8192-token context in 5.3 GiB. The composition root still constructed `VLLMEngine` directly, and manifest assembly assumed vLLM for the backend identity.
+- Decision: Add `LlamaCppEngine`. It starts one `llama-server` for the configured GGUF file, bound to 127.0.0.1 on a free port. It stops the server on shutdown, and a Linux parent-death signal kills the server if InferenceX dies. It talks to the server over HTTP. llama.cpp is never loaded in-process, and vLLM stays a required dependency (DEC-007 unchanged). Engines are constructed only by `engines/registry.create_engine`, a two-branch dispatch on `ModelEntry.engine`. The vLLM branch is the old `api/deps.py` code, moved unchanged, which also meets DEC-047's exit criterion that the composition root must not construct a concrete engine. Each backend keeps its own sizing: vLLM's tier knobs and VRAM estimator stay in the vLLM branch, and llama.cpp entries are planned with llama.cpp's own `llama-fit-params`. A llama.cpp entry names its GGUF file, requires `max_model_len`, and serves one sequence. vLLM-only settings on it are configuration errors.
+- Truthfulness rules for the new backend:
+  - Samplers InferenceX does not expose (`top_k`, `min_p`) are sent disabled. llama.cpp enables them by default.
+  - Prompt caching is off. With it on, the same greedy request returned different text depending on what the previous request had left in the cache.
+  - `timing` is null because `llama-server` reports no queue time and `EngineTiming` is all or nothing.
+  - Tool calling and deterministic mode are refused, not approximated.
+  - `hardware.cuda` is null, because torch's CUDA build is not the one `llama-server` uses.
+  - The manifest records `backend: "llama.cpp"` and the server's `build_info`. It identifies the model by the GGUF file: Hub repo and snapshot revision, file name, sha256 of the loaded bytes, and the server-reported quantization.
+  - The new `model.gguf_file` field enters the `run_id` preimage only when set, so vLLM `run_id`s are unchanged. A golden test holds that.
+- Alternatives considered:
+  - **llama-cpp-python in-process.** Rejected: it adds a compiled Python dependency with its own CUDA build next to vLLM's, and a crash in it would take down InferenceX. An external server keeps the failure domain separate and uses llama.cpp's maintained server.
+  - **Proxy to a `llama-server` the user starts.** Rejected for V1-1: InferenceX could not vouch for which model and settings were running, which the manifest needs. Owning the process keeps provenance truthful. V1-2 (the lifecycle supervisor) can revisit ownership.
+  - **A backend-neutral capability registry or plugin interface.** Rejected under DEC-047's Backend Abstraction Principle: the two backends need a factory, one optional provenance attribute (`manifest_identity`) and one error type (`EngineUnavailableError`), nothing more.
+  - **Keep prompt caching on for speed.** Rejected: it makes output depend on request order, which breaks the comparability `run_id` promises. The vLLM path already runs with prefix caching off.
+- Consequences:
+  - Validated live on the RTX 4060 with Qwen2.5-0.5B and Qwen2.5-Coder-7B Q4_K_M: chat, streaming, usage, models, plan and doctor, context-length and tool-call errors, provenance (sha256 equals the Hub's published value), a killed `llama-server` (503 `engine_unavailable`, also for streaming requests, and `/health` 503), shutdown and hard-kill cleanup. Aider 7/7 on the 7B. Numbers are in the change's design.md.
+  - `/v1/plan`, `/v1/doctor` and `/v1/models` report a `backend` per model, and vLLM-only estimates are null for GGUF entries. `PlanEntry`'s three estimate fields became nullable.
+  - A dead backend is now a typed 503 (`EngineUnavailableError`) instead of a generic 500. Only llama.cpp raises it today.
+  - The token count used by admission is a blocking localhost call to `llama-server`, a few milliseconds per request. It is acceptable at one sequence per process and would need an async variant for more.
+  - The InferenceX process still runs the import-time WSL pinned-memory probe written for vLLM, which opens a CUDA context of about 94 MiB even when serving a GGUF model. Left as is to keep the vLLM path untouched; recorded as a follow-up.
+- Supersession: Supersedes DEC-047's deferral of a second concrete backend and its "vLLM is the sole supported backend" statement. DEC-047's thin-boundary rules, capability durability split and Backend Abstraction Principle stay in force, and a third backend needs its own ADR. Extends DEC-065's conditional-preimage rule to `model.gguf_file`.

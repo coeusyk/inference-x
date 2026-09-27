@@ -73,11 +73,11 @@ def test_build_engine_pool_applies_tier_knobs(monkeypatch, tmp_path):
     get_settings.cache_clear()
 
     _RecordingVLLMEngine.captured_configs = []
-    monkeypatch.setattr(deps_module, "VLLMEngine", _RecordingVLLMEngine)
+    monkeypatch.setattr("inference_x.engines.vllm_engine.VLLMEngine", _RecordingVLLMEngine)
     monkeypatch.setattr(
         deps_module, "_resolve_vram_tier_for_pool", lambda config_dir: _tier()
     )
-    monkeypatch.setattr(deps_module, "validate_model_fits", lambda *a, **kw: None)
+    monkeypatch.setattr("inference_x.utils.vllm_pool_config.validate_model_fits", lambda *a, **kw: None)
     monkeypatch.setattr(deps_module, "probe_gpu_memory_gib", lambda: (4.0, 8.0))
 
     from inference_x.api.deps import _build_engine_pool
@@ -102,9 +102,9 @@ def test_build_engine_pool_falls_back_when_tier_unresolvable(monkeypatch, tmp_pa
     get_settings.cache_clear()
 
     _RecordingVLLMEngine.captured_configs = []
-    monkeypatch.setattr(deps_module, "VLLMEngine", _RecordingVLLMEngine)
+    monkeypatch.setattr("inference_x.engines.vllm_engine.VLLMEngine", _RecordingVLLMEngine)
     monkeypatch.setattr(deps_module, "_resolve_vram_tier_for_pool", lambda config_dir: None)
-    monkeypatch.setattr(deps_module, "validate_model_fits", lambda *a, **kw: None)
+    monkeypatch.setattr("inference_x.utils.vllm_pool_config.validate_model_fits", lambda *a, **kw: None)
     monkeypatch.setattr(deps_module, "probe_gpu_memory_gib", lambda: (4.0, 8.0))
 
     from inference_x.api.deps import _build_engine_pool
@@ -139,7 +139,7 @@ def test_build_engine_pool_rejects_more_than_one_distinct_model(monkeypatch, tmp
     monkeypatch.setenv("INFERENCE_X_LOADED_MODELS", "alpha,beta")
     get_settings.cache_clear()
 
-    monkeypatch.setattr(deps_module, "VLLMEngine", _RecordingVLLMEngine)
+    monkeypatch.setattr("inference_x.engines.vllm_engine.VLLMEngine", _RecordingVLLMEngine)
     monkeypatch.setattr(deps_module, "_resolve_vram_tier_for_pool", lambda config_dir: None)
     monkeypatch.setattr(deps_module, "probe_gpu_memory_gib", lambda: (4.0, 8.0))
 

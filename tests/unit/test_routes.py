@@ -277,7 +277,11 @@ class TestChatCompletionsEndpoint:
         assert manifest["run_id"] == body["run_id"] == resp.headers["X-Run-Id"]
         preimage = {
             "engine": manifest["engine"],
-            "model": manifest["model"],
+            # add-llama-cpp-backend D6: gguf_file joins only when non-null.
+            "model": {
+                k: v for k, v in manifest["model"].items()
+                if k != "gguf_file" or v is not None
+            },
             "runtime": manifest["runtime"],
             "sampling": manifest["sampling"],
             # DEC-065: tools_sha256 joins the preimage only when non-null.

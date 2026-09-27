@@ -189,21 +189,40 @@ def _build_manifest(
     model_entry = registry.get(routed_model)
     model_path = getattr(engine, "model_path", model_entry.model_path)
 
-    manifest_engine = ManifestEngine(
-        version=package_version("inferencex"),
-        git_sha=resolve_git_sha(),
-        backend_version=package_version("vllm"),
-    )
-
     runtime_raw = getattr(engine, "runtime_snapshot", None)
     runtime_raw = runtime_raw if isinstance(runtime_raw, dict) else {}
+    # Backend identity the engine knows about itself (add-llama-cpp-backend D6).
+    # VLLMEngine has none, which means vLLM described from package metadata, as
+    # before, so vLLM manifests and run_ids are unchanged.
+    identity = getattr(engine, "manifest_identity", None)
 
-    manifest_model = ManifestModel(
-        registry_name=routed_model,
-        hf_repo=model_path if is_hf_hub_repo_id(model_path) else None,
-        quantization=model_entry.quantization,
-        dtype=runtime_raw.get("dtype"),
-    )
+    if isinstance(identity, dict):
+        manifest_engine = ManifestEngine(
+            version=package_version("inferencex"),
+            git_sha=resolve_git_sha(),
+            backend=identity["backend"],
+            backend_version=identity.get("backend_version"),
+        )
+        manifest_model = ManifestModel(
+            registry_name=routed_model,
+            hf_repo=identity.get("hf_repo"),
+            hf_revision=identity.get("hf_revision"),
+            weights_sha256=identity.get("weights_sha256"),
+            quantization=identity.get("quantization"),
+            gguf_file=identity.get("gguf_file"),
+        )
+    else:
+        manifest_engine = ManifestEngine(
+            version=package_version("inferencex"),
+            git_sha=resolve_git_sha(),
+            backend_version=package_version("vllm"),
+        )
+        manifest_model = ManifestModel(
+            registry_name=routed_model,
+            hf_repo=model_path if is_hf_hub_repo_id(model_path) else None,
+            quantization=model_entry.quantization,
+            dtype=runtime_raw.get("dtype"),
+        )
 
     manifest_runtime = ManifestRuntime(
         attention_backend=runtime_raw.get("attention_backend"),
@@ -215,7 +234,7 @@ def _build_manifest(
         kv_capacity_tokens=getattr(engine, "kv_capacity_tokens", None),
         prefix_caching=runtime_raw.get("prefix_caching"),
         prefix_cache_hash_algo=runtime_raw.get("prefix_cache_hash_algo"),
-        batch_invariant=_batch_invariant_enabled(),
+        batch_invariant=runtime_raw.get("batch_invariant", _batch_invariant_enabled()),
     )
 
     manifest_sampling = ManifestSampling(
@@ -235,10 +254,17 @@ def _build_manifest(
     )
 
     manifest_hardware = _manifest_hardware_snapshot()
+    if isinstance(identity, dict) and "hardware_cuda" in identity:
+        manifest_hardware = manifest_hardware.model_copy(
+            update={"cuda": identity["hardware_cuda"]}
+        )
 
     preimage = {
         "engine": manifest_engine.model_dump(),
-        "model": manifest_model.model_dump(),
+        # gguf_file only when set, so vLLM preimages keep their pre-V1-1 shape.
+        "model": manifest_model.model_dump(
+            exclude=None if manifest_model.gguf_file is not None else {"gguf_file"}
+        ),
         "runtime": manifest_runtime.model_dump(),
         "sampling": manifest_sampling.model_dump(),
         "request": _request_preimage(manifest_request),
