@@ -9,7 +9,7 @@ from inference_x.benchmarks.hardware import extended_hardware_fields, profile_ha
 from inference_x.core.settings import get_settings
 from inference_x.engines.base import BaseEngine
 from inference_x.engines.pool import EnginePool
-from inference_x.routing.admission import AdmissionController
+from inference_x.routing.admission import AdmissionController, AdmissionResult
 from inference_x.routing.task_router import TaskRouter
 from inference_x.schemas.chat import (
     ChatCompletionRequest,
@@ -30,12 +30,35 @@ from inference_x.services.model_service import ModelRegistry
 from inference_x.utils.ids import (
     compute_prompt_sha256,
     compute_run_id,
+    compute_tools_sha256,
     is_hf_hub_repo_id,
     package_version,
     resolve_git_sha,
 )
 
 _RESOLVED_FIELDS = tuple(ResolvedRequest.model_fields)
+
+
+class ToolCallingUnsupportedError(ValueError):
+    """A tool request was routed to a model with no declared tool-call parser
+    (DEC-065). Raised before admission; mapped to 400 `tool_calling_unsupported`."""
+
+
+def _tool_call_events(chunk: ChatStreamChunk) -> list[dict]:
+    """OpenAI `delta.tool_calls` payloads for a terminal chunk's calls (DEC-065):
+    per call, identity and name first, then the complete arguments string."""
+    events: list[dict] = []
+    for index, call in enumerate(chunk.tool_calls or []):
+        events.append(
+            {
+                "index": index,
+                "id": call.id,
+                "type": call.type,
+                "function": {"name": call.function.name, "arguments": ""},
+            }
+        )
+        events.append({"index": index, "function": {"arguments": call.function.arguments}})
+    return events
 
 _UNSET = object()
 _manifest_hardware_cache: object = _UNSET
@@ -161,6 +184,7 @@ def _build_manifest(
         prompt_sha256=compute_prompt_sha256(original_request.messages),
         prompt_tokens=response.usage.prompt_tokens,
         chat_template_sha256=getattr(engine, "chat_template_sha256", None),
+        tools_sha256=compute_tools_sha256(original_request.tools),
     )
 
     manifest_hardware = _manifest_hardware_snapshot()
@@ -242,6 +266,32 @@ class ChatService:
                 "be activated per-request once the engine is running"
             )
 
+    @staticmethod
+    def _enforce_tool_support(
+        request: ChatCompletionRequest, routed_model: str, engine: BaseEngine
+    ) -> None:
+        """Refuse a tool request the engine cannot serve, before admission.
+
+        Running it anyway would mean dropping the tools or returning whatever
+        text the model produced as if tool calling had happened (DEC-065).
+        """
+        if request.uses_tools and not engine.supports_tools:
+            raise ToolCallingUnsupportedError(
+                f"Model '{routed_model}' does not support tool calling: no tool-call "
+                "parser is configured for it."
+            )
+
+    def _effective_request(
+        self, request: ChatCompletionRequest, routed_model: str, admitted: AdmissionResult
+    ) -> ChatCompletionRequest:
+        """What actually runs: admission's max_tokens, and the canonical model name
+        when the client used an alias (DEC-065), so `resolved.model` names the
+        registry entry that served the request."""
+        update: dict[str, object] = {"max_tokens": admitted.effective_max_tokens}
+        if self._registry.canonical_name(request.model) == routed_model:
+            update["model"] = routed_model
+        return request.model_copy(update=update)
+
     async def complete(self, request: ChatCompletionRequest) -> ChatCompletionResponse:
         """Route and execute a chat completion request.
 
@@ -253,10 +303,9 @@ class ChatService:
         """
         routed_model, engine = self._resolve_engine(request)
         self._enforce_deterministic(request)
+        self._enforce_tool_support(request, routed_model, engine)
         admitted = await self._admission.admit(routed_model, request, engine)
-        effective_request = request.model_copy(
-            update={"max_tokens": admitted.effective_max_tokens}
-        )
+        effective_request = self._effective_request(request, routed_model, admitted)
         try:
             response = await engine.generate(effective_request)
         finally:
@@ -298,7 +347,9 @@ class ChatService:
 
         0. exactly one pre-generation event with ``choices: []`` carrying
            ``resolved`` and ``warnings``, always, before any content;
-        1. zero or more content events, each with ``finish_reason: null``;
+        1. zero or more content events, each with ``finish_reason: null``,
+           then, when the engine's terminal chunk carries tool calls, two
+           ``delta.tool_calls`` events per call (DEC-065);
         2. exactly one terminal event with an empty delta and a real
            ``finish_reason``;
         3. one usage event with ``choices: []`` — only when the client asked via
@@ -335,12 +386,11 @@ class ChatService:
         """
         routed_model, engine = self._resolve_engine(request)
         self._enforce_deterministic(request)
+        self._enforce_tool_support(request, routed_model, engine)
         admitted = await self._admission.admit(routed_model, request, engine)
         gen: AsyncGenerator[ChatStreamChunk, None] | None = None
         try:
-            effective_request = request.model_copy(
-                update={"max_tokens": admitted.effective_max_tokens}
-            )
+            effective_request = self._effective_request(request, routed_model, admitted)
             completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
             timeout_s = get_settings().stream_timeout_s
             include_usage = bool(
@@ -385,6 +435,21 @@ class ChatService:
                             "choices": [
                                 {
                                     "delta": {"content": chunk.content},
+                                    "index": 0,
+                                    "finish_reason": None,
+                                }
+                            ],
+                        }
+                    )
+
+                for tool_call_delta in _tool_call_events(chunk):
+                    yield _event(
+                        {
+                            "id": completion_id,
+                            "object": "chat.completion.chunk",
+                            "choices": [
+                                {
+                                    "delta": {"tool_calls": [tool_call_delta]},
                                     "index": 0,
                                     "finish_reason": None,
                                 }

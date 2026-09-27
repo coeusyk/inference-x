@@ -27,6 +27,8 @@ class BaseEngine(ABC):
       **not** declare `kv_capacity_tokens`, which DEC-047 §3 marks provisional
       and forbids freezing as a cross-backend contract — that one stays an
       optional attribute its callers discover with `getattr`.
+    - It declares `supports_tools` (DEC-065): whether tool requests may reach
+      this engine at all. How tools are rendered and parsed is the backend's.
 
     Backends own inference execution. The runtime owns architectural policy.
     """
@@ -64,3 +66,12 @@ class BaseEngine(ABC):
         the one state the fail-open posture is built on.
         """
         return None
+
+    @property
+    def supports_tools(self) -> bool:
+        """Whether this engine can render tools and parse the loaded model's
+        tool calls (DEC-065). Not abstract: the default is the truthful answer
+        for a backend that has no parser. `ChatService` rejects tool requests
+        when this is False rather than running the model without the tools.
+        """
+        return False

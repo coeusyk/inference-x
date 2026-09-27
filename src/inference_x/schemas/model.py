@@ -45,6 +45,22 @@ class ModelEntry(BaseModel):
             "max_tokens is clamped with a substituted warning (rejected under strict)"
         ),
     )
+    aliases: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Other names a client may send as `model` for this entry. They route to "
+            "this entry; `resolved.model` and the manifest still report the canonical "
+            "name (DEC-065)"
+        ),
+    )
+    tool_call_parser: Optional[Literal["hermes"]] = Field(
+        default=None,
+        description=(
+            "Backend tool-call parser this model's output format needs (vLLM "
+            "--tool-call-parser name). Unset means the model does not support "
+            "tool calling and tool requests are rejected (add-streaming-tool-calling D4)"
+        ),
+    )
     repetition_penalty: Optional[float] = Field(
         default=None,
         gt=0.0,

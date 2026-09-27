@@ -10,6 +10,7 @@ from inference_x.routing.admission import (
     StrictModeViolationError,
 )
 from inference_x.schemas.common import ErrorDetail, ErrorResponse
+from inference_x.services.chat_service import ToolCallingUnsupportedError
 from inference_x.utils.determinism import DeterminismUnsupportedError
 
 logger = logging.getLogger(__name__)
@@ -87,6 +88,15 @@ async def strict_violation_error_handler(
 ) -> JSONResponse:
     logger.warning("StrictModeViolationError on %s: %s", request.url.path, exc)
     return _invalid_request(str(exc), code="strict_violation")
+
+
+async def tool_calling_unsupported_error_handler(
+    request: Request, exc: ToolCallingUnsupportedError
+) -> JSONResponse:
+    """Tool request for a model without a declared parser (DEC-065). The
+    message names only the model, never the backend or parser."""
+    logger.warning("ToolCallingUnsupportedError on %s: %s", request.url.path, exc)
+    return _invalid_request(str(exc), param="tools", code="tool_calling_unsupported")
 
 
 async def determinism_unsupported_error_handler(

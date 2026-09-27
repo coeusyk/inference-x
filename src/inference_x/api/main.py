@@ -27,8 +27,10 @@ from inference_x.api.errors import (
     request_validation_error_handler,
     runtime_error_handler,
     strict_violation_error_handler,
+    tool_calling_unsupported_error_handler,
     value_error_handler,
 )
+from inference_x.services.chat_service import ToolCallingUnsupportedError
 from inference_x.routing.admission import ContextTooLongError, StrictModeViolationError
 from inference_x.api.routes.benchmark import router as benchmark_router
 from inference_x.api.routes.chat_completions import router as chat_router
@@ -84,6 +86,7 @@ app.add_exception_handler(EngineSaturatedError, engine_saturated_error_handler) 
 app.add_exception_handler(DeterminismUnsupportedError, determinism_unsupported_error_handler)  # type: ignore[arg-type]
 app.add_exception_handler(ContextTooLongError, context_too_long_error_handler)  # type: ignore[arg-type]
 app.add_exception_handler(StrictModeViolationError, strict_violation_error_handler)  # type: ignore[arg-type]
+app.add_exception_handler(ToolCallingUnsupportedError, tool_calling_unsupported_error_handler)  # type: ignore[arg-type]
 app.add_exception_handler(RequestValidationError, request_validation_error_handler)  # type: ignore[arg-type]
 
 # Observability middleware — must be added before routers so it wraps all paths.

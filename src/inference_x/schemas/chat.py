@@ -1,19 +1,94 @@
 from __future__ import annotations
 
+import json
 import time
 import uuid
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
+
+
+class FunctionDefinition(BaseModel):
+    """OpenAI function tool definition: exactly the keys Continue CLI sends
+    (add-streaming-tool-calling D2). `parameters` is carried to the chat
+    template as-is; its JSON Schema contents are not validated."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(..., min_length=1)
+    description: Optional[str] = None
+    parameters: Optional[dict[str, Any]] = None
+
+
+class ToolDefinition(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["function"]
+    function: FunctionDefinition
+
+
+class FunctionCall(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(..., min_length=1)
+    # The arguments string exactly as the model produced it. On a response this
+    # may be malformed JSON (DEC-065: transported, never repaired); on a request
+    # message `ChatMessage` requires a JSON object, because the chat template
+    # needs it decoded.
+    arguments: str
+
+
+class ToolCall(BaseModel):
+    """One tool call: on an assistant message (request) and on the terminal
+    stream chunk (response). Backend-neutral: an engine maps its own parser
+    output into this type (DEC-047)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(..., min_length=1)
+    type: Literal["function"] = "function"
+    function: FunctionCall
 
 
 class ChatMessage(BaseModel):
     # V1-0 (DEC-063): unknown fields are rejected, never silently dropped.
     model_config = ConfigDict(extra="forbid")
 
-    role: Literal["system", "user", "assistant"]
+    role: Literal["system", "user", "assistant", "tool"]
     # Body-size sanity guard only; the context gate is the real (token) bound.
+    # Continue sends "" (not null) for an assistant message that only calls tools.
     content: str = Field(..., max_length=1_000_000)
+    tool_calls: Optional[list[ToolCall]] = Field(default=None, min_length=1)
+    tool_call_id: Optional[str] = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def _check_tool_fields(self) -> ChatMessage:
+        if self.tool_calls is not None and self.role != "assistant":
+            raise ValueError("tool_calls is only allowed on assistant messages")
+        if (self.role == "tool") != (self.tool_call_id is not None):
+            raise ValueError("tool_call_id is required on tool messages and only allowed there")
+        # The engine decodes arguments for the chat template; reject here so a
+        # bad value is a 400, not an engine-side 500 (design D3). Continue sends
+        # "{}" for a call whose arguments it could not parse.
+        for call in self.tool_calls or []:
+            try:
+                decoded = json.loads(call.function.arguments)
+            except ValueError:
+                decoded = None
+            if not isinstance(decoded, dict):
+                raise ValueError("tool_calls arguments must be a JSON object encoded as a string")
+        return self
+
+    @property
+    def uses_tools(self) -> bool:
+        return self.role == "tool" or self.tool_calls is not None
 
 
 class StreamOptions(BaseModel):
@@ -73,6 +148,14 @@ class ChatCompletionRequest(BaseModel):
         description="OpenAI-compatible streaming options. Absent means "
         "include_usage=False — no usage chunk is emitted.",
     )
+    tools: Optional[list[ToolDefinition]] = Field(
+        default=None,
+        min_length=1,
+        max_length=128,
+        description="OpenAI function tools (add-streaming-tool-calling). Streaming "
+        "requests only, and only for models that declare a tool-call parser; "
+        "otherwise the request is rejected, never run with the tools dropped.",
+    )
     seed: Optional[int] = Field(
         default=None,
         description="Optional sampling seed forwarded unchanged to the live "
@@ -112,6 +195,21 @@ class ChatCompletionRequest(BaseModel):
             raise ValueError("must be a non-empty string or a list of 1-4 non-empty strings")
         return v
 
+    @field_validator("tools")
+    @classmethod
+    def _check_tools(
+        cls, v: list[ToolDefinition] | None, info: ValidationInfo
+    ) -> list[ToolDefinition] | None:
+        # Non-streaming tool calls are out of scope (design D9).
+        if v is not None and not info.data.get("stream"):
+            raise ValueError("is only supported on streaming requests")
+        return v
+
+    @property
+    def uses_tools(self) -> bool:
+        """Whether serving this request needs a tool-call capability (D4)."""
+        return self.tools is not None or any(m.uses_tools for m in self.messages)
+
     @field_validator("include_manifest")
     @classmethod
     def _check_include_manifest(cls, v: bool, info: ValidationInfo) -> bool:
@@ -148,8 +246,9 @@ class ResolvedRequest(BaseModel):
     """The request the server actually executed — the Effective Request (OS-4).
 
     Membership follows a derivability rule rather than curation: a field appears
-    here **iff** it exists on `ChatCompletionRequest`, minus `messages` (content,
-    not a parameter) and minus the transport/policy controls `stream`,
+    here **iff** it exists on `ChatCompletionRequest`, minus `messages` and `tools`
+    (content, not parameters; `tools` is identified by `tools_sha256` in the
+    manifest instead) and minus the transport/policy controls `stream`,
     `stream_options`, `strict`, and `deterministic`. `tests/unit/test_schemas.py`
     enforces the rule, so a field added to the request later forces an explicit
     decision here rather than silently omitting itself.
@@ -293,11 +392,15 @@ class ManifestRequestInfo(BaseModel):
     prompt string (see `utils/ids.py::compute_prompt_sha256`) — this never
     crosses the Engine Boundary. `prompt_tokens` is read from the response's
     own engine-accounted `usage.prompt_tokens` (DEC-050), never recomputed.
+    `tools_sha256` hashes the request's tool definitions (None without tools):
+    tools change generation, so they are identity, but the schemas themselves
+    are not inlined (add-streaming-tool-calling D8).
     """
 
     prompt_sha256: Optional[str] = None
     prompt_tokens: Optional[int] = None
     chat_template_sha256: Optional[str] = None
+    tools_sha256: Optional[str] = None
 
 
 class ManifestBatch(BaseModel):
@@ -370,10 +473,17 @@ class ChatStreamChunk(BaseModel):
     and `timing` when the backend can account them — an engine that cannot
     supply per-request timing leaves `timing` None rather than estimating it
     (Phase B3, mirroring DEC-049's usage-absence rule).
+
+    `tool_calls` rides only the terminal event (with `finish_reason:
+    "tool_calls"`): calls are emitted once the backend has validated the
+    complete output, never assembled from partial text
+    (add-streaming-tool-calling D6/D7). An event with no content, no finish
+    reason and no tool calls is a heartbeat and produces no SSE event.
     """
 
     content: str = ""
-    finish_reason: Optional[Literal["stop", "length", "error"]] = None
+    finish_reason: Optional[Literal["stop", "length", "tool_calls", "error"]] = None
+    tool_calls: Optional[list[ToolCall]] = None
     usage: Optional[ChatCompletionUsage] = None
     timing: Optional[EngineTiming] = None
 
