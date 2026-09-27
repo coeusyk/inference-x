@@ -156,6 +156,14 @@ class ChatCompletionRequest(BaseModel):
         "requests only, and only for models that declare a tool-call parser; "
         "otherwise the request is rejected, never run with the tools dropped.",
     )
+    parallel_tool_calls: Optional[bool] = Field(
+        default=None,
+        description="OpenAI-compatible. Absent or true: every tool call the model "
+        "produced is returned. False: at most one call is returned; if the model "
+        "produced more, only the first is sent and the terminal stream event carries "
+        "a `parallel_tool_calls_truncated` warning (DEC-065). Generation itself is "
+        "not constrained.",
+    )
     seed: Optional[int] = Field(
         default=None,
         description="Optional sampling seed forwarded unchanged to the live "
@@ -271,6 +279,7 @@ class ResolvedRequest(BaseModel):
     max_output_tokens: Optional[int] = None
     priority: Literal["interactive", "batch"] = "interactive"
     seed: Optional[int] = None
+    parallel_tool_calls: Optional[bool] = None
 
 
 class ChatCompletionMessage(BaseModel):

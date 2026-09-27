@@ -26,9 +26,11 @@ The protocol was also run against vLLM 0.22.1's own OpenAI server with its Herme
 - **Model aliases.** `ModelEntry.aliases` routes another client-facing name to an entry without changing what `resolved` and the manifest report. Continue picks its edit tool from the model name, and the alias lets it offer the flat `Edit` tool without renaming the registry entry (design D10).
 - **DEC-065** records the contract.
 
+- **`parallel_tool_calls`** (added after the VS Code smoke test showed the extension always sends `false`). `false` returns at most one call; if the model produced more, the first is returned and a `parallel_tool_calls_truncated` warning rides the terminal stream event (design D11).
+
 ## Out of scope
 
-`tool_choice`, `parallel_tool_calls`, non-streaming tool calls, the `strict` function flag, any parser other than Hermes, heuristic or regex recovery of malformed calls, server-side tool execution, MCP, the Responses API, and validating the contents of `parameters` beyond "is a JSON object". `tool_choice` and the other unsent fields remain rejected by `extra="forbid"`.
+`tool_choice`, non-streaming tool calls, the `strict` function flag, any parser other than Hermes, heuristic or regex recovery of malformed calls, server-side tool execution, MCP, the Responses API, and validating the contents of `parameters` beyond "is a JSON object". `tool_choice` and the other unsent fields remain rejected by `extra="forbid"`.
 
 ## Impact
 

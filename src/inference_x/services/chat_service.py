@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import uuid
 from collections.abc import AsyncGenerator
 
@@ -25,6 +26,7 @@ from inference_x.schemas.chat import (
     ResolvedRequest,
     ResponseWarning,
     RunManifest,
+    ToolCall,
 )
 from inference_x.services.model_service import ModelRegistry
 from inference_x.utils.ids import (
@@ -36,6 +38,8 @@ from inference_x.utils.ids import (
     resolve_git_sha,
 )
 
+logger = logging.getLogger(__name__)
+
 _RESOLVED_FIELDS = tuple(ResolvedRequest.model_fields)
 
 
@@ -44,11 +48,39 @@ class ToolCallingUnsupportedError(ValueError):
     (DEC-065). Raised before admission; mapped to 400 `tool_calling_unsupported`."""
 
 
-def _tool_call_events(chunk: ChatStreamChunk) -> list[dict]:
+def _apply_parallel_tool_calls(
+    request: ChatCompletionRequest, tool_calls: list[ToolCall] | None
+) -> tuple[list[ToolCall], list[ResponseWarning]]:
+    """Honor `parallel_tool_calls: false` on the calls the engine produced (DEC-065).
+
+    Generation cannot be constrained to one call, so when the model produced
+    several the first is returned and the truncation is disclosed with a
+    post-generation warning, never dropped silently.
+    """
+    calls = list(tool_calls or [])
+    if request.parallel_tool_calls is not False or len(calls) <= 1:
+        return calls, []
+    logger.warning(
+        "parallel_tool_calls=false: model produced %d tool calls, returned 1", len(calls)
+    )
+    return calls[:1], [
+        ResponseWarning(
+            type="substituted",
+            code="parallel_tool_calls_truncated",
+            message=(
+                f"The model produced {len(calls)} tool calls while "
+                "parallel_tool_calls=false; only the first call was returned."
+            ),
+            field="parallel_tool_calls",
+        )
+    ]
+
+
+def _tool_call_events(tool_calls: list[ToolCall]) -> list[dict]:
     """OpenAI `delta.tool_calls` payloads for a terminal chunk's calls (DEC-065):
     per call, identity and name first, then the complete arguments string."""
     events: list[dict] = []
-    for index, call in enumerate(chunk.tool_calls or []):
+    for index, call in enumerate(tool_calls):
         events.append(
             {
                 "index": index,
@@ -366,7 +398,9 @@ class ChatService:
            then, when the engine's terminal chunk carries tool calls, two
            ``delta.tool_calls`` events per call (DEC-065);
         2. exactly one terminal event with an empty delta and a real
-           ``finish_reason``;
+           ``finish_reason``, carrying a top-level ``warnings`` list only when
+           a post-generation warning exists (DEC-065:
+           ``parallel_tool_calls_truncated``);
         3. one usage event with ``choices: []`` — only when the client asked via
            ``stream_options.include_usage`` and the engine accounted usage.
            Carries ``timing`` alongside ``usage`` (Phase B3) when the engine
@@ -457,7 +491,10 @@ class ChatService:
                         }
                     )
 
-                for tool_call_delta in _tool_call_events(chunk):
+                tool_calls, post_warnings = _apply_parallel_tool_calls(
+                    effective_request, chunk.tool_calls
+                )
+                for tool_call_delta in _tool_call_events(tool_calls):
                     yield _event(
                         {
                             "id": completion_id,
@@ -473,19 +510,22 @@ class ChatService:
                     )
 
                 if chunk.finish_reason is not None:
-                    yield _event(
-                        {
-                            "id": completion_id,
-                            "object": "chat.completion.chunk",
-                            "choices": [
-                                {
-                                    "delta": {},
-                                    "index": 0,
-                                    "finish_reason": chunk.finish_reason,
-                                }
-                            ],
-                        }
-                    )
+                    terminal: dict = {
+                        "id": completion_id,
+                        "object": "chat.completion.chunk",
+                        "choices": [
+                            {
+                                "delta": {},
+                                "index": 0,
+                                "finish_reason": chunk.finish_reason,
+                            }
+                        ],
+                    }
+                    # Post-generation warnings (DEC-065) can only be known here,
+                    # so they ride the terminal event, same key as the prologue's.
+                    if post_warnings:
+                        terminal["warnings"] = [w.model_dump() for w in post_warnings]
+                    yield _event(terminal)
                     if include_usage and chunk.usage is not None:
                         payload = {
                             "id": completion_id,

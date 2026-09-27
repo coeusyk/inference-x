@@ -19,6 +19,10 @@ refactors with no observable behavior change are not listed — see
   tool call comes back as plain text. Nothing is repaired or made up. Models
   without a parser reject tool requests with 400 `tool_calling_unsupported`.
   New `qwen3-4b-fp8` model entry for Continue.
+- **`parallel_tool_calls`** (Continue for VS Code always sends `false`). With
+  `false`, at most one tool call is returned; if the model produced more, the
+  first is returned and the stream's final event carries a
+  `parallel_tool_calls_truncated` warning saying how many there were.
 - **Model aliases.** A `config/models.yaml` entry can list `aliases`; a
   request naming an alias is served by that entry, and `resolved` and the run
   manifest report the entry's real name. `qwen3-4b-fp8` has the alias

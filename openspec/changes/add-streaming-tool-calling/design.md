@@ -69,6 +69,8 @@ vLLM's reference streaming path (`extract_tool_calls_streaming`) starts emitting
 1. **Parsed call.** `Hermes2ProToolParser.extract_tool_calls` runs first. It `json.loads` every block (closed, or an unclosed final block whose JSON is complete) and requires `name` and `arguments`. If it returns calls, they are emitted as it produced them.
 2. **Recognized call with raw arguments.** If step 1 finds nothing, the output is still a call when its framing is unambiguous: every `<tool_call>` is closed by `</tool_call>`, and every block's body fully matches `{"name": "<string>", "arguments": <text>}`, meaning the name slot comes first, the `arguments` key follows, and the block ends with the envelope's closing brace. Each call's arguments are then the model's text between `"arguments":` and that final brace, byte for byte (surrounding whitespace aside), even when it is not valid JSON. The regex only locates that span. It never rewrites it.
 
+The same raw span is used in step 1 whenever a block's envelope is intact, instead of the Hermes parser's `json.dumps` re-serialization (which re-spaces and can re-escape). A call is therefore carried identically whether its neighbours parsed or not. Only a block Hermes parses but the envelope cannot frame (keys in another order) keeps Hermes's form.
+
 Anything else, such as an unclosed block that is not valid JSON, a missing name or `arguments` key, one unrecognizable block among several, or JSON in a Markdown fence, is not a call. The held-back text is emitted verbatim as ordinary content with the engine's own finish reason (`stop` or `length`).
 
 InferenceX never repairs quotes, never runs `ast.literal_eval`, never rebalances brackets, never infers a missing brace, never invents a name, and never rewrites arguments. When the last `}` could belong either to the arguments or to the envelope, it is attributed to the envelope; nothing is added.
@@ -108,10 +110,24 @@ Two facts about the current system matter here:
 
 ## D9: Unsupported features stay rejected
 
-- `tool_choice`, `parallel_tool_calls`, `functions`, `function_call`: rejected by `extra="forbid"` (unknown field), unchanged.
+- `tool_choice`, `functions`, `function_call`: rejected by `extra="forbid"` (unknown field), unchanged. `parallel_tool_calls` was in this list until the VS Code extension proved it required (D11).
 - `tools` with `stream: false`: 400, `param: tools`. Mechanically the non-streaming path could return calls (it is derived from the streaming path), but no client has asked for it, and the non-streaming response schema would need `tool_calls` and nullable content. That is left for when a client needs it.
 - A model without a declared parser: 400, `code: tool_calling_unsupported` (D4).
 - Function `strict`, non-function tool types, `role: "function"`: rejected by the schema.
+
+## D11: `parallel_tool_calls` (added after the VS Code smoke test)
+
+Continue for VS Code (unlike the CLI) sends `parallel_tool_calls: false` on every request, alongside `max_tokens: 4096`, which was already supported. InferenceX rejected it as an unknown field, so the extension could not run at all. vLLM's reference accepts the field and implements `false` by silently keeping only the first call after generation (`openai/utils.py::maybe_filter_parallel_tool_calls`).
+
+Owner decision: accept `parallel_tool_calls: bool | None`, echoed in `resolved`.
+
+- Absent or `true`: unchanged, every call the model produced is returned.
+- `false` with 0 or 1 calls: unchanged, no warning.
+- `false` with more than one call: only the first call is returned, and the truncation is disclosed. Nothing is dropped silently, rewritten, merged, or replaced, and the session is not ended.
+
+The disclosure reuses `ResponseWarning`: `type: "substituted"`, `code: "parallel_tool_calls_truncated"`, `field: "parallel_tool_calls"`, message "The model produced N tool calls while parallel_tool_calls=false; only the first call was returned." It can only be known after generation, so it cannot ride the pre-generation event. The narrowest additive extension is a top-level `warnings` list on the terminal event (the same key the pre-generation event uses), present only when a post-generation warning exists. Every stream has a terminal event, unlike the optional usage event, so that is where it goes. The produced and returned call counts are also logged server-side. `strict` cannot turn this into a rejection because it is only knowable after the response has started; strict's contract (DEC-052) covers substitutions decided before dispatch.
+
+The truncation is a request-parameter policy, not parser behavior, so it lives in `ChatService`. The engine still returns every call it recognized.
 
 ## D10: Acceptance model
 

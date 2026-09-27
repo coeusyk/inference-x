@@ -29,7 +29,11 @@ from inference_x.schemas.chat import (
     ToolCall,
 )
 from inference_x.schemas.model import ModelEntry
-from inference_x.services.chat_service import ChatService, ToolCallingUnsupportedError
+from inference_x.services.chat_service import (
+    ChatService,
+    ToolCallingUnsupportedError,
+    _apply_parallel_tool_calls,
+)
 from inference_x.services.model_service import ModelRegistry
 from inference_x.utils.ids import compute_prompt_sha256, compute_tools_sha256
 
@@ -93,7 +97,7 @@ class TestSchema:
         "overrides",
         [
             {"tool_choice": "auto"},
-            {"parallel_tool_calls": False},
+            {"parallel_tool_calls": "maybe"},
             {"tools": [{**_READ_TOOL, "function": {**_READ_TOOL["function"], "strict": True}}]},
             {"tools": [{"type": "code_interpreter", "function": _READ_TOOL["function"]}]},
             {"tools": []},
@@ -666,3 +670,87 @@ class TestRunIdentity:
         req = _golden_request() if tools is None else self._with_tools(tools)
         manifest = _manifest(req)
         assert compute_run_id(_documented_preimage(manifest)) == manifest.run_id
+
+
+# ---------------------------------------------------------------------------
+# parallel_tool_calls (DEC-065): Continue for VS Code always sends false
+# ---------------------------------------------------------------------------
+
+
+def _call(i: int, arguments: str = '{"filepath": "a.py"}') -> ToolCall:
+    return ToolCall(id=f"call_{i}", function=FunctionCall(name="Read", arguments=arguments))
+
+
+def _stream_calls(calls: list[ToolCall], **overrides) -> tuple[list, dict, dict]:
+    engine = _ToolEngine(
+        supports=True,
+        chunks=[ChatStreamChunk(finish_reason="tool_calls", tool_calls=calls, usage=_USAGE)],
+    )
+    events = _events(_service(engine), _request(**overrides))
+    prologue = events[0]
+    terminal = next(
+        e for e in events[1:]
+        if isinstance(e, dict) and e["choices"] and e["choices"][0]["finish_reason"]
+    )
+    identities = [
+        e["choices"][0]["delta"]["tool_calls"][0]
+        for e in events[1:]
+        if isinstance(e, dict) and e["choices"]
+        and "id" in e["choices"][0]["delta"].get("tool_calls", [{}])[0]
+    ]
+    return identities, prologue, terminal  # type: ignore[return-value]
+
+
+class TestParallelToolCalls:
+    @pytest.mark.parametrize("overrides", [{}, {"parallel_tool_calls": True}])
+    def test_absent_or_true_transports_every_call(self, overrides):
+        identities, prologue, terminal = _stream_calls([_call(0), _call(1)], **overrides)
+        assert [c["id"] for c in identities] == ["call_0", "call_1"]
+        assert "warnings" not in terminal
+        assert prologue["resolved"]["parallel_tool_calls"] == overrides.get("parallel_tool_calls")
+
+    def test_false_with_one_call_is_normal(self):
+        identities, prologue, terminal = _stream_calls([_call(0)], parallel_tool_calls=False)
+        assert [c["id"] for c in identities] == ["call_0"]
+        assert "warnings" not in terminal
+        assert prologue["resolved"]["parallel_tool_calls"] is False
+
+    def test_false_with_two_calls_returns_the_first_and_discloses_it(self):
+        identities, _, terminal = _stream_calls([_call(0), _call(1)], parallel_tool_calls=False)
+        assert [c["id"] for c in identities] == ["call_0"]
+        assert terminal["choices"][0]["finish_reason"] == "tool_calls"
+        assert terminal["warnings"] == [
+            {
+                "type": "substituted",
+                "code": "parallel_tool_calls_truncated",
+                "message": "The model produced 2 tool calls while parallel_tool_calls=false; "
+                "only the first call was returned.",
+                "field": "parallel_tool_calls",
+            }
+        ]
+
+
+@pytest.mark.usefixtures("_vllm_stubs")
+class TestFirstCallIsIndependentOfTheSecond:
+    _FIRST = '<tool_call>\n{"name": "Read", "arguments": {"filepath":"a.py",  "n": 1.0}}\n</tool_call>'
+
+    @pytest.mark.parametrize(
+        "second",
+        [
+            '<tool_call>\n{"name": "Read", "arguments": {"filepath": "b.py"}}\n</tool_call>',
+            "<tool_call>\n{\"name\": \"Read\", \"arguments\": {'filepath': 'b.py'}}\n</tool_call>",
+        ],
+    )
+    def test_malformed_second_call_does_not_alter_the_first(self, second):
+        terminal = _chunks(_engine([self._FIRST, second]), _request())[-1]
+        assert terminal.tool_calls is not None and len(terminal.tool_calls) == 2
+        # The model's own bytes, whether the neighbour parsed or not (no
+        # json.dumps re-spacing, no 1.0 -> 1.0 rewriting, nothing).
+        assert terminal.tool_calls[0].function.arguments == '{"filepath":"a.py",  "n": 1.0}'
+
+    def test_truncation_keeps_the_first_call_byte_for_byte(self):
+        second = "<tool_call>\n{\"name\": \"Read\", \"arguments\": {'x': 1}}\n</tool_call>"
+        calls = _chunks(_engine([self._FIRST, second]), _request())[-1].tool_calls
+        kept, warnings = _apply_parallel_tool_calls(_request(parallel_tool_calls=False), calls)
+        assert [c.function.arguments for c in kept] == ['{"filepath":"a.py",  "n": 1.0}']
+        assert [w.code for w in warnings] == ["parallel_tool_calls_truncated"]

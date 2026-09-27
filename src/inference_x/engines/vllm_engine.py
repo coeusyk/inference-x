@@ -150,9 +150,17 @@ def _held_back_start(text: str, tag: str) -> int:
 # the arguments value may be malformed. Used solely to *locate* the raw
 # arguments text, never to rewrite it.
 _HERMES_BLOCK = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
+# The same block split Hermes2ProToolParser uses (closed blocks, then an
+# unclosed final one), so its calls line up one-to-one with these bodies.
+_HERMES_PARSER_BLOCKS = re.compile(r"<tool_call>(.*?)</tool_call>|<tool_call>(.*)", re.DOTALL)
 _HERMES_ENVELOPE = re.compile(
     r'\s*\{\s*"name"\s*:\s*"([^"\\]+)"\s*,\s*"arguments"\s*:\s*(.*?)\s*\}\s*', re.DOTALL
 )
+
+
+def _raw_arguments(body: str) -> str | None:
+    match = _HERMES_ENVELOPE.fullmatch(body)
+    return match.group(2) if match else None
 
 
 def _extract_tool_calls(parser: Any, text: str) -> list[ToolCall] | None:
@@ -161,23 +169,30 @@ def _extract_tool_calls(parser: Any, text: str) -> list[ToolCall] | None:
     First vLLM's Hermes parser (non-streaming path), which `json.loads` every
     call. If that finds nothing, a call is still transported when its framing is
     unambiguous: every `<tool_call>` block is closed and its envelope matches
-    `_HERMES_ENVELOPE`. Its arguments are then the model's raw text, byte for
-    byte, even if that text is not valid JSON, so the client can report the
-    error and the model can retry. Output whose framing is not unambiguous is
-    never turned into a call. Nothing is repaired, normalized or guessed.
+    `_HERMES_ENVELOPE`. Whenever the envelope is intact, a call's arguments are
+    the model's own text for them, byte for byte, valid JSON or not, so one
+    call is carried identically whatever its neighbours look like. Only a block
+    Hermes parses but the envelope cannot frame (e.g. keys in another order)
+    keeps Hermes's re-serialized arguments. Output whose framing is not
+    unambiguous is never turned into a call. Nothing is repaired or guessed.
     """
     info = parser.extract_tool_calls(text, None)  # request is unused by Hermes
     if info.tools_called:
+        bodies = [a or b for a, b in _HERMES_PARSER_BLOCKS.findall(text)]
+        if len(bodies) != len(info.tool_calls):
+            bodies = [""] * len(info.tool_calls)
         try:
-            return [
-                ToolCall(
-                    id=call.id,
-                    function=FunctionCall(
-                        name=call.function.name, arguments=call.function.arguments
-                    ),
+            calls = []
+            for call, body in zip(info.tool_calls, bodies):
+                raw = _raw_arguments(body)
+                arguments = raw if raw is not None else call.function.arguments
+                calls.append(
+                    ToolCall(
+                        id=call.id,
+                        function=FunctionCall(name=call.function.name, arguments=arguments),
+                    )
                 )
-                for call in info.tool_calls
-            ]
+            return calls
         except ValueError:  # e.g. an empty name: not an unambiguous call
             return None
     tag = parser.tool_call_start_token

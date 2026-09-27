@@ -75,8 +75,24 @@ A model entry MAY declare `aliases`. A request whose `model` is an alias SHALL b
 - **WHEN** a model entry declares an alias equal to another entry's name or alias
 - **THEN** the registry fails to load
 
+### Requirement: parallel_tool_calls limits returned calls and discloses truncation
+The platform SHALL accept `parallel_tool_calls` as a boolean and echo it in `resolved`. When it is absent or true, every tool call the model produced SHALL be returned. When it is false and the model produced more than one call, the platform SHALL return only the first call, unchanged, and SHALL disclose the truncation with a `substituted` warning with code `parallel_tool_calls_truncated` and field `parallel_tool_calls` in a top-level `warnings` list on the terminal stream event. It MUST NOT drop calls without that warning, rewrite, merge, or replace calls, or return calls as text because of the count.
+
+#### Scenario: Continue for VS Code sends parallel_tool_calls false
+- **WHEN** a streaming tool request sets `parallel_tool_calls: false` and the model produces one call
+- **THEN** that call is returned and the terminal event carries no `warnings` key
+
+#### Scenario: Model produces two calls under false
+- **WHEN** `parallel_tool_calls` is false and the model produces two calls
+- **THEN** only the first call's events are emitted, byte for byte as the model produced it
+- **AND** the terminal event carries `warnings` with one `parallel_tool_calls_truncated` entry naming the produced count
+
+#### Scenario: Absent or true
+- **WHEN** `parallel_tool_calls` is absent or true and the model produces two calls
+- **THEN** both calls are emitted and no truncation warning is present
+
 ### Requirement: Tool calls stream in the OpenAI delta format
-For a streamed completion that ends in tool calls, the platform SHALL emit, for each call in order, one event whose `delta.tool_calls` carries the call's `index`, `id`, `type`, `function.name`, and an empty `function.arguments`, then one event whose `delta.tool_calls` carries the same `index` and the call's `function.arguments`. These events SHALL precede the terminal event, whose `finish_reason` SHALL be `tool_calls`. The usage event, when requested, and `[DONE]` SHALL follow in the existing order. Text emitted before the call SHALL stream as ordinary content events.
+For a streamed completion that ends in tool calls, the platform SHALL emit, for each call in order, one event whose `delta.tool_calls` carries the call's `index`, `id`, `type`, `function.name`, and an empty `function.arguments`, then one event whose `delta.tool_calls` carries the same `index` and the call's `function.arguments`. These events SHALL precede the terminal event, whose `finish_reason` SHALL be `tool_calls`. The terminal event MAY carry a top-level `warnings` list, only when a post-generation warning exists. The usage event, when requested, and `[DONE]` SHALL follow in the existing order. Text emitted before the call SHALL stream as ordinary content events.
 
 #### Scenario: Continue edit turn
 - **WHEN** a streamed tool request with `include_usage: true` ends in one tool call
