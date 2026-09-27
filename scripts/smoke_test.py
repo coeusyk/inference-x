@@ -71,7 +71,7 @@ def _get(url: str) -> tuple[int, dict | None]:
         return 0, None
 
 
-def run(base_url: str) -> bool:
+def run(base_url: str, model: str = "qwen2.5-0.5b") -> bool:
     ok = True
 
     print(f"[1/2] GET {base_url}/health")
@@ -93,7 +93,7 @@ def run(base_url: str) -> bool:
 
     print(f"[2/2] POST {base_url}/v1/chat/completions")
     payload = {
-        "model": "qwen2.5-0.5b",
+        "model": model,
         "messages": [{"role": "user", "content": "Say hello in one word."}],
         "max_tokens": 16,
         "temperature": 0.0,
@@ -123,10 +123,15 @@ def main() -> None:
         default="http://localhost:8000",
         help="Base URL of the running server (default: http://localhost:8000)",
     )
+    parser.add_argument(
+        "--model",
+        default="qwen2.5-0.5b",
+        help="Model to request; must be the one the server loaded (default: qwen2.5-0.5b)",
+    )
     args = parser.parse_args()
 
     print(f"Smoke test → {args.base_url}\n")
-    passed = run(args.base_url)
+    passed = run(args.base_url, args.model)
     print()
     if passed:
         print("All checks passed.")

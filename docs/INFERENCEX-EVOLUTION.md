@@ -317,8 +317,9 @@ record should not read as if it were.
 
 ## 14. Corrections applied to the planning source (2026-09-26)
 
-- **C5 inline manifest delivery is not merged.** PR #38 is open; `develop`
-  returns no body `manifest`.
+- **C5 inline manifest delivery is not merged.** PR #38 was closed unmerged
+  on 2026-09-26 as superseded by V1-0's opt-in manifest; `develop` returns no
+  body `manifest`.
 - **Phase C is unreleased.** C1, C3/C4b, C4a, and C6 are on `develop` after
   v0.6.0; the latest tag is v0.6.0.
 - **C1's roadmap `GET /v1/manifest` was never built.** Delivery was left open
@@ -331,3 +332,11 @@ record should not read as if it were.
 - **Phase B releases mislabeled.** The v0.4.0 and v0.5.0 release-prep commits
   say "Phase A", but their release notes describe Phase B items (B1/B2 and
   B3).
+
+## 15. V1-0 acceptance (2026-09-27) `[CURRENT]`
+
+The Aider exit test was finished on the desktop, not the laptop: RTX 4060 (8 GiB), which still resolves to the 6gb tier because there is no tier between 0 and 10 GiB. vLLM 0.22.1, Python 3.13.2. `qwen2.5-coder-1.5b` composed to 8192 x 1 and vLLM measured 52,384 KV tokens. That number belongs to this card and this model and is not a general capacity figure.
+
+`scripts/aider_acceptance.py` gives Aider 0.86.2 a repo with a buggy `median()` and a test that fails on it, then runs the test after Aider's edit. It passed 7 of 7 runs (4 streaming, 3 `--no-stream`) using the `whole` edit format. A logging proxy showed that Aider sends only `model`, `temperature`, `stream` and role/content messages, so nothing was rejected or dropped. Non-streaming responses resolved `max_tokens` to the remaining context (7394) with no warnings.
+
+While preparing this, a truthfulness bug from before V1-0 was fixed. `VLLMEngine` replaced `max_tokens` with a model's `max_completion_tokens` after `resolved` had been built, so `opt-125m` could run up to 256 tokens while reporting 8. Admission now resolves the cap (design D11). Live on `opt-125m`, `max_tokens: 8` now runs exactly 8 tokens (`finish_reason: length`).
