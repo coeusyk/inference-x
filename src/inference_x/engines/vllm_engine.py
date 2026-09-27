@@ -163,6 +163,13 @@ def _raw_arguments(body: str) -> str | None:
     return match.group(2) if match else None
 
 
+def _same_json(a: str, b: str) -> bool:
+    try:
+        return bool(json.loads(a) == json.loads(b))
+    except ValueError:
+        return False
+
+
 def _extract_tool_calls(parser: Any, text: str) -> list[ToolCall] | None:
     """Tool calls from the complete output, or None (DEC-065).
 
@@ -185,6 +192,11 @@ def _extract_tool_calls(parser: Any, text: str) -> list[ToolCall] | None:
             calls = []
             for call, body in zip(info.tool_calls, bodies):
                 raw = _raw_arguments(body)
+                # The span is the arguments only if it decodes to exactly what
+                # Hermes parsed; an extra key after "arguments" would otherwise
+                # be swept into it.
+                if raw is None or not _same_json(raw, call.function.arguments):
+                    raw = None
                 arguments = raw if raw is not None else call.function.arguments
                 calls.append(
                     ToolCall(

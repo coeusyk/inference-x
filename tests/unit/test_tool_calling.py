@@ -748,6 +748,11 @@ class TestFirstCallIsIndependentOfTheSecond:
         # json.dumps re-spacing, no 1.0 -> 1.0 rewriting, nothing).
         assert terminal.tool_calls[0].function.arguments == '{"filepath":"a.py",  "n": 1.0}'
 
+    def test_extra_envelope_key_is_not_swept_into_the_arguments(self):
+        output = '<tool_call>{"name": "Read", "arguments": {"filepath": "a.py"}, "id": "z"}</tool_call>'
+        call = _chunks(_engine([output]), _request())[-1].tool_calls[0]  # type: ignore[index]
+        assert json.loads(call.function.arguments) == {"filepath": "a.py"}
+
     def test_truncation_keeps_the_first_call_byte_for_byte(self):
         second = "<tool_call>\n{\"name\": \"Read\", \"arguments\": {'x': 1}}\n</tool_call>"
         calls = _chunks(_engine([self._FIRST, second]), _request())[-1].tool_calls
