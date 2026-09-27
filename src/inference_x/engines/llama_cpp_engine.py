@@ -8,13 +8,10 @@ why each field below is reported the way it is (D1 to D7).
 
 from __future__ import annotations
 
-import ctypes
 import hashlib
 import json
 import logging
 import os
-import signal
-import socket
 import subprocess
 import time
 from collections.abc import AsyncGenerator
@@ -25,6 +22,7 @@ import httpx
 
 from inference_x.engines.base import BaseEngine, EngineUnavailableError
 from inference_x.utils.llama_cpp_plan import BINARY_ENV, find_llama_server
+from inference_x.utils.process import die_with_parent, free_port
 from inference_x.routing.admission import ContextTooLongError
 from inference_x.schemas.chat import (
     ChatCompletionChoice,
@@ -39,7 +37,6 @@ logger = logging.getLogger(__name__)
 
 _STARTUP_TIMEOUT_ENV = "INFERENCE_X_LLAMA_STARTUP_TIMEOUT_S"
 _COMPLETION_TIMEOUT_S = 300.0
-_PR_SET_PDEATHSIG = 1
 _LOG_TAIL_LINES = 20
 
 
@@ -70,26 +67,6 @@ def _sha256(path: Path) -> str:
         while chunk := fh.read(8 << 20):
             digest.update(chunk)
     return digest.hexdigest()
-
-
-def _free_port() -> int:
-    # ponytail: bind-then-release has a small race; losing it makes llama-server
-    # fail to bind and exit, which startup reports rather than misroutes.
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
-
-
-def _die_with_parent() -> None:
-    """Runs in the child: have the kernel SIGTERM llama-server if InferenceX dies.
-
-    The signal fires when the thread that spawned the child exits; engines are
-    built on the startup thread, which lives as long as the process.
-    """
-    try:
-        ctypes.CDLL("libc.so.6", use_errno=True).prctl(_PR_SET_PDEATHSIG, signal.SIGTERM)
-    except OSError:
-        pass
 
 
 def _error_detail(response: httpx.Response) -> tuple[str | None, str]:
@@ -125,7 +102,7 @@ class LlamaCppEngine(BaseEngine):
         self._weights_sha256 = _sha256(gguf)
         logger.info("GGUF sha256 %s (%.1fs)", self._weights_sha256, time.monotonic() - started)
 
-        self._base_url = f"http://127.0.0.1:{_free_port()}"
+        self._base_url = f"http://127.0.0.1:{free_port()}"
         args = [
             binary, "-m", str(gguf), "-c", str(self._max_model_len), "-np", "1",
             "--host", "127.0.0.1", "--port", self._base_url.rsplit(":", 1)[1],
@@ -144,7 +121,7 @@ class LlamaCppEngine(BaseEngine):
         logger.info("Starting llama-server for model=%s (log: %s)", self._model_name, self._log_path)
         with self._log_path.open("wb") as log:
             self._process = subprocess.Popen(
-                args, stdout=log, stderr=subprocess.STDOUT, preexec_fn=_die_with_parent
+                args, stdout=log, stderr=subprocess.STDOUT, preexec_fn=die_with_parent
             )
         self._client = httpx.Client(base_url=self._base_url, timeout=10.0)
         try:

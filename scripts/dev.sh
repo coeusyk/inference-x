@@ -11,7 +11,7 @@ case "$cmd" in
   sync)
     uv sync
     ;;
-  serve)
+  serve|supervise)
     # Preserve shell/cmdline INFERENCE_X_* before sourcing .env (match Python dotenv override=False).
     _cli_default_model="${INFERENCE_X_DEFAULT_MODEL:-}"
     _cli_loaded_models="${INFERENCE_X_LOADED_MODELS:-}"
@@ -38,7 +38,12 @@ case "$cmd" in
     fi
     # Set to 0.0.0.0 only behind a reverse proxy with TLS
     _host="${INFERENCE_X_HOST:-127.0.0.1}"
-    uv run uvicorn inference_x.api.main:app --host "$_host" --port 8000
+    if [[ "$1" == "supervise" ]]; then
+      # One endpoint for every registered model; workers start on demand.
+      uv run uvicorn inference_x.supervisor.app:app --host "$_host" --port 8000
+    else
+      uv run uvicorn inference_x.api.main:app --host "$_host" --port 8000
+    fi
     ;;
   test)
     uv run python -m pytest tests/unit/ -v
@@ -52,7 +57,8 @@ Usage: ./scripts/dev.sh <command>
 
 Commands:
   sync    Install/sync all dependencies (includes vllm)
-  serve   Start the API server (uses project .venv via uv run)
+  serve       Start the API server for one model (uses project .venv via uv run)
+  supervise   Start the supervisor: one endpoint, a worker per model loaded on demand
   test    Run unit tests
   smoke   Run HTTP smoke test against a running server
   help    Show this message
@@ -71,10 +77,9 @@ Examples:
   make benchmark MODEL=qwen2.5-0.5b # terminal 2 (after serve)
 
 Set INFERENCE_X_DEFAULT_MODEL to pick a model from config/models.yaml. Each
-server process serves exactly one model — for two models at once, run this
-in one terminal and a second process on another port in another, e.g.
-  INFERENCE_X_DEFAULT_MODEL=tinyllama-chat uv run uvicorn inference_x.api.main:app --port 8001
-(see playground/README.md, or just run `make playground` for compare mode).
+server process serves exactly one model. To use several models through one
+endpoint, run `supervise` instead: the request's `model` picks the worker, and
+INFERENCE_X_MAX_LOADED_MODELS (default 1) caps how many stay loaded.
 EOF
     ;;
 esac
