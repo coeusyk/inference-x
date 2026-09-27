@@ -217,15 +217,19 @@ Continue sessions, not by task completion.
 
 ```text
 V1-0  Aider-compatible serving surface (+ opt-in full manifest)
-  ↓
+  |
+      streaming tool calling for Continue (done, #41)
+  |
+      vLLM 0.30.0 qualification (runtime baseline for v1.0; not a feature)
+  |
 V1-1  llama.cpp backend (external llama-server, behind the Engine Boundary)
-  ↓
+  |
 V1-2  model lifecycle supervisor (above B6's one-model-per-process)
-  ↓
+  |
 V1-3  `inferencex` operator CLI (serve / ps / plan / doctor / lifecycle)
-  ↓
+  |
 V1-4  validation + hardening (realistic models, crash isolation, retuned admission)
-  ↓
+  |
 v1.0.0
 V1-5  Varex consumer validation — parallel, non-gating
 ```
@@ -254,29 +258,78 @@ Invariants carried forward:
   the part being reversed. Its reconstruction test (recomputing `run_id` from
   the returned manifest) is kept.
 
-### 10.3 Admission restoration `[OPEN]`
+### 10.3 Admission restoration `[DEFERRED]` (owner decision, 2026-09-27)
 
-DEC-061's own recorded negative consequence: an interactive request arriving
-behind a batch flood can still wait. Facts established 2026-09-26:
+"Admission restoration" is the question of how quickly an interactive request gets served when batch work already occupies the GPU. It is deferred, not solved. Nothing below changes current behavior.
 
-- The request's `priority` is consumed only by `routing/admission.py`; it is
-  **not** passed to vLLM.
-- The pinned and installed vLLM is **0.22.1** (`uv.lock`; `pyproject.toml`
-  says only `>=0.6.0`). Its `AsyncLLM.generate()` accepts `priority: int = 0`,
-  and `SchedulerConfig.policy` is `Literal['fcfs', 'priority']`, defaulting to
-  `fcfs`. Whether it helps already-running work (preemption) is unverified.
-- There is no admission-wait or waiter-count instrumentation today.
-  Engine-level queue timing (B3) and native `vllm:` gauges (B2) exist.
+#### The current admission decision
 
-Next step is measurement only. It must separate four things:
+DEC-061 is the decision record for how InferenceX admits requests today. Each model has one shared concurrency pool, sized to the number of sequences the engine runs at once. Requests enter it first come, first served. An `interactive` request waits for a slot up to a short bound (`admission_wait_s`, about 5 s) and a `batch` request up to a longer one (`batch_admission_wait_s`, 30 s); either one that times out gets a 429 with `Retry-After`. The number of queued `batch` requests is capped, and a `batch` request over the cap is rejected at once. A fixed reservation of slots for interactive traffic was considered and rejected, because idle reserved slots waste capacity and there was no evidence for how many to reserve. DEC-061 records its own known cost: an interactive request that arrives behind a batch flood can still wait.
 
-1. admission restoration
-2. engine scheduling restoration
-3. TTFT / service restoration
-4. KV / occupancy restoration
+#### What vLLM's priority scheduling actually does (verified from source)
 
-Then compare FIFO against vLLM-native priority. DEC-061 is revisited only on
-evidence. A permit becoming free is not GPU restoration.
+Checked in both the pinned vLLM 0.22.1 and the released vLLM 0.30.0 (2026-09-22); the behavior is the same in both:
+
+- `priority` can reorder requests that are already waiting inside vLLM. Lower values are served first, with ties broken by arrival time.
+- A newly arrived high-priority request does **not** evict running work just to start sooner. When all sequence slots are busy or cache space is short, vLLM's waiting-queue loop simply stops for that step.
+- When a running request needs more KV cache and none is free, vLLM evicts (preempts) a running request. Under the priority policy the victim is the lowest-priority running request; under the default policy it is the most recently added one.
+- Neither version has a `max_num_active_seqs` option. That option exists only on vLLM `main`, added by PR #56758 (merged 2026-09-17, after the 0.30 release branch had diverged). It separates "how many requests may run" from "how large the runner and CUDA graphs are sized". No plan here depends on it being released.
+
+A request's `priority` is still consumed only by `routing/admission.py` and is not passed to vLLM.
+
+#### Why the first proposed experiment was insufficient
+
+The first plan compared two arms:
+
+- **A: current admission plus normal vLLM scheduling.** A valid baseline.
+- **B: current admission plus vLLM priority scheduling.** Only a control. InferenceX admission lets no more requests into vLLM than the model's effective concurrency, so the queue forms in InferenceX, in front of vLLM, and vLLM's waiting queue is nearly empty. Its priority policy has almost nothing to reorder. A null result from B would describe that setup; it would not show that vLLM priority is ineffective.
+
+If the work resumes, it needs a third arm:
+
+- **C: an experiment-only admission setting that lets more requests into vLLM than can run at once.** A real waiting queue then exists inside vLLM and its priority policy can act. C is an experiment, **not** an approved production architecture.
+
+Two limits apply even to C:
+
+- Priority does not let a waiting interactive request displace batch work that is already running. Batch generation length, meaning how long running batch work takes to finish, stays a major variable in how quickly service is restored.
+- Moving the queue into vLLM bypasses what InferenceX admission provides unless a production design explicitly keeps it: context-length validation, OpenAI-shaped rejections, output-budget resolution, KV-cache token reservation, bounded interactive and batch waits, clean 429 plus `Retry-After`, the batch waiter cap, and truthful `resolved` and `warnings`. vLLM scheduling does not replace InferenceX admission.
+
+#### Why it is deferred
+
+1. It is not a v1.0 product blocker.
+2. InferenceX is primarily a single-developer local inference server. Heavy contention between interactive and batch traffic is not a dominant daily workflow today.
+3. The large Varex batch use case (Varex is the downstream prompt-evaluation consumer that runs batches of up to about 200 requests) is already non-blocking and deferred (section 11).
+4. Restoration measurements are only meaningful on the vLLM version intended for v1.0.
+5. Moving from vLLM 0.22.1 to 0.30.0 changes behavior these measurements depend on: a KV-cache watermark meant to reduce preemptions (0.24), a PyTorch upgrade (2.13, in 0.27), a Transformers upgrade (5.15, in 0.28), and a new default model runner, Model Runner V2 (0.29). Measurements taken on 0.22.1 would have to be redone after the upgrade.
+
+#### When it resumes
+
+The investigation resumes only after vLLM 0.30.0 qualification is complete **and** at least one of these is observed:
+
+1. A real interactive request gets a 429 because it timed out waiting behind batch work.
+2. Under a real mixed workload, interactive time-to-first-token exceeds 2x the uncontended p95. For example, an evaluation batch is running while Continue or another interactive client is in use.
+3. Varex, or another real workload, again needs large concurrent batch traffic.
+
+These are triggers to **investigate**. They are not automatic triggers to change DEC-061's admission policy.
+
+#### Discipline for the future experiment
+
+- Every compared run uses the same qualified vLLM version.
+- Admission wait and vLLM queue time are measured separately: admission wait from the client (the stream's first metadata event is sent as soon as admission completes), vLLM queue time from the engine's own timing. They come from different clocks and are not subtracted from each other.
+- End-to-end time-to-first-token is a primary, user-visible metric.
+- Concurrency is meaningful: not a `max_num_seqs=1` model.
+- There is enough KV-cache pressure when testing vLLM's priority-aware preemption path.
+- Prefix caching is controlled or prompts are varied, so cache hits do not flatter the results.
+- Output budgets are explicit.
+- Warm-up, JIT compilation and CUDA-graph capture are excluded from measurements.
+- Other GPU processes are stopped.
+- Trials are repeated, and medians and p95 are reported.
+- Models are realistic, not only `opt-125m`.
+
+Candidate decision thresholds, **an experimental proposal only**, not architecture:
+
+- **Keep DEC-061 as it is** if, in A, no interactive request gets a 429 and interactive p95 time-to-first-token stays within 2x of uncontended.
+- **Keep DEC-061 and add vLLM priority** only if C cuts the interactive p95 of admission wait plus vLLM queue time by at least 50%, costs batch throughput no more than 10%, shows no batch starvation, **and** a production design keeps InferenceX admission's guarantees.
+- **Reopen DEC-061** if even C does not restore interactive service, because running batch work cannot be displaced.
 
 ## 11. Intentionally deferred
 
@@ -290,6 +343,7 @@ evidence. A permit becoming free is not GPU restoration.
 - Auth / multi-tenancy (loopback personal use, DEC-DEFER-01).
 - A generalized borrow/restore or MoFlux-style capacity framework.
 - Batch scaling to ~200 requests (a Varex concern, not a daily-driver one).
+- Admission restoration (interactive service under batch contention); see section 10.3 for the verified facts and the resume triggers.
 - Deep hardware optimization beyond the v1.0 baseline.
 
 ## 12. Known v0.6 limitations → v1.0 treatment
